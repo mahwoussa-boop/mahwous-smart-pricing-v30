@@ -2166,31 +2166,14 @@ if page == "📊 لوحة التحكم":
         _prev_our_df = st.session_state.get("our_df")
         if _prev_our_df is not None and not getattr(_prev_our_df, "empty", True):
             st.info("🤖 **تحليل تلقائي بعد الكشط** — يستخدم منتجاتك المحفوظة + بيانات المنافسين الجديدة")
-            import os as _os_auto
-            _auto_csv_path = _os_auto.path.join(
-                _os_auto.environ.get("DATA_DIR", "data"), "competitors_latest.csv"
-            )
             _auto_comp_dfs = {}
-            # First try: DB competitor store (Phase 1 cumulative)
+            # Source of truth: DB competitor store only
             _db_stats = get_competitor_store_stats()
             if _db_stats.get("total_products", 0) > 0:
                 _db_df = get_competitor_products_df()
                 if not _db_df.empty and "competitor" in _db_df.columns:
                     for _cn, _cg in _db_df.groupby("competitor", sort=False):
                         _auto_comp_dfs[str(_cn)] = _cg.reset_index(drop=True)
-            # Fallback: CSV file
-            if not _auto_comp_dfs and _os_auto.path.exists(_auto_csv_path):
-                try:
-                    _csv_df = pd.read_csv(_auto_csv_path, encoding="utf-8-sig")
-                    _scol = next((c for c in _csv_df.columns if str(c).strip().lower() in ("store", "domain", "المتجر", "المنافس")), None)
-                    if _scol:
-                        for _sn, _sg in _csv_df.groupby(_scol, sort=False):
-                            _sk = str(_sn).replace("https://","").replace("http://","").strip("/").split("/")[0]
-                            _auto_comp_dfs[_sk or "auto"] = _sg.reset_index(drop=True)
-                    else:
-                        _auto_comp_dfs["competitors_latest.csv"] = _csv_df
-                except Exception:
-                    pass
             if _auto_comp_dfs:
                 with st.spinner(f"🤖 جاري التحليل التلقائي — {sum(len(v) for v in _auto_comp_dfs.values()):,} منتج منافس..."):
                     _auto_adf, _auto_audit = run_full_analysis(
@@ -2237,23 +2220,11 @@ if page == "📊 لوحة التحكم":
     )
 
     # ── جسر الكشط التلقائي (Auto-Scraper Bridge) ─────────────────────────
-    import os as _os_dash
-    _AUTO_CSV = _os_dash.path.join(
-        _os_dash.environ.get("DATA_DIR", "data"), "competitors_latest.csv"
-    )
     _db_auto_df = get_competitor_products_df()
     _auto_available = not _db_auto_df.empty
     _auto_rows = int(len(_db_auto_df)) if _auto_available else 0
-    if not _auto_available:
-        _auto_available = _os_dash.path.exists(_AUTO_CSV)
 
     if _auto_available:
-        if _auto_rows <= 0:
-            try:
-                with open(_AUTO_CSV, encoding="utf-8-sig") as _af:
-                    _auto_rows = sum(1 for _ in _af) - 1
-            except Exception:
-                _auto_rows = 0
         st.markdown(
             f'<div style="background:#0a2a0a;border:1px solid #00C853;border-radius:8px;'
             f'padding:10px 14px;margin:6px 0;font-size:.88rem">'
@@ -2291,7 +2262,7 @@ if page == "📊 لوحة التحكم":
     else:
         comp_files = None  # غير مستخدم عند التحميل التلقائي
         st.success(
-            f"✅ سيُستخدم الملف الآلي: `{_AUTO_CSV}` ({_auto_rows:,} منتج)"
+            f"✅ سيُستخدم المخزن التراكمي بقاعدة البيانات ({_auto_rows:,} منتج)"
         )
 
     if our_file is not None:
@@ -2411,8 +2382,7 @@ if page == "📊 لوحة التحكم":
                         try:
                             _auto_df = get_competitor_products_df()
                             if _auto_df is None or _auto_df.empty:
-                                # Fallback legacy CSV
-                                _auto_df = pd.read_csv(_AUTO_CSV, encoding="utf-8-sig")
+                                raise ValueError("لا توجد بيانات منافسين في قاعدة البيانات")
                             _auto_store_col = next(
                                 (
                                     _c for _c in _auto_df.columns
@@ -4956,7 +4926,18 @@ elif page == "🕷️ كشط المنافسين":
     _sp_c3.metric("🔍 بدون سعر", f"{_sp_no_price:,}")
     _sp_c4.metric("📊 تغطية", f"{_sp_with_price*100//max(_sp_total,1)}%")
 
-    # ── Product Table ────────────────────────────────────────────────────
+    def _display_product_cards(_df: pd.DataFrame) -> None:
+        _cols = st.columns(3)
+        for _idx, _row in _df.iterrows():
+            with _cols[_idx % 3]:
+                _img = str(_row.get("image_url", "") or "").strip()
+                if _img:
+                    st.image(_img, use_container_width=True)
+                st.markdown(f"**{str(_row.get('product_name', '') or '').strip()}**")
+                st.markdown(f"💰 {float(_row.get('price', 0) or 0):.2f} SAR")
+                st.caption(str(_row.get("competitor", "") or ""))
+
+    # ── Product Grid/Table ───────────────────────────────────────────────
     if _sp_total > 0:
         _sel_comp = st.selectbox(
             "المنافس",
@@ -4965,12 +4946,21 @@ elif page == "🕷️ كشط المنافسين":
         )
         _comp_filter = "" if _sel_comp == "الكل" else _sel_comp
         _local_prods_df = get_competitor_products_df(_comp_filter)
+        _view_mode = st.radio(
+            "طريقة العرض",
+            ["بطاقات", "جدول"],
+            horizontal=True,
+            key="spider_view_mode",
+        )
 
         if not _local_prods_df.empty:
-            _display_cols = [c for c in ("product_name", "competitor", "price", "brand", "updated_at") if c in _local_prods_df.columns]
-            _col_rename = {"product_name": "المنتج", "competitor": "المنافس", "price": "السعر (ر.س)", "brand": "الماركة", "updated_at": "آخر تحديث"}
-            _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
-            st.dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
+            if _view_mode == "بطاقات":
+                _display_product_cards(_local_prods_df.head(60))
+            else:
+                _display_cols = [c for c in ("product_name", "competitor", "price", "brand", "updated_at") if c in _local_prods_df.columns]
+                _col_rename = {"product_name": "المنتج", "competitor": "المنافس", "price": "السعر (ر.س)", "brand": "الماركة", "updated_at": "آخر تحديث"}
+                _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
+                st.dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
         else:
             st.info("لا توجد منتجات لهذا المنافس.")
     else:
@@ -5016,24 +5006,24 @@ elif page == "🕷️ كشط المنافسين":
                 _adv_prog.progress(1.0, text="❌ خطأ")
                 st.error(f"❌ خطأ: {_adv_err}")
 
-    # ── Export & Analysis Trigger ────────────────────────────────────────
-    if _os_scraper.path.exists(_OUTPUT_CSV):
-        _csv_size_kb = round(_os_scraper.path.getsize(_OUTPUT_CSV) / 1024, 1)
-        _csv_rows = 0
-        try:
-            with open(_OUTPUT_CSV, encoding="utf-8-sig") as _f:
-                _csv_rows = sum(1 for _ in _f) - 1
-        except Exception:
-            pass
+    # ── Export & Analysis Trigger (DB source of truth) ───────────────────
+    if _sp_total > 0:
+        _export_df = get_competitor_products_df()
+        _export_rows = int(len(_export_df)) if _export_df is not None else 0
+        _export_bytes = (
+            _export_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+            if _export_rows > 0 else b""
+        )
+        _csv_size_kb = round(len(_export_bytes) / 1024, 1) if _export_bytes else 0.0
 
         _dl_col, _go_col = st.columns(2)
         with _dl_col:
-            with open(_OUTPUT_CSV, "rb") as _fout:
-                st.download_button(
-                    f"📥 CSV ({_csv_size_kb} KB · {_csv_rows:,} منتج)",
-                    data=_fout.read(), file_name="competitors_latest.csv",
-                    mime="text/csv", key="sc_download_csv", use_container_width=True,
-                )
+            st.download_button(
+                f"📥 CSV من DB ({_csv_size_kb} KB · {_export_rows:,} منتج)",
+                data=_export_bytes, file_name="competitors_store_export.csv",
+                mime="text/csv", key="sc_download_csv", use_container_width=True,
+                disabled=(_export_rows == 0),
+            )
         with _go_col:
             if st.button("🚀 تحليل شامل", key="sc_go_match", type="primary", use_container_width=True):
                 st.session_state._nav_pending = "📊 لوحة التحكم"
