@@ -1060,52 +1060,66 @@ def upsert_competitor_products(
     inserted = updated = 0
     today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    for p in products:
-        pname = str(p.get(name_key, "") or "").strip()
-        if not pname or len(pname) < 2:
-            continue
-        norm = _normalize_for_store(pname)
+    # Phase 4: Atomic transaction — prevents race conditions during high-volume scraping
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+    except Exception:
+        pass  # SQLite auto-transaction fallback
+
+    try:
+        for p in products:
+            pname = str(p.get(name_key, "") or "").strip()
+            if not pname or len(pname) < 2:
+                continue
+            norm = _normalize_for_store(pname)
+            try:
+                price = float(str(p.get(price_key, 0) or 0).replace(",", ""))
+            except (ValueError, TypeError):
+                price = 0.0
+
+            existing = conn.execute(
+                "SELECT id FROM competitor_products_store WHERE competitor=? AND norm_name=?",
+                (competitor, norm)
+            ).fetchone()
+
+            if existing:
+                conn.execute(
+                    """UPDATE competitor_products_store
+                       SET price=?, updated_at=?,
+                           image_url=COALESCE(NULLIF(?,''),(SELECT image_url FROM competitor_products_store WHERE id=?)),
+                           product_url=COALESCE(NULLIF(?,''),(SELECT product_url FROM competitor_products_store WHERE id=?))
+                       WHERE id=?""",
+                    (price, today,
+                     str(p.get("image_url","") or ""), existing[0],
+                     str(p.get("product_url","") or ""), existing[0],
+                     existing[0])
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """INSERT INTO competitor_products_store
+                       (competitor, product_name, norm_name, price, image_url,
+                        product_url, brand, size, gender, added_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (competitor, pname, norm, price,
+                     str(p.get("image_url","") or ""),
+                     str(p.get("product_url","") or ""),
+                     str(p.get("brand","") or ""),
+                     str(p.get("size","") or ""),
+                     str(p.get("gender","") or "للجنسين"),
+                     today, today)
+                )
+                inserted += 1
+
+        conn.commit()
+    except Exception:
         try:
-            price = float(str(p.get(price_key, 0) or 0).replace(",", ""))
-        except (ValueError, TypeError):
-            price = 0.0
-
-        existing = conn.execute(
-            "SELECT id FROM competitor_products_store WHERE competitor=? AND norm_name=?",
-            (competitor, norm)
-        ).fetchone()
-
-        if existing:
-            conn.execute(
-                """UPDATE competitor_products_store
-                   SET price=?, updated_at=?,
-                       image_url=COALESCE(NULLIF(?,''),(SELECT image_url FROM competitor_products_store WHERE id=?)),
-                       product_url=COALESCE(NULLIF(?,''),(SELECT product_url FROM competitor_products_store WHERE id=?))
-                   WHERE id=?""",
-                (price, today,
-                 str(p.get("image_url","") or ""), existing[0],
-                 str(p.get("product_url","") or ""), existing[0],
-                 existing[0])
-            )
-            updated += 1
-        else:
-            conn.execute(
-                """INSERT INTO competitor_products_store
-                   (competitor, product_name, norm_name, price, image_url,
-                    product_url, brand, size, gender, added_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (competitor, pname, norm, price,
-                 str(p.get("image_url","") or ""),
-                 str(p.get("product_url","") or ""),
-                 str(p.get("brand","") or ""),
-                 str(p.get("size","") or ""),
-                 str(p.get("gender","") or "للجنسين"),
-                 today, today)
-            )
-            inserted += 1
-
-    conn.commit()
-    conn.close()
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
     return {"inserted": inserted, "updated": updated}
 
 
