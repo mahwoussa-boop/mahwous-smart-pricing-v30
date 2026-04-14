@@ -1160,12 +1160,16 @@ def get_competitor_store_stats() -> dict:
     init_competitor_store()
     conn = get_db()
     total = conn.execute("SELECT COUNT(*) FROM competitor_products_store").fetchone()[0]
+    with_price = conn.execute(
+        "SELECT COUNT(*) FROM competitor_products_store WHERE price > 0.009"
+    ).fetchone()[0]
     comps = conn.execute(
         "SELECT competitor, COUNT(*) as cnt FROM competitor_products_store GROUP BY competitor"
     ).fetchall()
     conn.close()
     return {
         "total_products": total,
+        "with_price": int(with_price),
         "by_competitor": {r[0]: r[1] for r in comps},
     }
 
