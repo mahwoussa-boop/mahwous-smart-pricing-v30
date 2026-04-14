@@ -5049,6 +5049,55 @@ elif page == "🕷️ كشط المنافسين":
                 st.rerun()
 
     # ════════════════════════════════════════════════════════════════════════
+    #  القسم 5.5 — كشط الأسعار المتقدم v30 (منتجات بدون سعر)
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    with st.expander("🕷️ كشط الأسعار المتقدم v30 (منتجات بدون سعر)", expanded=False):
+        st.caption("يكشط صفحات المنتجات التي لديها URLs لكن بدون أسعار في قاعدة البيانات.")
+        _adv_c1, _adv_c2 = st.columns([2, 1])
+        with _adv_c1:
+            _adv_store = st.text_input(
+                "اسم المنافس (فارغ = كل المنافسين)",
+                value="", key="adv_scraper_store_filter",
+                placeholder="مثال: قولدن سنت",
+            )
+        with _adv_c2:
+            _adv_limit = st.number_input("الحد الأقصى", min_value=100, max_value=10000, value=2000, step=500, key="adv_scraper_limit")
+
+        if st.button("🚀 بدء كشط الأسعار المفقودة", key="btn_adv_scraper_v30", type="primary", use_container_width=True):
+            _adv_prog = st.progress(0, text="جاري الكشط...")
+            _adv_status = st.empty()
+
+            def _adv_progress(done, total):
+                pct = done / max(total, 1)
+                _adv_prog.progress(min(pct, 1.0), text=f"🕷️ {done}/{total} منتج...")
+
+            try:
+                import asyncio as _aio
+                from engines.scraper_v30_advanced import run_advanced_price_scraping
+
+                _adv_result = _aio.run(run_advanced_price_scraping(
+                    store_filter=_adv_store.strip(),
+                    limit=int(_adv_limit),
+                    progress_cb=_adv_progress,
+                ))
+                _adv_prog.progress(1.0, text="✅ اكتمل")
+                _msg = _adv_result.get("message", "")
+                if _adv_result.get("prices_found", 0) > 0:
+                    st.success(_msg)
+                else:
+                    st.info(_msg)
+                st.caption(
+                    f"📊 كُشط: {_adv_result.get('total_scraped',0)} | "
+                    f"أسعار: {_adv_result.get('prices_found',0)} | "
+                    f"محدّث: {_adv_result.get('updated_in_db',0)} | "
+                    f"أخطاء: {_adv_result.get('errors',0)}"
+                )
+            except Exception as _adv_err:
+                _adv_prog.progress(1.0, text="❌ خطأ")
+                st.error(f"❌ خطأ في الكشط المتقدم: {_adv_err}")
+
+    # ════════════════════════════════════════════════════════════════════════
     #  القسم 6 — أدوات الكشط المتقدمة (مدمجة في expander بدل tab منفصل)
     # ════════════════════════════════════════════════════════════════════════
     _scraper_advanced_runtime_mod = _get_scraper_advanced_module()

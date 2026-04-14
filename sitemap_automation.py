@@ -184,23 +184,56 @@ async def process_store_sitemap(session, store_name, store_url, sitemap_url):
         logger.error(f"❌ خطأ أثناء معالجة {store_name}: {str(e)}")
         return 0
 
+def _load_competitors() -> list:
+    """تحميل المنافسين — يدعم الشكل المُثرى (v30) والشكل القديم (URLs فقط)."""
+    # أولوية: الملف المُثرى v30
+    v30_file = os.path.join("data", "competitors_list_v30.json")
+    legacy_file = os.path.join("data", "competitors_list.json")
+
+    target = v30_file if os.path.exists(v30_file) else legacy_file
+    if not os.path.exists(target):
+        logger.error("❌ ملف المنافسين غير موجود")
+        return []
+
+    with open(target, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    entries = []
+    for item in raw:
+        if isinstance(item, dict):
+            # شكل مُثرى: {"name": ..., "store_url": ..., "sitemap_url": ...}
+            entries.append({
+                "name": item.get("name", ""),
+                "store_url": item.get("store_url", ""),
+                "sitemap_url": item.get("sitemap_url", ""),
+            })
+        elif isinstance(item, str):
+            # شكل قديم: URL فقط
+            domain = item.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
+            entries.append({
+                "name": domain,
+                "store_url": item,
+                "sitemap_url": f"{item.rstrip('/')}/sitemap.xml",
+            })
+    return entries
+
+
 async def run_automation():
     """تشغيل الأتمتة لجميع المنافسين المسجلين"""
-    competitors_file = os.path.join("data", "competitors_list.json")
-    if not os.path.exists(competitors_file):
-        logger.error("❌ ملف المنافسين غير موجود")
-        return
-        
-    with open(competitors_file, "r", encoding="utf-8") as f:
-        stores = json.load(f)
-        
+    entries = _load_competitors()
+    if not entries:
+        return 0
+
     async with aiohttp.ClientSession() as session:
         tasks = []
-        for store_url in stores:
-            domain = store_url.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
-            sitemap_url = f"{store_url.rstrip('/')}/sitemap.xml"
-            tasks.append(process_store_sitemap(session, domain, store_url, sitemap_url))
-        
+        for entry in entries:
+            tasks.append(process_store_sitemap(
+                session,
+                entry["name"],
+                entry["store_url"],
+                entry["sitemap_url"],
+            ))
+
         results = await asyncio.gather(*tasks)
         total_saved = sum(r for r in results if r)
         logger.info(f"🏁 انتهت الأتمتة. إجمالي المنتجات المكتشفة: {total_saved}")

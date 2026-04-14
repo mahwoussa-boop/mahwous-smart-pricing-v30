@@ -1,33 +1,11 @@
-.*
-!.gitignore
-!.dockerignore
-.env
 __pycache__/
 *.pyc
-.DS_Store
-data/*.pid
-data/*.json
-data/*.csv
-*.log
-node_modules/
-venv/
-.vscode/
-.idea/
-Downloads/
-terminal_full_output/
-upload/
-skills/
-sandbox.txt
+*.pyo
+*.db
+.streamlit/secrets.toml
 
-__pycache__/
-*.pyc
-.DS_Store
-data/*.pid
-data/*.json
-data/*.csv
-*.log
-.git/
-node_modules/
-venv/
-.vscode/
-.idea/
+# ملفات البيانات المحلية — لا تُرفع لـ GitHub أبداً
+# يتم نقلها لـ Railway عبر متغيرات البيئة (Base64) أو Railway Volume
+data/
+*.csv
+*.json
