@@ -4932,48 +4932,38 @@ elif page == "🕷️ كشط المنافسين":
         _sel_comp = st.selectbox("اختر المنافس لاستعراض منتجاته", ["الكل"] + list(_store_stats.get("by_competitor", {}).keys()))
         _comp_filter = "" if _sel_comp == "الكل" else _sel_comp
         _local_prods_df = get_competitor_products_df(_comp_filter)
-        
+
         if not _local_prods_df.empty:
-            st.caption(f"تم العثور على {len(_local_prods_df)} منتج في قاعدة البيانات المحلية")
-            
-            # عرض جدول مبسط مع زر مقارنة
-            for _idx, _row in _local_prods_df.head(50).iterrows():
-                _c1, _c2, _c3, _c4 = st.columns([1, 3, 1, 1])
-                with _c1:
-                    if _row.get("image_url"):
-                        st.image(_row["image_url"], width=50)
-                    else:
-                        st.markdown("🖼️")
-                with _c2:
-                    st.markdown(f"**{_row['product_name']}**")
-                    st.caption(f"المنافس: {_row['competitor']}")
-                with _c3:
-                    st.markdown(f"{safe_float(_row['price']):.2f} ر.س")
-                with _c4:
-                    if st.button("🔍 مقارنة", key=f"comp_btn_{_idx}"):
-                        # الربط مع محرك v21 للمقارنة الفورية
-                        with st.spinner("جاري المطابقة مع منتجاتك..."):
-                            # v21 Engine Call: نمرر اسم منتج المنافس وسعره للبحث عن أقرب مطابقة في منتجاتنا
-                            _match_res = analyze_product_inline(
-                                our_name=_row['product_name'], # نستخدم نفس الاسم كبداية للبحث
-                                our_price=0.0, 
-                                comp_name=_row['product_name'], 
-                                comp_price=safe_float(_row['price']), 
-                                comp_source=_row['competitor'],
-                                match_pct=100.0
-                            )
-                            st.session_state["inline_match_result"] = _match_res
-                            st.session_state["inline_match_product"] = _row['product_name']
-                        st.rerun()
-            
-            if "inline_match_result" in st.session_state:
-                st.markdown("---")
-                st.subheader(f"🎯 نتيجة المطابقة لـ: {st.session_state['inline_match_product']}")
-                render_analysis_result(st.session_state["inline_match_result"])
-                if st.button("❌ إغلاق النتيجة"):
-                    del st.session_state["inline_match_result"]
-                    del st.session_state["inline_match_product"]
-                    st.rerun()
+            # ── إحصائيات سريعة ──────────────────────────────────────────
+            _lp_total = len(_local_prods_df)
+            _lp_with_price = (_local_prods_df["price"].apply(safe_float) > 0).sum() if "price" in _local_prods_df.columns else 0
+            _lp_c1, _lp_c2, _lp_c3 = st.columns(3)
+            _lp_c1.metric("📦 إجمالي المنتجات", f"{_lp_total:,}")
+            _lp_c2.metric("💰 بسعر", f"{_lp_with_price:,}")
+            _lp_c3.metric("📊 نسبة التغطية", f"{_lp_with_price*100//_lp_total}%" if _lp_total else "0%")
+
+            # ── جدول مدمج — يتحمل 50,000 صف بدون تجميد ────────────────
+            _display_cols = []
+            _col_config = {}
+            for _dc in ("product_name", "competitor", "price", "brand", "updated_at"):
+                if _dc in _local_prods_df.columns:
+                    _display_cols.append(_dc)
+
+            _col_rename = {
+                "product_name": "المنتج",
+                "competitor": "المنافس",
+                "price": "السعر (ر.س)",
+                "brand": "الماركة",
+                "updated_at": "آخر تحديث",
+            }
+            _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
+
+            st.dataframe(
+                _show_df,
+                use_container_width=True,
+                height=450,
+                hide_index=True,
+            )
         else:
             st.info("لا توجد منتجات لهذا المنافس حالياً.")
     else:
@@ -5091,6 +5081,7 @@ elif page == "🕷️ كشط المنافسين":
                     f"📊 كُشط: {_adv_result.get('total_scraped',0)} | "
                     f"أسعار: {_adv_result.get('prices_found',0)} | "
                     f"محدّث: {_adv_result.get('updated_in_db',0)} | "
+                    f"🤖 AI: {_adv_result.get('ai_used',0)} | "
                     f"أخطاء: {_adv_result.get('errors',0)}"
                 )
             except Exception as _adv_err:
