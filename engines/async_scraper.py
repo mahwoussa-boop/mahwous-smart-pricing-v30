@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import pandas as pd
+from lxml import etree
 
 if os.name == "nt":
     try:
@@ -55,6 +56,10 @@ _RE_OG_URL      = _re.compile(r'<meta[^>]+property=["\']og:url["\'][^>]+content=
 _RE_OG_PRICE    = _re.compile(r'<meta[^>]+property=["\']product:price:amount["\'][^>]+content=["\']([^"\']+)["\']', _re.I)
 _RE_PRICE_SPAN  = _re.compile(r'class="[^"]*price[^"]*"[^>]*>\s*(?:<[^>]+>)?([\d,. ]+)', _re.I)
 _RE_H1_PRODUCT  = _re.compile(r'<h1[^>]*>\s*([^<]{3,120}?)\s*</h1>', _re.S | _re.I)
+_RE_SMART_PRICE_PATTERNS = [
+    _re.compile(r'(\d+(?:[\.,]\d+)?)\s*(?:ر\.س|SAR|SR)', _re.I),
+    _re.compile(r'(?:ر\.س|SAR|SR)\s*(\d+(?:[\.,]\d+)?)', _re.I),
+]
 
 # ─── Anti-ban imports مُسبقة على مستوى الـ Module ─────────────────────────
 try:
@@ -94,6 +99,34 @@ def _has_valid_price(row: dict | None) -> bool:
 def _proxy_pool_from_env() -> List[str]:
     raw = os.environ.get("SCRAPER_PROXIES", "")
     return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def extract_price_smartly(html_content: str) -> float:
+    if not html_content:
+        return 0.0
+    for pattern in _RE_SMART_PRICE_PATTERNS:
+        match = pattern.search(html_content)
+        if not match:
+            continue
+        raw = (match.group(1) or "").strip().replace(",", "")
+        try:
+            return float(raw)
+        except Exception:
+            continue
+    return 0.0
+
+
+async def fetch_sitemap(session: aiohttp.ClientSession, url: str) -> List[str]:
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20), ssl=False) as response:
+            if response.status != 200:
+                return []
+            content = await response.read()
+        tree = etree.fromstring(content)
+        return [loc.text.strip() for loc in tree.xpath("//*[local-name()='loc']") if getattr(loc, "text", None)]
+    except Exception:
+        return []
 
 
 def _v30_row_from_result(result: dict | None, store_url: str) -> dict | None:
@@ -588,6 +621,8 @@ async def fetch_product(
                     pprice = float(price_match.group(1).replace(",", "").replace(" ", ""))
                 except Exception:
                     pprice = 0.0
+        if pprice == 0.0:
+            pprice = extract_price_smartly(html)
 
         if not pname:
             h1_match = _RE_H1_PRODUCT.search(html)
@@ -642,12 +677,13 @@ async def scrape_one_store(
     store_url: str,
     progress: Progress,
     state: ScraperState,
-    concurrency: int = 10,
+    concurrency: int = 5,
     max_products: int = 0,
     resume: bool = True,
     single_mode: bool = False,
 ) -> List[dict]:
     domain = _domain(store_url)
+    concurrency = max(1, min(int(concurrency or 1), 5))
     cp     = state.get(domain, store_url)
 
     # Architectural Fix: NEVER skip if max_products is explicitly requested or in single UI mode
@@ -685,9 +721,24 @@ async def scrape_one_store(
 
         logger.info(f"🗺️ {domain} — يحلل Sitemap بالتخفي العميق…")
         try:
-            all_urls = await asyncio.wait_for(
-                sitemap_resolver.resolve(store_url), timeout=400
-            )
+            clean_base = store_url.rstrip("/")
+            candidate_sitemaps = [
+                f"{clean_base}/sitemap.xml",
+                f"{clean_base}/sitemap_index.xml",
+                f"{clean_base}/sitemap-1.xml",
+                f"{clean_base}/product-sitemap.xml",
+                f"{clean_base}/sitemap_products.xml",
+            ]
+            all_urls: List[str] = []
+            for sm_url in candidate_sitemaps:
+                links = await fetch_sitemap(session, sm_url)
+                if links:
+                    all_urls = links
+                    break
+            if not all_urls:
+                all_urls = await asyncio.wait_for(
+                    sitemap_resolver.resolve(store_url), timeout=400
+                )
         except asyncio.TimeoutError:
             state.mark_error(domain, "sitemap_timeout")
             return []
@@ -741,6 +792,22 @@ async def scrape_one_store(
                 )
                 if row:
                     rows.append(row)
+                    try:
+                        from utils.db_manager import upsert_competitor_products
+                        upsert_competitor_products(
+                            domain,
+                            [{
+                                "المنتج": row.get("name", ""),
+                                "السعر": row.get("price", 0),
+                                "image_url": row.get("image", ""),
+                                "product_url": row.get("url", ""),
+                                "brand": row.get("brand", ""),
+                                "size": "",
+                                "gender": "للجنسين",
+                            }],
+                        )
+                    except Exception as _db_exc:
+                        logger.debug("SQLite immediate write error: %s", _db_exc)
                     _consecutive_failures = 0  # Phase 2: reset on success
                 else:
                     _consecutive_failures += 1
@@ -877,7 +944,7 @@ async def scrape_one_store(
 
 def run_single_store(
     store_url: str,
-    concurrency: int = 10,
+    concurrency: int = 5,
     max_products: int = 0,
     force: bool = False,
 ) -> dict:
@@ -981,7 +1048,7 @@ def _count_csv_rows() -> int:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def run_scraper(
-    concurrency: int = 10,
+    concurrency: int = 5,
     max_products: int = 0,
     resume: bool = True,
 ) -> None:
@@ -1066,7 +1133,7 @@ def main():
                         help="رابط متجر واحد (فارغ = كل المتاجر)")
     parser.add_argument("--max-products", type=int, default=0,
                         help="أقصى عدد منتجات لكل متجر (0 = بلا حد)")
-    parser.add_argument("--concurrency", type=int, default=8,
+    parser.add_argument("--concurrency", type=int, default=5,
                         help="عدد الطلبات المتزامنة")
     parser.add_argument("--no-resume", action="store_true",
                         help="إعادة الكشط من الصفر (تجاهل نقاط الاستئناف)")
