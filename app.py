@@ -2241,16 +2241,19 @@ if page == "📊 لوحة التحكم":
     _AUTO_CSV = _os_dash.path.join(
         _os_dash.environ.get("DATA_DIR", "data"), "competitors_latest.csv"
     )
-    _auto_available = _os_dash.path.exists(_AUTO_CSV)
-    _auto_rows = 0   # ← يُهيَّأ دائماً لمنع NameError إذا تغيّرت حالة الملف بين reruns
+    _db_auto_df = get_competitor_products_df()
+    _auto_available = not _db_auto_df.empty
+    _auto_rows = int(len(_db_auto_df)) if _auto_available else 0
+    if not _auto_available:
+        _auto_available = _os_dash.path.exists(_AUTO_CSV)
 
     if _auto_available:
-        _auto_rows = 0
-        try:
-            with open(_AUTO_CSV, encoding="utf-8-sig") as _af:
-                _auto_rows = sum(1 for _ in _af) - 1
-        except Exception:
-            pass
+        if _auto_rows <= 0:
+            try:
+                with open(_AUTO_CSV, encoding="utf-8-sig") as _af:
+                    _auto_rows = sum(1 for _ in _af) - 1
+            except Exception:
+                _auto_rows = 0
         st.markdown(
             f'<div style="background:#0a2a0a;border:1px solid #00C853;border-radius:8px;'
             f'padding:10px 14px;margin:6px 0;font-size:.88rem">'
@@ -2404,24 +2407,28 @@ if page == "📊 لوحة التحكم":
 
                     comp_dfs = {}
                     if _auto_mode:
-                        # ── وضع الكشط التلقائي: تحميل CSV من القرص مع فصل كل متجر كمنافس مستقل ────────
+                        # ── وضع الكشط التلقائي: المصدر الأساسي DB (competitor_products_store) ────────
                         try:
-                            _auto_df = pd.read_csv(_AUTO_CSV, encoding="utf-8-sig")
+                            _auto_df = get_competitor_products_df()
+                            if _auto_df is None or _auto_df.empty:
+                                # Fallback legacy CSV
+                                _auto_df = pd.read_csv(_AUTO_CSV, encoding="utf-8-sig")
                             _auto_store_col = next(
                                 (
                                     _c for _c in _auto_df.columns
-                                    if str(_c).strip().lower() in ("store", "domain", "المتجر", "المنافس")
+                                    if str(_c).strip().lower() in (
+                                        "competitor", "store", "domain", "المتجر", "المنافس"
+                                    )
                                 ),
                                 None,
                             )
-
                             if _auto_store_col:
                                 _auto_df[_auto_store_col] = _auto_df[_auto_store_col].fillna("").astype(str).str.strip()
                                 _grouped_auto = _auto_df[_auto_df[_auto_store_col] != ""].groupby(_auto_store_col, sort=False)
                                 for _store_name, _store_df in _grouped_auto:
                                     _store_key = str(_store_name).strip()
                                     _store_key = _store_key.replace("https://", "").replace("http://", "").strip("/")
-                                    _store_key = _store_key.split("/")[0] or "competitors_latest.csv"
+                                    _store_key = _store_key.split("/")[0] or "competitors_auto"
                                     if _store_key in comp_dfs:
                                         comp_dfs[_store_key] = pd.concat(
                                             [comp_dfs[_store_key], _store_df.copy()],
@@ -2429,23 +2436,15 @@ if page == "📊 لوحة التحكم":
                                         )
                                     else:
                                         comp_dfs[_store_key] = _store_df.reset_index(drop=True).copy()
-
-                                _unassigned_auto = _auto_df[_auto_df[_auto_store_col] == ""]
-                                if not _unassigned_auto.empty:
-                                    comp_dfs["competitors_latest.csv"] = _unassigned_auto.reset_index(drop=True).copy()
-
-                                if comp_dfs:
-                                    st.caption(
-                                        f"✅ تم تحميل البيانات الآلية: {len(_auto_df):,} صف من {len(comp_dfs):,} متجر منافس"
-                                    )
-                                else:
-                                    comp_dfs["competitors_latest.csv"] = _auto_df
-                                    st.caption(f"✅ تم تحميل البيانات الآلية: {len(_auto_df):,} منتج")
+                            if comp_dfs:
+                                st.caption(
+                                    f"✅ تم تحميل البيانات الآلية: {len(_auto_df):,} صف من {len(comp_dfs):,} متجر منافس"
+                                )
                             else:
-                                comp_dfs["competitors_latest.csv"] = _auto_df
+                                comp_dfs["competitors_auto"] = _auto_df
                                 st.caption(f"✅ تم تحميل البيانات الآلية: {len(_auto_df):,} منتج")
                         except Exception as _ae:
-                            st.error(f"❌ فشل تحميل الملف الآلي: {_ae}")
+                            st.error(f"❌ فشل تحميل البيانات الآلية من قاعدة البيانات: {_ae}")
                     else:
                         # ── وضع الرفع اليدوي (CSV سلة/كشط → تعريف تلقائي ثم read_file احتياطاً) ──
                         for _ci, cf in enumerate(comp_files):
@@ -4307,6 +4306,22 @@ elif page == "🕷️ كشط المنافسين":
         except Exception:
             return {}
 
+    @st.cache_data(ttl=5, show_spinner=False)
+    def _load_db_rows_by_store() -> dict:
+        try:
+            _db_df = get_competitor_products_df()
+            if _db_df is None or _db_df.empty:
+                return {}
+            _key = "competitor" if "competitor" in _db_df.columns else (
+                "store" if "store" in _db_df.columns else None
+            )
+            if not _key:
+                return {}
+            _counts = _db_df[_key].astype(str).value_counts(dropna=False)
+            return {str(k): int(v) for k, v in _counts.to_dict().items()}
+        except Exception:
+            return {}
+
     def _read_live_store_progress(domain: str) -> dict:
         _live_file = _os_scraper.path.join(_DATA_SC, f"_sc_live_{domain}.json")
         try:
@@ -4570,10 +4585,10 @@ elif page == "🕷️ كشط المنافسين":
         with _sc_c3:
             st.number_input(
                 "طلبات متزامنة",
-                2, 30, 8,
+                1, 5, 5,
                 step=1,
                 key="sc_concurrency",
-                help="زيادة الرقم = أسرع لكن احتمال حظر أكبر. موصى به: 6–10",
+                help="زيادة الرقم = أسرع لكن احتمال حظر أكبر. الحد الآمن في v30 هو 5.",
                 disabled=_is_alive,
             )
 
@@ -4809,6 +4824,7 @@ elif page == "🕷️ كشط المنافسين":
         _all_stores_list = _load_stores()
         _state_map = _load_scraper_state_map()
         _csv_counts = _load_csv_rows_by_store(_OUTPUT_CSV)
+        _db_counts = _load_db_rows_by_store()
         if _all_stores_list:
             st.markdown("**📋 تفاصيل المتاجر:**")
             _html_items = []
@@ -4823,6 +4839,7 @@ elif page == "🕷️ كشط المنافسين":
                     _stores_res.get(_d),
                     _cp.get("rows_saved"),
                     _live.get("rows_saved"),
+                    _db_counts.get(_d),
                     _csv_counts.get(_d),
                 ]
                 _cnt = None
