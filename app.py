@@ -4922,145 +4922,64 @@ elif page == "🕷️ كشط المنافسين":
             st.button("🔄 تحديث يدوي", key="sc_manual_refresh")
 
     # ════════════════════════════════════════════════════════════════════════
-    #  القسم 5 — استعراض المنتجات المكتشفة (v26.0)
+    #  Spider Dashboard — Unified (Phase 4: merged Sections 5+5.5+6)
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.subheader("📦 المنتجات المكتشفة محلياً")
-    
+    st.subheader("🕷️ Spider Dashboard")
+
+    # ── Metrics Row ──────────────────────────────────────────────────────
     _store_stats = get_competitor_store_stats()
-    if _store_stats.get("total_products", 0) > 0:
-        _sel_comp = st.selectbox("اختر المنافس لاستعراض منتجاته", ["الكل"] + list(_store_stats.get("by_competitor", {}).keys()))
+    _sp_total = _store_stats.get("total_products", 0)
+    _sp_with_price = _store_stats.get("with_price", 0)
+    _sp_no_price = max(0, _sp_total - _sp_with_price)
+
+    _sp_c1, _sp_c2, _sp_c3, _sp_c4 = st.columns(4)
+    _sp_c1.metric("📦 إجمالي", f"{_sp_total:,}")
+    _sp_c2.metric("💰 بسعر", f"{_sp_with_price:,}")
+    _sp_c3.metric("🔍 بدون سعر", f"{_sp_no_price:,}")
+    _sp_c4.metric("📊 تغطية", f"{_sp_with_price*100//max(_sp_total,1)}%")
+
+    # ── Product Table ────────────────────────────────────────────────────
+    if _sp_total > 0:
+        _sel_comp = st.selectbox(
+            "المنافس",
+            ["الكل"] + list(_store_stats.get("by_competitor", {}).keys()),
+            key="spider_comp_filter",
+        )
         _comp_filter = "" if _sel_comp == "الكل" else _sel_comp
         _local_prods_df = get_competitor_products_df(_comp_filter)
 
         if not _local_prods_df.empty:
-            # ── إحصائيات سريعة ──────────────────────────────────────────
-            _lp_total = len(_local_prods_df)
-            _lp_with_price = (_local_prods_df["price"].apply(safe_float) > 0).sum() if "price" in _local_prods_df.columns else 0
-            _lp_c1, _lp_c2, _lp_c3 = st.columns(3)
-            _lp_c1.metric("📦 إجمالي المنتجات", f"{_lp_total:,}")
-            _lp_c2.metric("💰 بسعر", f"{_lp_with_price:,}")
-            _lp_c3.metric("📊 نسبة التغطية", f"{_lp_with_price*100//_lp_total}%" if _lp_total else "0%")
-
-            # ── جدول مدمج — يتحمل 50,000 صف بدون تجميد ────────────────
-            _display_cols = []
-            _col_config = {}
-            for _dc in ("product_name", "competitor", "price", "brand", "updated_at"):
-                if _dc in _local_prods_df.columns:
-                    _display_cols.append(_dc)
-
-            _col_rename = {
-                "product_name": "المنتج",
-                "competitor": "المنافس",
-                "price": "السعر (ر.س)",
-                "brand": "الماركة",
-                "updated_at": "آخر تحديث",
-            }
+            _display_cols = [c for c in ("product_name", "competitor", "price", "brand", "updated_at") if c in _local_prods_df.columns]
+            _col_rename = {"product_name": "المنتج", "competitor": "المنافس", "price": "السعر (ر.س)", "brand": "الماركة", "updated_at": "آخر تحديث"}
             _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
-
-            st.dataframe(
-                _show_df,
-                use_container_width=True,
-                height=450,
-                hide_index=True,
-            )
+            st.dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
         else:
-            st.info("لا توجد منتجات لهذا المنافس حالياً.")
+            st.info("لا توجد منتجات لهذا المنافس.")
     else:
         st.info("📭 قاعدة البيانات المحلية فارغة. ابدأ الكشط لجلب البيانات.")
 
-    # ════════════════════════════════════════════════════════════════════════
-    #  Phase 2: Auto-Analysis Trigger — fires ONCE per completed scrape job
-    #  CRITICAL: locked by finished_at timestamp to prevent infinite loops
-    #  from st_autorefresh (which reruns every 3s while scraper is alive).
-    # ════════════════════════════════════════════════════════════════════════
-    if (
-        _phase == "completed"
-        and not _is_alive
-        and _rows > 0
-        and _finished  # has a non-empty finished_at timestamp
-        and st.session_state.get("_sc_auto_triggered_job") != _finished
-        and not st.session_state.get("job_running", False)
-    ):
-        # Lock immediately BEFORE any rerun to prevent re-entry
-        st.session_state["_sc_auto_triggered_job"] = _finished
-        st.success(
-            f"🤖 **الكشط اكتمل** — {_rows:,} منتج من {_stores_done} متجر. "
-            "جاري بدء التحليل التلقائي..."
-        )
-        # Route to dashboard with auto-scraper flag (same as manual button)
-        st.session_state["_nav_pending"] = "📊 لوحة التحكم"
-        st.session_state["_use_auto_scraper"] = True
-        st.session_state["_sc_auto_analysis_pending"] = True
-        st.session_state["nav_flash"] = (
-            f"🤖 اكتمل الكشط ({_rows:,} منتج) — جاري التحليل التلقائي"
-        )
-        st.rerun()
-
-    # ════════════════════════════════════════════════════════════════════════
-    #  القسم 6 — الناتج وبدء المطابقة الشاملة
-    # ════════════════════════════════════════════════════════════════════════
-    if _os_scraper.path.exists(_OUTPUT_CSV):
-        st.markdown("---")
-        st.subheader("📥 تصدير وبدء تحليل شامل")
-
-        _csv_size_kb = round(_os_scraper.path.getsize(_OUTPUT_CSV) / 1024, 1)
-        _csv_rows    = 0
-        try:
-            with open(_OUTPUT_CSV, encoding="utf-8-sig") as _f:
-                _csv_rows = sum(1 for _ in _f) - 1
-        except Exception:
-            pass
-
-        _dl_col, _go_col = st.columns(2)
-        with _dl_col:
-            with open(_OUTPUT_CSV, "rb") as _fout:
-                st.download_button(
-                    f"📥 تحميل CSV ({_csv_size_kb} KB · {_csv_rows:,} منتج)",
-                    data=_fout.read(),
-                    file_name="competitors_latest.csv",
-                    mime="text/csv",
-                    key="sc_download_csv",
-                    use_container_width=True,
-                )
-        with _go_col:
-            if st.button(
-                "🚀 تحليل شامل (v21 Engine)",
-                key="sc_go_match",
-                type="primary",
-                use_container_width=True,
-            ):
-                st.session_state._nav_pending    = "📊 لوحة التحكم"
-                st.session_state["_use_auto_scraper"] = True
-                st.session_state.results         = None
-                st.session_state.analysis_df     = None
-                st.session_state.last_audit_stats = None
-                st.session_state.nav_flash       = "🤖 تم تفعيل البيانات الآلية وتمت تهيئة الشاشة لتحليل جديد"
-                st.rerun()
-
-    # ════════════════════════════════════════════════════════════════════════
-    #  القسم 5.5 — كشط الأسعار المتقدم v30 (منتجات بدون سعر)
-    # ════════════════════════════════════════════════════════════════════════
-    st.markdown("---")
-    with st.expander("🕷️ كشط الأسعار المتقدم v30 (منتجات بدون سعر)", expanded=False):
-        st.caption("يكشط صفحات المنتجات التي لديها URLs لكن بدون أسعار في قاعدة البيانات.")
+    # ── Advanced Price Scraper (v30.2) ───────────────────────────────────
+    with st.expander("🕷️ كشط الأسعار المفقودة (v30.2)", expanded=_sp_no_price > 0):
+        if _sp_no_price > 0:
+            st.caption(f"🔍 {_sp_no_price:,} منتج بدون سعر — يمكن كشط أسعارها تلقائياً.")
         _adv_c1, _adv_c2 = st.columns([2, 1])
         with _adv_c1:
             _adv_store = st.text_input(
-                "اسم المنافس (فارغ = كل المنافسين)",
-                value="", key="adv_scraper_store_filter",
-                placeholder="مثال: قولدن سنت",
+                "المنافس (فارغ = الكل)", value="",
+                key="adv_scraper_store_filter", placeholder="مثال: قولدن سنت",
             )
         with _adv_c2:
-            _adv_limit = st.number_input("الحد الأقصى", min_value=100, max_value=10000, value=2000, step=500, key="adv_scraper_limit")
+            _adv_limit = st.number_input(
+                "الحد الأقصى", min_value=100, max_value=10000,
+                value=2000, step=500, key="adv_scraper_limit",
+            )
 
-        if st.button("🚀 بدء كشط الأسعار المفقودة", key="btn_adv_scraper_v30", type="primary", use_container_width=True):
+        if st.button("🚀 بدء كشط الأسعار", key="btn_adv_scraper_v30", type="primary", use_container_width=True):
             _adv_prog = st.progress(0, text="جاري الكشط...")
-            _adv_status = st.empty()
 
             def _adv_progress(done, total):
-                pct = done / max(total, 1)
-                _adv_prog.progress(min(pct, 1.0), text=f"🕷️ {done}/{total} منتج...")
+                _adv_prog.progress(done / max(total, 1), text=f"🕷️ {done}/{total}")
 
             try:
                 import asyncio as _aio
@@ -5072,52 +4991,82 @@ elif page == "🕷️ كشط المنافسين":
                     progress_cb=_adv_progress,
                 ))
                 _adv_prog.progress(1.0, text="✅ اكتمل")
-                _msg = _adv_result.get("message", "")
                 if _adv_result.get("prices_found", 0) > 0:
-                    st.success(_msg)
+                    st.success(_adv_result["message"])
                 else:
-                    st.info(_msg)
-                st.caption(
-                    f"📊 كُشط: {_adv_result.get('total_scraped',0)} | "
-                    f"أسعار: {_adv_result.get('prices_found',0)} | "
-                    f"محدّث: {_adv_result.get('updated_in_db',0)} | "
-                    f"🤖 AI: {_adv_result.get('ai_used',0)} | "
-                    f"أخطاء: {_adv_result.get('errors',0)}"
-                )
+                    st.info(_adv_result["message"])
             except Exception as _adv_err:
                 _adv_prog.progress(1.0, text="❌ خطأ")
-                st.error(f"❌ خطأ في الكشط المتقدم: {_adv_err}")
+                st.error(f"❌ خطأ: {_adv_err}")
 
-    # ════════════════════════════════════════════════════════════════════════
-    #  القسم 6 — أدوات الكشط المتقدمة (مدمجة في expander بدل tab منفصل)
-    # ════════════════════════════════════════════════════════════════════════
-    _scraper_advanced_runtime_mod = _get_scraper_advanced_module()
-    if _scraper_advanced_runtime_mod is not None:
-        st.markdown("---")
-        with st.expander("🚀 أدوات الكشط المتقدمة", expanded=False):
-            if hasattr(_scraper_advanced_runtime_mod, "show"):
-                try:
-                    _show_fn = getattr(_scraper_advanced_runtime_mod, "show", None)
-                    if callable(_show_fn):
-                        _supports_embedded = False
-                        try:
-                            import inspect as _inspect
-                            _supports_embedded = "embedded" in _inspect.signature(_show_fn).parameters
-                        except Exception:
-                            _supports_embedded = False
+    # ── Export & Analysis Trigger ────────────────────────────────────────
+    if _os_scraper.path.exists(_OUTPUT_CSV):
+        _csv_size_kb = round(_os_scraper.path.getsize(_OUTPUT_CSV) / 1024, 1)
+        _csv_rows = 0
+        try:
+            with open(_OUTPUT_CSV, encoding="utf-8-sig") as _f:
+                _csv_rows = sum(1 for _ in _f) - 1
+        except Exception:
+            pass
 
-                        if _supports_embedded:
-                            _show_fn(embedded=True)
-                        else:
-                            _show_fn()
-                    else:
-                        st.error("⚠️ show ليس دالة قابلة للتنفيذ في pages/scraper_advanced.py")
-                except Exception as _sa_render_err:
-                    st.error(f"❌ خطأ في الأدوات المتقدمة: {_sa_render_err}")
+        _dl_col, _go_col = st.columns(2)
+        with _dl_col:
+            with open(_OUTPUT_CSV, "rb") as _fout:
+                st.download_button(
+                    f"📥 CSV ({_csv_size_kb} KB · {_csv_rows:,} منتج)",
+                    data=_fout.read(), file_name="competitors_latest.csv",
+                    mime="text/csv", key="sc_download_csv", use_container_width=True,
+                )
+        with _go_col:
+            if st.button("🚀 تحليل شامل", key="sc_go_match", type="primary", use_container_width=True):
+                st.session_state._nav_pending = "📊 لوحة التحكم"
+                st.session_state["_use_auto_scraper"] = True
+                st.session_state.results = None
+                st.session_state.analysis_df = None
+                st.session_state.last_audit_stats = None
+                st.session_state.nav_flash = "🤖 تم تفعيل البيانات الآلية"
+                st.rerun()
+
+    # ── Auto-Analysis Trigger (fires ONCE per completed scrape) ──────────
+    if (
+        _phase == "completed"
+        and not _is_alive
+        and _rows > 0
+        and _finished
+        and st.session_state.get("_sc_auto_triggered_job") != _finished
+        and not st.session_state.get("job_running", False)
+    ):
+        st.session_state["_sc_auto_triggered_job"] = _finished
+        st.success(f"🤖 الكشط اكتمل — {_rows:,} منتج. جاري التحليل...")
+        st.session_state["_nav_pending"] = "📊 لوحة التحكم"
+        st.session_state["_use_auto_scraper"] = True
+        st.session_state["_sc_auto_analysis_pending"] = True
+        st.session_state["nav_flash"] = f"🤖 اكتمل الكشط ({_rows:,} منتج)"
+        st.rerun()
+
+    # ── Auto-Start Bootstrap: if no scraper running & products missing prices ──
+    if (
+        not _is_alive
+        and _sp_no_price > 50
+        and not st.session_state.get("_adv_scraper_autostarted", False)
+        and not st.session_state.get("job_running", False)
+    ):
+        st.session_state["_adv_scraper_autostarted"] = True
+        st.info(f"🤖 **Auto-Bootstrap:** {_sp_no_price:,} منتج بدون سعر — يبدأ الكشط التلقائي...")
+        try:
+            import asyncio as _aio
+            from engines.scraper_v30_advanced import run_advanced_price_scraping
+
+            _auto_result = _aio.run(run_advanced_price_scraping(
+                store_filter="", limit=min(_sp_no_price, 500),
+            ))
+            if _auto_result.get("prices_found", 0) > 0:
+                st.success(f"✅ Auto-Bootstrap: {_auto_result['message']}")
+                st.rerun()
             else:
-                st.error("⚠️ دالة show() غير موجودة في pages/scraper_advanced.py")
-    elif _scraper_advanced_import_error is not None:
-        st.warning(f"⚠️ تعذر تحميل الأدوات المتقدمة حالياً: {_scraper_advanced_import_error}")
+                st.caption(f"Auto-Bootstrap: {_auto_result['message']}")
+        except Exception as _auto_err:
+            st.caption(f"Auto-Bootstrap: {_auto_err}")
 
 elif page == "⚙️ الإعدادات":
     st.header("⚙️ الإعدادات")
