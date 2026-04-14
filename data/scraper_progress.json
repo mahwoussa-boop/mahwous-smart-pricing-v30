@@ -1,0 +1,26 @@
+{
+  "running": true,
+  "started_at": "2026-04-13T18:07:49.615324",
+  "finished_at": "",
+  "last_updated": "2026-04-13 18:17:26",
+  "phase": "scraping",
+  "pid": 5913,
+  "stores_total": 18,
+  "stores_done": 4,
+  "urls_total": 24726,
+  "urls_processed": 650,
+  "rows_in_csv": 4,
+  "fetch_exceptions": 240,
+  "success_rate_pct": 63.07692307692307,
+  "current_store": "goldenscent.com",
+  "store_urls_done": 14450,
+  "store_urls_total": 24726,
+  "last_error": "",
+  "stores_results": {
+    "saeedsalah.com": 0,
+    "vanilla.sa": 0,
+    "sara-makeup.com": 0,
+    "alkhabeershop.com": 0
+  },
+  "stores_http_errors": {}
+}
