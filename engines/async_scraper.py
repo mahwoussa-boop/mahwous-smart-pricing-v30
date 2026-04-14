@@ -21,7 +21,7 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import aiohttp
 import pandas as pd
@@ -379,6 +379,11 @@ def extract_product(data: dict, store_url: str) -> dict | None:
     if url and not url.startswith("http"):
         base = store_url.rstrip("/")
         url  = f"{base}/{url.lstrip('/')}"
+    if url:
+        try:
+            url = unquote(url)
+        except Exception:
+            pass
     image = (
         data.get("image") or data.get("featured_image") or
         data.get("thumbnail") or ""
@@ -758,7 +763,14 @@ async def scrape_one_store(
         
         if resume_idx > 0:
             logger.info(f"🔄 {domain} — استئناف من الرابط {resume_idx}/{total}")
-        pending_urls = all_urls[resume_idx:]
+        pending_urls = []
+        for _raw_url in all_urls[resume_idx:]:
+            try:
+                _clean_url = unquote(str(_raw_url).strip())
+            except Exception:
+                _clean_url = str(_raw_url).strip()
+            if _clean_url:
+                pending_urls.append(_clean_url)
 
         state.update(domain, urls_total=total, urls_done=resume_idx)
         progress.urls_total        += total
@@ -858,7 +870,7 @@ async def scrape_one_store(
 
         async def _run_batches():
             nonlocal _circuit_broken
-            BATCH = 50
+            BATCH = 5
             for start in range(0, len(pending_urls), BATCH):
                 if max_products > 0 and len(rows) >= max_products:
                     logger.info(f"🛑 {domain} — تم الوصول للحد الأقصى ({max_products}). جاري إيقاف السحب.")

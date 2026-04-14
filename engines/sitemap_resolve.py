@@ -26,12 +26,36 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
+from lxml import etree
 
 from scrapers.anti_ban import get_xml_headers, get_browser_headers
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
+async def get_all_products_from_sitemap(sitemap_url: str) -> List[str]:
+    """
+    Fast sitemap reader used by v30 automation flows.
+    Returns all <loc> URLs from the given sitemap XML.
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(
+                sitemap_url,
+                ssl=False,
+                allow_redirects=True,
+                timeout=_TIMEOUT,
+            ) as response:
+                if response.status != 200:
+                    return []
+                content = await response.read()
+        tree = etree.fromstring(content)
+        return [loc.text.strip() for loc in tree.xpath("//*[local-name()='loc']") if getattr(loc, "text", None)]
+    except Exception:
+        return []
 
 # ══════════════════════════════════════════════════════════════════════════
 #  ثوابت ومسارات Sitemap

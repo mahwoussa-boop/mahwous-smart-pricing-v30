@@ -1,3 +1,52 @@
+from __future__ import annotations
+
+import re
+from typing import Dict
+
+from engines.anti_ban import get_stealth_driver
+
+_PRICE_PATTERNS = [
+    re.compile(r"(\d+(?:[\.,]\d+)?)\s*(?:ر\.س|SAR|SR)", re.I),
+    re.compile(r"(?:ر\.س|SAR|SR)\s*(\d+(?:[\.,]\d+)?)", re.I),
+]
+_OG_IMAGE_RE = re.compile(r'og:image["\']?\s+content=["\'](.*?)["\']', re.I)
+
+
+def _extract_price(html: str) -> float:
+    for pattern in _PRICE_PATTERNS:
+        match = pattern.search(html or "")
+        if not match:
+            continue
+        raw = (match.group(1) or "").replace(",", "").strip()
+        try:
+            return float(raw)
+        except Exception:
+            continue
+    return 0.0
+
+
+def extract_product_data_ai(url: str) -> Dict[str, object]:
+    """
+    Stealth extraction for blocked pages.
+    Always closes driver to prevent memory leaks.
+    """
+    driver = None
+    try:
+        driver = get_stealth_driver(headless=True)
+        driver.get(url)
+        html = driver.page_source or ""
+        price = _extract_price(html)
+        img_match = _OG_IMAGE_RE.search(html)
+        image_url = (img_match.group(1) or "").strip() if img_match else ""
+        return {"price": price, "image": image_url, "url": url}
+    except Exception:
+        return {"price": 0.0, "image": "", "url": url}
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 """
 engines/ai_scraper_v27.py — المحرك الهجين v27
 ═══════════════════════════════════════════════════════════════════════════
