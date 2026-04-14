@@ -223,6 +223,7 @@ def render_page(url: str, timeout: int = 25, proxy: str = "", user_agent: str = 
             elapsed_sec=time.time() - t0,
         )
     except Exception as exc:
+        logger.exception("render_page failed for url=%s", url)
         return RenderedPage(
             url=url,
             final_url=url,
