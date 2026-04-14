@@ -226,7 +226,7 @@ def _parse_sitemap_xml(xml_text: str) -> Tuple[List[SitemapEntry], List[str]]:
 async def resolve_sitemap_recursively(
     session: aiohttp.ClientSession,
     sitemap_url: str,
-    max_depth: int = 3,
+    max_depth: int = 6,
     current_depth: int = 0,
 ) -> set[str]:
     # FIX: Deep Sitemap & AI Fallback Integrated
@@ -271,16 +271,18 @@ async def resolve_sitemap_recursively(
                     if isinstance(res, set):
                         urls.update(res)
             elif root.tag == "urlset":
+                # جمع كل روابط <loc> من urlset — الفلترة الدقيقة لاحقاً في _filter_product_entries.
+                # السابق كان يستبعد آلاف روابط المنتجات (سلugs بدون كلمة product أو /p/).
                 for loc in root.findall(".//loc"):
                     if not loc.text:
                         continue
                     loc_text = loc.text.strip()
-                    if (
-                        "/p/" in loc_text
-                        or "-p" in loc_text
-                        or "product" in loc_text.lower()
-                    ):
-                        urls.add(loc_text)
+                    if not loc_text.startswith("http"):
+                        continue
+                    low = loc_text.lower()
+                    if low.endswith(".xml"):
+                        continue
+                    urls.add(loc_text)
             return urls
     except Exception as exc:
         logger.debug("resolve_sitemap_recursively failed for %s: %s", sitemap_url, exc)
@@ -291,7 +293,7 @@ async def _fetch_and_parse_sitemap(
     session: aiohttp.ClientSession,
     url: str,
     depth: int = 0,
-    max_depth: int = 3,
+    max_depth: int = 6,
     sem: Optional[asyncio.Semaphore] = None,
 ) -> List[SitemapEntry]:
     """

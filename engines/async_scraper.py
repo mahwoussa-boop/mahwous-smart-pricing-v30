@@ -25,7 +25,6 @@ from urllib.parse import unquote, urlparse
 
 import aiohttp
 import pandas as pd
-from lxml import etree
 
 if os.name == "nt":
     try:
@@ -114,19 +113,6 @@ def extract_price_smartly(html_content: str) -> float:
         except Exception:
             continue
     return 0.0
-
-
-async def fetch_sitemap(session: aiohttp.ClientSession, url: str) -> List[str]:
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20), ssl=False) as response:
-            if response.status != 200:
-                return []
-            content = await response.read()
-        tree = etree.fromstring(content)
-        return [loc.text.strip() for loc in tree.xpath("//*[local-name()='loc']") if getattr(loc, "text", None)]
-    except Exception:
-        return []
 
 
 def _v30_row_from_result(result: dict | None, store_url: str) -> dict | None:
@@ -634,7 +620,7 @@ async def fetch_product(
             if h1_match:
                 pname = h1_match.group(1).strip()
 
-        if pname and _url_looks_like_product_page(url):
+        if pname:
             row = extract_product(
                 {"name": pname, "image": pimg, "url": purl, "price": pprice},
                 store_url,
@@ -642,7 +628,7 @@ async def fetch_product(
             if _has_valid_price(row):
                 return row
 
-        # AI fallback: محاولة استخراج ذكي عندما تفشل كل الطرق التقليدية
+        # Gemini (عبر ai_engine): بعد فشل الاستخراج التقليدي مع وجود HTML
         try:
             from engines.ai_engine import ai_fallback_scrape
             ai_data = ai_fallback_scrape(html, url) if html else {}
@@ -703,9 +689,9 @@ async def scrape_one_store(
     state.save()
 
     try:
-        from scrapers.sitemap_resolve import sitemap_resolver
+        from engines.sitemap_resolve import resolve_product_urls
     except ImportError:
-        logger.error("تعذّر تحميل sitemap_resolve")
+        logger.error("تعذّر تحميل engines.sitemap_resolve")
         state.mark_error(domain, "import_error")
         return []
 
@@ -726,24 +712,15 @@ async def scrape_one_store(
 
         logger.info(f"🗺️ {domain} — يحلل Sitemap بالتخفي العميق…")
         try:
-            clean_base = store_url.rstrip("/")
-            candidate_sitemaps = [
-                f"{clean_base}/sitemap.xml",
-                f"{clean_base}/sitemap_index.xml",
-                f"{clean_base}/sitemap-1.xml",
-                f"{clean_base}/product-sitemap.xml",
-                f"{clean_base}/sitemap_products.xml",
-            ]
-            all_urls: List[str] = []
-            for sm_url in candidate_sitemaps:
-                links = await fetch_sitemap(session, sm_url)
-                if links:
-                    all_urls = links
-                    break
-            if not all_urls:
-                all_urls = await asyncio.wait_for(
-                    sitemap_resolver.resolve(store_url), timeout=400
-                )
+            _disc_timeout = float(os.environ.get("SCRAPER_SITEMAP_DISCOVERY_TIMEOUT", "1800"))
+            all_urls = await asyncio.wait_for(
+                resolve_product_urls(
+                    store_url,
+                    session,
+                    max_products=max_products if max_products > 0 else 0,
+                ),
+                timeout=_disc_timeout,
+            )
         except asyncio.TimeoutError:
             state.mark_error(domain, "sitemap_timeout")
             return []
@@ -786,7 +763,7 @@ async def scrape_one_store(
 
         # ── Phase 2: Circuit Breaker state ─────────────────────────
         _consecutive_failures = 0
-        _CIRCUIT_BREAKER_LIMIT = 20  # break after 20 consecutive failed URLs
+        _CIRCUIT_BREAKER_LIMIT = int(os.environ.get("SCRAPER_CIRCUIT_BREAKER_LIMIT", "200"))
         _circuit_broken = False
 
         async def _fetch_one(url: str) -> None:
@@ -865,8 +842,12 @@ async def scrape_one_store(
                     _circuit_broken = True
 
         # ── Phase 2: per-store wall-clock timeout ─────────────────
-        # Scales with store size: min 10min, ~3s/URL, max 45min
-        _STORE_WALL_TIMEOUT = max(600, min(2700, len(pending_urls) * 3))
+        # متاجر كبيرة (35k+ رابط): افتراضي حتى ~12 ساعة أو SCRAPER_STORE_WALL_TIMEOUT_SEC
+        _env_wall = int(os.environ.get("SCRAPER_STORE_WALL_TIMEOUT_SEC", "0") or "0")
+        if _env_wall > 0:
+            _STORE_WALL_TIMEOUT = float(_env_wall)
+        else:
+            _STORE_WALL_TIMEOUT = max(3600.0, min(43200.0, len(pending_urls) * 4.0))
 
         async def _run_batches():
             nonlocal _circuit_broken
