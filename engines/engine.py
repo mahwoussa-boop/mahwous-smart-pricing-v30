@@ -589,11 +589,17 @@ def read_file(f):
         df.columns = df.columns.map(lambda x: str(x).strip().replace('\ufeff', ''))
         df = df.dropna(how='all').reset_index(drop=True)
         df = _normalize_header_typos(df)
-        # إعادة تسمية أعمدة الكشط/سلة *قبل* حذف الأعمدة المشبوهة — وإلا تُفقد الحقول الأساسية
         df = _detect_double_header(df)
         df = _smart_rename_columns(df)
         df = _drop_scraper_columns(df)
         df = _infer_column_roles(df)
+        # Phase 4: downcast large DataFrames
+        if len(df) > 500:
+            try:
+                from utils.data_helpers import optimize_dataframe_memory
+                df = optimize_dataframe_memory(df)
+            except ImportError:
+                pass
         return df, None
     except Exception as e:
         return None, str(e)

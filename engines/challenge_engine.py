@@ -528,6 +528,13 @@ def read_file(file_obj) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
         # تنظيف أسماء الأعمدة
         df.columns = df.columns.map(lambda x: str(x).strip().replace("\ufeff", ""))
         df = df.dropna(how="all").reset_index(drop=True)
+        # Phase 4: downcast large DataFrames
+        if len(df) > 500:
+            try:
+                from utils.data_helpers import optimize_dataframe_memory
+                df = optimize_dataframe_memory(df)
+            except ImportError:
+                pass
         return df, None
 
     except Exception as e:
@@ -837,14 +844,16 @@ def run_challenge_analysis(
             stats={"error": "لم يتم العثور على منتجات في كتالوج المتجر"},
         )
 
-    # ── جمع كل منتجات المنافسين ───────────────────────────────────────────
+    # ── جمع كل منتجات المنافسين (مع تحرير ذاكرة كل DataFrame بعد المعالجة) ──
     all_comp_products: List[NormProduct] = []
     for comp_name, comp_df in competitor_dfs.items():
         comp_cols = detect_columns(comp_df)
         name_col = comp_cols["name"]
         if not name_col:
             continue
-        for i, (_, row) in enumerate(comp_df.iterrows()):
+        # Phase 4: iterate without holding full DataFrame in scope
+        _rows_data = comp_df.to_dict("records")  # lighter than iterrows
+        for i, row in enumerate(_rows_data):
             raw = _safe_str(row.get(name_col, ""))
             if not raw:
                 continue
@@ -859,6 +868,7 @@ def run_challenge_analysis(
                 competitor=comp_name,
             )
             all_comp_products.append(p)
+        del _rows_data  # Phase 4: free dict copy immediately
 
     total_comp = len(all_comp_products)
     if total_comp == 0:
@@ -1024,8 +1034,8 @@ def run_challenge_analysis(
 
     audit_df = pd.DataFrame(audit_rows) if audit_rows else pd.DataFrame()
 
-    # تنظيف الذاكرة
-    del all_comp_products
+    # Phase 4: تنظيف شامل للذاكرة
+    del all_comp_products, confirmed_rows, review_rows, missing_rows, opp_rows, audit_rows
     gc.collect()
 
     return ChallengeResult(

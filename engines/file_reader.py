@@ -29,6 +29,7 @@ from typing import Callable, IO, List, Optional, Tuple, Union
 import pandas as pd
 
 from utils.data_sanitizer import sanitize_competitor_price_to_float
+from utils.data_helpers import optimize_dataframe_memory
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,8 @@ def read_csv_safe(
             if df.empty:
                 raise ValueError(f"الملف فارغ بعد القراءة بترميز {enc!r}.")
             logger.info("✅ قُرئ الملف بترميز: %s (%d صف)", enc, len(df))
+            if len(df) > 500:  # Phase 4: optimize large DataFrames
+                df = optimize_dataframe_memory(df)
             return df, enc
 
         except (UnicodeDecodeError, UnicodeError, LookupError) as exc:
@@ -117,6 +120,8 @@ def read_csv_safe(
         encoding_errors="replace",
         low_memory=low_memory,
     )
+    if len(df) > 500:  # Phase 4: optimize large DataFrames
+        df = optimize_dataframe_memory(df)
     return df, "latin-1 (replace)"
 
 

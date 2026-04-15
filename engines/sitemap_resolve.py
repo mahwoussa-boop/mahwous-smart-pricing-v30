@@ -339,14 +339,59 @@ def _is_product_url(url: str) -> bool:
 
 
 def _is_salla_product(url: str) -> bool:
-    """سلة: المنتجات عادة /p[0-9]+ أو تنتهي بمعرّف رقمي طويل."""
+    """
+    سلة: المنتجات تأتي بأنماط متعددة:
+      /p123456789          (الأكثر شيوعاً)
+      /p/slug-name         (نمط slug)
+      /products/slug       (نمط Shopify-like)
+      /product/slug
+      /ar/p/slug           (متعدد اللغات)
+      /en/p/slug
+      /slug-name           (منتج مباشر على الجذر — شائع في سلة)
+
+    v2.2: توسيع جذري لتجنب فقدان المنتجات.
+    الفلسفة: في سلة، أي رابط ليس صفحة نظام (cart, account, blog...) هو غالباً منتج.
+    """
     path = urlparse(url).path or ""
-    if re.search(r"/p\d{5,}$", path):
+    path_lower = path.lower().rstrip("/")
+
+    # ─── أنماط مؤكدة (fast path) ───
+    if re.search(r"/p\d{3,}$", path):          # /p12345 (خفّضنا من 5 أرقام إلى 3)
         return True
-    if re.search(r"/\d{8,}$", path):
+    if re.search(r"/\d{6,}$", path):           # /12345678 (خفّضنا من 8 إلى 6)
         return True
-    if "/products/" in path.lower() or "/product/" in path.lower():
+    if re.search(r"/p/[^/]+$", path_lower):    # /p/slug-name
         return True
+    if "/products/" in path_lower or "/product/" in path_lower:
+        return True
+    if re.search(r"/ar/p/|/en/p/", path_lower):
+        return True
+
+    # ─── نمط الجذر المباشر: /slug-name (شائع جداً في سلة) ───
+    # نقبل أي مسار من مقطع واحد يحتوي حروف (عربية أو لاتينية) وليس صفحة نظام
+    segments = [s for s in path.strip("/").split("/") if s]
+    if len(segments) == 1:
+        slug = segments[0].lower()
+        # استبعاد صفحات النظام المعروفة
+        _salla_system_slugs = {
+            "cart", "checkout", "login", "register", "account", "profile",
+            "contact", "about", "blog", "faq", "privacy", "terms",
+            "categories", "brands", "offers", "wishlist", "search",
+            "sitemap.xml", "robots.txt", "favicon.ico",
+        }
+        if slug not in _salla_system_slugs and not slug.endswith((".xml", ".js", ".css", ".png", ".jpg", ".webp")):
+            return True
+
+    # ─── مسار ثنائي: /category/slug — نقبله إذا لم يكن تصنيفاً صريحاً ───
+    if len(segments) == 2:
+        parent = segments[0].lower()
+        _salla_non_product_parents = {
+            "blog", "page", "pages", "category", "categories", "tag", "tags",
+            "account", "cart", "checkout", "auth",
+        }
+        if parent not in _salla_non_product_parents:
+            return True
+
     return False
 
 
@@ -485,11 +530,28 @@ async def resolve_product_entries(
                 all_entries.extend(entries)
                 break
 
-    # 4) Fallback: Shopify /products.json API
+    # 4) Salla Deep Pagination Supplement
+    #    إذا أعاد sitemap سلة عدداً محدوداً (< 1500)، نُكمل عبر API/HTML pagination
+    if _is_salla(base):
+        _sitemap_count = len(all_entries)
+        if _sitemap_count < 1500:
+            logger.info(
+                "🔍 %s — سلة: sitemap أعاد %d رابط فقط، يُفعّل Deep Pagination…",
+                base, _sitemap_count,
+            )
+            _salla_extra = await _fallback_salla_pagination(session, base, max_products)
+            if _salla_extra:
+                all_entries.extend(_salla_extra)
+                logger.info(
+                    "📦 %s — Deep Pagination أضاف %d رابط (المجموع: %d)",
+                    base, len(_salla_extra), len(all_entries),
+                )
+
+    # 5) Fallback: Shopify /products.json API
     if not all_entries:
         all_entries.extend(await _fallback_shopify_api(session, base, max_products))
 
-    # 5) Fallback: HTML crawl of /products page
+    # 6) Fallback: HTML crawl of /products page
     if not all_entries:
         all_entries.extend(await _fallback_html_product_page(session, base))
 
@@ -564,6 +626,151 @@ async def _fallback_shopify_api(
     return entries
 
 
+async def _fallback_salla_pagination(
+    session: aiohttp.ClientSession,
+    base: str,
+    max_products: int = 0,
+) -> List[SitemapEntry]:
+    """
+    v2.2: Salla Deep Pagination Fallback.
+    عندما يُعيد sitemap سلة عدداً محدوداً (~800)، نُكمل الاكتشاف عبر:
+    1. Salla storefront API: GET /api/products?page=N (JSON response)
+    2. HTML pagination crawl: GET /?page=N واستخراج روابط المنتجات من HTML
+
+    يُلحق النتائج بقائمة الـ entries الموجودة (لا يُعيد تكرارات).
+    """
+    entries: List[SitemapEntry] = []
+    seen: set = set()
+
+    # ─── طريقة 1: Salla Storefront API ───
+    _api_paths = ["/api/products", "/api/store/products"]
+    for api_path in _api_paths:
+        page = 1
+        _empty_streak = 0
+        try:
+            while _empty_streak < 3:  # 3 صفحات فارغة متتالية = توقف
+                url = f"{base}{api_path}?page={page}&per_page=50"
+                try:
+                    async with session.get(
+                        url,
+                        headers=get_browser_headers(),
+                        timeout=aiohttp.ClientTimeout(total=20),
+                        ssl=False,
+                    ) as r:
+                        if r.status == 404:
+                            break  # هذا الـ API غير موجود، جرّب المسار التالي
+                        if r.status != 200:
+                            _empty_streak += 1
+                            await asyncio.sleep(1.5)
+                            page += 1
+                            continue
+                        try:
+                            data = await r.json(content_type=None)
+                        except Exception:
+                            break
+                except asyncio.TimeoutError:
+                    _empty_streak += 1
+                    page += 1
+                    continue
+                except Exception:
+                    break
+
+                # Salla API يُرجع {data: [{url, name, ...}]} أو {products: [...]}
+                products = []
+                if isinstance(data, dict):
+                    products = data.get("data") or data.get("products") or []
+                elif isinstance(data, list):
+                    products = data
+
+                if not products:
+                    _empty_streak += 1
+                    page += 1
+                    continue
+
+                _empty_streak = 0
+                for p in products:
+                    purl = ""
+                    if isinstance(p, dict):
+                        purl = (p.get("url") or p.get("link") or p.get("href") or "").strip()
+                        if not purl:
+                            slug = p.get("slug") or p.get("handle") or ""
+                            pid = p.get("id") or ""
+                            if slug:
+                                purl = f"{base}/p/{slug}"
+                            elif pid:
+                                purl = f"{base}/p{pid}"
+                    if purl and purl not in seen:
+                        seen.add(purl)
+                        entries.append(SitemapEntry(url=purl))
+
+                if max_products > 0 and len(entries) >= max_products:
+                    break
+                page += 1
+                await asyncio.sleep(0.8)  # تهدئة لتجنب الحظر
+
+        except Exception as exc:
+            logger.debug("Salla API fallback failed on %s: %s", api_path, exc)
+            continue
+
+        if entries:
+            logger.info(
+                "_fallback_salla_pagination API %s%s → %d منتج إضافي",
+                base, api_path, len(entries),
+            )
+            return entries
+
+    # ─── طريقة 2: HTML Pagination Crawl ───
+    _product_href_re = re.compile(
+        r'href=["\']([^"\']*(?:/p\d{3,}|/p/[^"\'/?#]{2,}|/products?/[^"\'/?#]{3,}))["\']',
+        re.I,
+    )
+    page = 1
+    _empty_pages = 0
+    while _empty_pages < 3 and page <= 200:
+        try:
+            url = f"{base}/?page={page}"
+            async with session.get(
+                url, headers=get_browser_headers(),
+                timeout=aiohttp.ClientTimeout(total=15),
+                ssl=False,
+            ) as r:
+                if r.status != 200:
+                    _empty_pages += 1
+                    page += 1
+                    continue
+                html = await r.text(errors="ignore")
+        except Exception:
+            _empty_pages += 1
+            page += 1
+            continue
+
+        found = _product_href_re.findall(html)
+        if not found:
+            _empty_pages += 1
+            page += 1
+            continue
+
+        _empty_pages = 0
+        for href in found:
+            full = href if href.startswith("http") else f"{base}{href}"
+            full = full.split("?")[0].rstrip("/")
+            if full not in seen:
+                seen.add(full)
+                entries.append(SitemapEntry(url=full))
+
+        if max_products > 0 and len(entries) >= max_products:
+            break
+        page += 1
+        await asyncio.sleep(0.8)
+
+    if entries:
+        logger.info(
+            "_fallback_salla_pagination HTML crawl %s → %d منتج إضافي (%d صفحة)",
+            base, len(entries), page,
+        )
+    return entries
+
+
 async def _fallback_html_product_page(
     session: aiohttp.ClientSession,
     base: str,
@@ -575,7 +782,7 @@ async def _fallback_html_product_page(
     entries: List[SitemapEntry] = []
     candidates_pages = ["/products", "/shop", "/store", "/"]
     _product_href_re = re.compile(
-        r'href=["\']([^"\']*(?:/p\d{5,}|/products?/[^"\'/?#]{4,}|/item/[^"\'/?#]{4,}))["\']',
+        r'href=["\']([^"\']*(?:/p\d{3,}|/p/[^"\'/?#]{2,}|/products?/[^"\'/?#]{3,}|/item/[^"\'/?#]{3,}))["\']',
         re.I,
     )
     for path in candidates_pages:
