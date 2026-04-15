@@ -104,7 +104,23 @@ def _pick_user_agent() -> str:
 
 
 def _find_chromium_binary() -> str:
-    for candidate in (os.environ.get("CHROMIUM_BINARY"), shutil.which("chromium"), shutil.which("chromium-browser")):
+    candidates = [
+        os.environ.get("CHROMIUM_BINARY"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+    ]
+    if os.name == "nt":
+        candidates.extend(
+            [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe"),
+            ]
+        )
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    for candidate in candidates:
         if candidate:
             return candidate
     return "chromium"
