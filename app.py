@@ -2297,7 +2297,14 @@ if page == "📊 لوحة التحكم":
     st.markdown("---")
     st.subheader("🕷️ التحكم السريع في الكشط")
 
-    _dash_stores_count = len(_load_stores())
+    try:
+        _dash_stores_count = len(_load_stores())
+    except NameError:
+        try:
+            import json as _json_dash
+            _dash_stores_count = len(_json_dash.loads(open(_COMPETITORS_FILE, encoding="utf-8").read()))
+        except Exception:
+            _dash_stores_count = 0
     sc_col1, sc_col2, sc_col3 = st.columns([3, 1.2, 1.2])
     with sc_col1:
         st.markdown(
