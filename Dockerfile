@@ -1,4 +1,3 @@
-# ══════════════════════════════════════════════════════════════
 # Mahwous Smart Pricing - Google Cloud Run Dockerfile
 # Optimized for Cloud Run with Streamlit & Gemini API
 # ══════════════════════════════════════════════════════════════
@@ -10,11 +9,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PORT=8501 \
     DATA_DIR=/data \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
     STREAMLIT_SERVER_HEADLESS=true \
-    STREAMLIT_SERVER_PORT=8501 \
     STREAMLIT_SERVER_ADDRESS=0.0.0.0
 
 WORKDIR /app
@@ -44,11 +41,11 @@ RUN useradd -m -u 1000 streamlit && \
 
 USER streamlit
 
-# Health check
-HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -sf http://localhost:${PORT}/_stcore/health || exit 1
+# Health check for Streamlit on Cloud Run dynamic PORT
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD sh -c 'curl -sf http://localhost:${PORT:-8080}/_stcore/health || exit 1'
 
-EXPOSE 8501
+EXPOSE 8080
 
-# Run the application
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Run the application through the dynamic-port entrypoint
+CMD ["python", "docker_entrypoint.py"]
