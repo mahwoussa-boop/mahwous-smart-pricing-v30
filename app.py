@@ -2293,6 +2293,36 @@ if page == "📊 لوحة التحكم":
         else:
             st.info("👈 ارفع الملفات في القسم أدناه ثم اضغط «بدء التحليل»")
 
+    # ── 🕷️ Quick Scraper Control (Parallel Multi-Store) ──────────────────
+    st.markdown("---")
+    st.subheader("🕷️ التحكم السريع في الكشط")
+    
+    sc_col1, sc_col2 = st.columns([3, 1])
+    with sc_col1:
+        st.markdown(
+            f'<div style="background:#0d1b2a;border:1px solid #1e3a5f;border-radius:10px;padding:12px">'
+            f'<span style="color:#4fc3f7;font-weight:700">🚀 الكشط الجماعي المتوازي:</span> '
+            f'تشغيل جميع المتاجر المنافسة الـ {len(_load_stores())} في وقت واحد بأقصى سرعة.'
+            f'</div>', unsafe_allow_html=True
+        )
+    with sc_col2:
+        if st.button("🚀 تشغيل الكل الآن", type="primary", use_container_width=True, help="بدء كشط جميع المتاجر بالتوازي فوراً"):
+            _sa_mod = _get_scraper_advanced_module()
+            if _sa_mod:
+                stores = _sa_mod._load_stores()
+                active_count = 0
+                for s in stores:
+                    d = _sa_mod._domain(s)
+                    if not _sa_mod._is_thread_alive(d):
+                        _sa_mod._launch_store(s, concurrency=_sa_mod._effective_concurrency())
+                        active_count += 1
+                if active_count > 0:
+                    st.success(f"✅ تم إطلاق {active_count} متجر بالتوازي!")
+                    time.sleep(1)
+                    st.rerun()
+            else:
+                st.error("❌ تعذّر تحميل محرك الكشط.")
+
     # ── Phase 2: Auto-Analysis after scraper completion ─────────────────
     # Fires ONCE — locked by _sc_auto_analysis_pending (consumed here)
     # Requires our_df from a previous upload session (stored in session_state)
