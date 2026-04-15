@@ -77,10 +77,13 @@ class ReconciliationReport:
     matched: int = 0
     new_ready: int = 0
     corrupted: int = 0
+    duplicate_count: int = 0
     balance_ok: bool = True
     warning_message: str = ""
     failed_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     new_products_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    duplicates_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    barrier_rejected_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -89,6 +92,7 @@ class ReconciliationReport:
             "matched": self.matched,
             "new_ready": self.new_ready,
             "corrupted": self.corrupted,
+            "duplicate_count": self.duplicate_count,
             "balance_ok": self.balance_ok,
             "warning_message": self.warning_message,
             "diagnostics": self.diagnostics,
@@ -98,20 +102,25 @@ class ReconciliationReport:
         """
         بعد smart_missing_barrier: الصفوف المُزالة تُعاد تصنيفها كـ «متطابقة» مع كتالوجنا
         لإبقاء معادلة المحاسبة صحيحة.
+        المستبعدون من الحاجز يُحفظون في barrier_rejected_df.
         """
         before_n = int(self.new_ready)
         after_n = int(len(missing_after_barrier)) if missing_after_barrier is not None else 0
         extra_matched = max(0, before_n - after_n)
         self.matched += extra_matched
         self.new_ready = after_n
+        # حفظ المنتجات المستبعدة من الحاجز الذكي
         if missing_after_barrier is not None:
+            rejected = getattr(missing_after_barrier, "attrs", {}).get("rejected_df", pd.DataFrame())
+            if rejected is not None and not rejected.empty:
+                self.barrier_rejected_df = rejected.reset_index(drop=True)
             self.new_products_df = missing_after_barrier.reset_index(drop=True)
-        _chk = self.matched + self.new_ready + self.corrupted
+        _chk = self.matched + self.new_ready + self.corrupted + self.duplicate_count
         _msg = ""
         if _chk != self.total_read:
             _msg = (
                 f"محاسبة بعد الحاجز: المدخل={self.total_read} ≠ "
-                f"{_chk} (متطابق={self.matched}+جديد={self.new_ready}+تالف={self.corrupted})"
+                f"{_chk} (متطابق={self.matched}+جديد={self.new_ready}+تالف={self.corrupted}+مكرر={self.duplicate_count})"
             )
             warnings.warn(_msg, UserWarning, stacklevel=2)
         assert _chk == self.total_read, _msg or "انتهاك معادلة المحاسبة بعد الحاجز"
@@ -287,6 +296,7 @@ def reconcile_competitor_upload(
 
     failed_rows: List[Dict[str, Any]] = []
     new_rows: List[Dict[str, Any]] = []
+    duplicate_rows: List[Dict[str, Any]] = []
     matched = new_r = corrupted = 0
     duplicate_skipped = 0
     total = 0
@@ -388,8 +398,12 @@ def reconcile_competitor_upload(
                 _gender_hint,
             )
             if dedupe_key in seen_keys:
-                matched += 1
                 duplicate_skipped += 1
+                dr = row.to_dict()
+                dr["__المنافس__"] = cname
+                dr["__صف_الملف__"] = i
+                dr["__سبب_التكرار__"] = "صف_مكرر_بنفس_المفتاح"
+                duplicate_rows.append(dr)
                 continue
             seen_keys.add(dedupe_key)
 
@@ -473,16 +487,19 @@ def reconcile_competitor_upload(
     report.matched = matched
     report.new_ready = new_r
     report.corrupted = corrupted
+    report.duplicate_count = duplicate_skipped
     report.failed_df = pd.DataFrame(failed_rows) if failed_rows else pd.DataFrame()
     report.new_products_df = pd.DataFrame(new_rows) if new_rows else pd.DataFrame()
+    report.duplicates_df = pd.DataFrame(duplicate_rows) if duplicate_rows else pd.DataFrame()
 
-    _sum = matched + new_r + corrupted
+    # المعادلة المحاسبية: المدخل = متطابق + جديد + تالف + مكرر
+    _sum = matched + new_r + corrupted + duplicate_skipped
     report.balance_ok = _sum == total
     if not report.balance_ok:
         gap = total - _sum
         report.warning_message = (
             f"محاسبة الصفوف: المدخل={total} لا يساوي مجموع المخرجات={_sum} "
-            f"(متطابق={matched} + جديد={new_r} + تالف={corrupted}) — فجوة={gap}"
+            f"(متطابق={matched} + جديد={new_r} + تالف={corrupted} + مكرر={duplicate_skipped}) — فجوة={gap}"
         )
         warnings.warn(report.warning_message, UserWarning, stacklevel=2)
     assert _sum == total, report.warning_message or "انتهاك معادلة المحاسبة"
@@ -609,4 +626,6 @@ def merge_reconciliation_into_audit(
     out["competitor_rows_matched"] = rec.matched
     out["competitor_rows_new"] = rec.new_ready
     out["competitor_rows_corrupted"] = rec.corrupted
+    out["competitor_rows_duplicated"] = rec.duplicate_count
+    out["barrier_rejected_count"] = len(rec.barrier_rejected_df) if rec.barrier_rejected_df is not None and not rec.barrier_rejected_df.empty else 0
     return out

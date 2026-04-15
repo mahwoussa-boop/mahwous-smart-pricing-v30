@@ -95,25 +95,57 @@ def run_analysis_background_job(
         missing_df = smart_missing_barrier(rec.new_products_df, our_df)
         rec.apply_smart_barrier_adjustment(missing_df)
         audit_stats = merge_reconciliation_into_audit(audit_stats, rec)
+
+        data_dir = os.environ.get("DATA_DIR", "data")
+        os.makedirs(data_dir, exist_ok=True)
+
+        # حفظ المنتجات التالفة
         if rec.failed_df is not None and not rec.failed_df.empty:
-            data_dir = os.environ.get("DATA_DIR", "data")
-            os.makedirs(data_dir, exist_ok=True)
             fp = os.path.join(data_dir, f"failed_rows_{job_id}.csv")
             try:
                 rec.failed_df.to_csv(fp, index=False, encoding="utf-8-sig")
                 audit_stats["reconciliation_failed_csv_path"] = fp
             except Exception:
                 traceback.print_exc()
-    except Exception:
-        traceback.print_exc()
-        missing_df = pd.DataFrame()
-        try:
-            from engines.engine import find_missing_products
 
-            raw_missing_df = find_missing_products(our_df, comp_dfs)
-            missing_df = smart_missing_barrier(raw_missing_df, our_df)
-        except Exception:
-            traceback.print_exc()
+        # حفظ المنتجات المكررة
+        if rec.duplicates_df is not None and not rec.duplicates_df.empty:
+            dp = os.path.join(data_dir, f"duplicates_{job_id}.csv")
+            try:
+                rec.duplicates_df.to_csv(dp, index=False, encoding="utf-8-sig")
+                audit_stats["reconciliation_duplicates_csv_path"] = dp
+                audit_stats["duplicate_count"] = len(rec.duplicates_df)
+            except Exception:
+                traceback.print_exc()
+
+        # حفظ المنتجات المستبعدة من الحاجز الذكي
+        if rec.barrier_rejected_df is not None and not rec.barrier_rejected_df.empty:
+            rp = os.path.join(data_dir, f"barrier_rejected_{job_id}.csv")
+            try:
+                rec.barrier_rejected_df.to_csv(rp, index=False, encoding="utf-8-sig")
+                audit_stats["barrier_rejected_csv_path"] = rp
+                audit_stats["barrier_rejected_count"] = len(rec.barrier_rejected_df)
+            except Exception:
+                traceback.print_exc()
+
+    except Exception as _rec_exc:
+        traceback.print_exc()
+        # الاحتفاظ بأي بيانات جزئية من rec إن وُجدت
+        if rec is not None and rec.new_products_df is not None and not rec.new_products_df.empty:
+            try:
+                missing_df = smart_missing_barrier(rec.new_products_df, our_df)
+                rec.apply_smart_barrier_adjustment(missing_df)
+                audit_stats = merge_reconciliation_into_audit(audit_stats, rec)
+            except Exception:
+                traceback.print_exc()
+        else:
+            # محاولة أخيرة — مسار بديل
+            try:
+                from engines.engine import find_missing_products
+                raw_missing_df = find_missing_products(our_df, comp_dfs)
+                missing_df = smart_missing_barrier(raw_missing_df, our_df)
+            except Exception:
+                traceback.print_exc()
 
     if merge_previous and prev_analysis_records:
         try:

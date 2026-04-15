@@ -2069,9 +2069,22 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True):
                               our_img=it.get("our_img", ""), our_url=it.get("our_url", ""))
                 if rr is not None:
                     results.append(rr)
-            except Exception:
-                # خطأ في منتج واحد → تخطيه وأكمل
-                continue
+                else:
+                    # _row returned None unexpectedly — create error fallback row
+                    results.append(_excluded_match_row(
+                        it["product"], it.get("our_price", 0), it.get("our_id", ""),
+                        it.get("brand", ""), it.get("size", ""), it.get("ptype", ""), it.get("gender", ""),
+                        our_img=it.get("our_img", ""), our_url=it.get("our_url", ""),
+                        score=0.0, مصدر_المطابقة="خطأ_في_المعالجة_null_row",
+                    ))
+            except Exception as _flush_err:
+                # خطأ في منتج واحد → إنشاء صف خطأ بدلاً من الحذف الصامت
+                results.append(_excluded_match_row(
+                    it.get("product", "غير_معروف"), it.get("our_price", 0), it.get("our_id", ""),
+                    it.get("brand", ""), it.get("size", ""), it.get("ptype", ""), it.get("gender", ""),
+                    our_img=it.get("our_img", ""), our_url=it.get("our_url", ""),
+                    score=0.0, مصدر_المطابقة=f"خطأ_في_المعالجة: {str(_flush_err)[:80]}",
+                ))
         pending.clear()
         # ✅ إصلاح #2: حذف time.sleep(0.5) — مخالف لقواعد Streamlit Main Thread
 
@@ -2169,8 +2182,15 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True):
             row_result = _row(product, our_price, our_id, brand, size, ptype, gender,
                               best0, src="auto", all_cands=all_cands,
                               our_img=our_img, our_url=our_url)
-            if row_result is not None:   # ← فلتر None
+            if row_result is not None:
                 results.append(row_result)
+            else:
+                results.append(_excluded_match_row(
+                    product, our_price, our_id, brand, size, ptype, gender,
+                    our_img=our_img, our_url=our_url,
+                    score=float(best0.get("score", 0)),
+                    مصدر_المطابقة="خطأ_في_المعالجة_null_auto_row",
+                ))
         else:
             pending.append(dict(
                 product=product, our_price=our_price, our_id=our_id,
@@ -2578,40 +2598,77 @@ def smart_missing_barrier(missing_df: pd.DataFrame, our_df: pd.DataFrame, thresh
     """
     محرك الحاجز الذكي: الفلتر النهائي قبل دخول المنتجات لقسم المفقودات.
     يضمن عدم تكرار عبر مطابقة الـ SKU والـ Fuzzy Matching الصارم مع كتالوجنا.
-    """
-    if missing_df.empty:
-        return missing_df
 
-    filtered_df, _ = apply_strict_pipeline_filters(missing_df, name_col="منتج_المنافس")
+    Returns:
+        kept_df — المنتجات التي تجاوزت الحاجز (نواقص حقيقية).
+        يتم تخزين المنتجات المستبعدة في kept_df.attrs["rejected_df"].
+    """
+    _empty = pd.DataFrame()
+
+    if missing_df.empty:
+        _empty.attrs["rejected_df"] = pd.DataFrame()
+        return _empty
+
+    filtered_df, filter_stats = apply_strict_pipeline_filters(missing_df, name_col="منتج_المنافس")
+
+    # --- المنتجات التي أسقطها فلتر الأنابيب (عينات، أسماء فارغة، أحجام صغيرة) ---
+    pipeline_rejected_idx = missing_df.index.difference(filtered_df.index)
+    pipeline_rejected_df = pd.DataFrame()
+    if len(pipeline_rejected_idx) > 0:
+        pipeline_rejected_df = missing_df.loc[pipeline_rejected_idx].copy()
+        pipeline_rejected_df["سبب_الاستبعاد"] = "فلتر_الأنابيب (عينة/اسم_فارغ/حجم_صغير)"
 
     if filtered_df.empty:
-        return filtered_df
+        _empty.attrs["rejected_df"] = pipeline_rejected_df if not pipeline_rejected_df.empty else pd.DataFrame()
+        return _empty
 
     if our_df is None or our_df.empty:
-        return filtered_df.reset_index(drop=True)
+        result = filtered_df.reset_index(drop=True)
+        result.attrs["rejected_df"] = pipeline_rejected_df if not pipeline_rejected_df.empty else pd.DataFrame()
+        return result
 
     our_names = _our_product_names_series(our_df)
     if not our_names:
-        return filtered_df.reset_index(drop=True)
+        result = filtered_df.reset_index(drop=True)
+        result.attrs["rejected_df"] = pipeline_rejected_df if not pipeline_rejected_df.empty else pd.DataFrame()
+        return result
 
     our_skus = _our_sku_set(our_df)
 
     keep_idx = []
+    barrier_rejected_rows = []
     for idx, row in filtered_df.iterrows():
         comp_sku = _norm_sku_barrier(row.get("معرف_المنافس", ""))
         raw_sku = str(row.get("معرف_المنافس", "")).strip()
         comp_name = str(row.get("منتج_المنافس", "")).strip()
 
         if comp_sku and (comp_sku in our_skus or raw_sku in our_skus):
+            rd = row.to_dict()
+            rd["سبب_الاستبعاد"] = f"SKU_موجود_في_كتالوجنا ({comp_sku})"
+            barrier_rejected_rows.append(rd)
             continue
 
         match = rf_process.extractOne(comp_name, our_names, scorer=fuzz.token_set_ratio)
         if match and match[1] >= threshold:
+            rd = row.to_dict()
+            rd["سبب_الاستبعاد"] = f"تطابق_ضبابي_≥{threshold}% مع: {match[0]} ({match[1]}%)"
+            barrier_rejected_rows.append(rd)
             continue
 
         keep_idx.append(idx)
 
-    if not keep_idx:
-        return pd.DataFrame()
+    # --- تجميع كل المستبعدين ---
+    all_rejected_parts = []
+    if not pipeline_rejected_df.empty:
+        all_rejected_parts.append(pipeline_rejected_df)
+    if barrier_rejected_rows:
+        all_rejected_parts.append(pd.DataFrame(barrier_rejected_rows))
+    rejected_df = pd.concat(all_rejected_parts, ignore_index=True) if all_rejected_parts else pd.DataFrame()
 
-    return filtered_df.loc[keep_idx].reset_index(drop=True)
+    if not keep_idx:
+        _empty.attrs["rejected_df"] = rejected_df
+        return _empty
+
+    result = filtered_df.loc[keep_idx].reset_index(drop=True)
+    result.attrs["rejected_df"] = rejected_df
+    return result
