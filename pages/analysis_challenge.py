@@ -384,7 +384,11 @@ def render():
                 cols_pa = [c for c in ["اسم_منتج_المنافس", "سعر_المنافس", "سعر_متجرنا",
                                         "فرق_السعر", "نسبة_فرق_السعر", "تنبيه_السعر"]
                            if c in price_alerts.columns]
-                st.dataframe(price_alerts[cols_pa], use_container_width=True, hide_index=True)
+                _pa_display = price_alerts[cols_pa]
+                if len(_pa_display) > 500:
+                    st.caption(f"⚠️ يعرض أول 500 تنبيه من {len(_pa_display):,}. البيانات كاملة في ملف التصدير.")
+                    _pa_display = _pa_display.head(500)
+                st.dataframe(_pa_display, use_container_width=True, hide_index=True)
 
     with tab2:
         _render_preview(

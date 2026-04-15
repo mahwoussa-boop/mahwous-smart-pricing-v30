@@ -624,8 +624,16 @@ def show() -> None:
             live_display = live_df.rename(columns=col_map)
             show_cols = [v for v in col_map.values() if v in live_display.columns]
 
+            _MAX_DISPLAY = 1000
+            _display_slice = live_display[show_cols]
+            if len(_display_slice) > _MAX_DISPLAY:
+                st.caption(
+                    f"⚠️ يعرض أول {_MAX_DISPLAY:,} منتج من {len(_display_slice):,}. "
+                    f"البيانات كاملة جاهزة للتصدير أدناه."
+                )
+                _display_slice = _display_slice.head(_MAX_DISPLAY)
             st.dataframe(
-                live_display[show_cols],
+                _display_slice,
                 use_container_width=True,
                 height=400,
             )
