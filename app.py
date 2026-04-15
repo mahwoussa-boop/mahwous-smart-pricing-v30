@@ -2296,32 +2296,26 @@ if page == "📊 لوحة التحكم":
     # ── 🕷️ Quick Scraper Control (Parallel Multi-Store) ──────────────────
     st.markdown("---")
     st.subheader("🕷️ التحكم السريع في الكشط")
-    
-    sc_col1, sc_col2 = st.columns([3, 1])
+
+    _dash_stores_count = len(_load_stores())
+    sc_col1, sc_col2, sc_col3 = st.columns([3, 1.2, 1.2])
     with sc_col1:
         st.markdown(
             f'<div style="background:#0d1b2a;border:1px solid #1e3a5f;border-radius:10px;padding:12px">'
-            f'<span style="color:#4fc3f7;font-weight:700">🚀 الكشط الجماعي المتوازي:</span> '
-            f'تشغيل جميع المتاجر المنافسة الـ {len(_load_stores())} في وقت واحد بأقصى سرعة.'
+            f'<span style="color:#4fc3f7;font-weight:700">🚀 الكشط الجماعي:</span> '
+            f'عدد المتاجر الحالية: <b>{_dash_stores_count}</b>. عند الضغط سيتم فتح صفحة الكشط وبدء التشغيل مباشرة.'
             f'</div>', unsafe_allow_html=True
         )
     with sc_col2:
-        if st.button("🚀 تشغيل الكل الآن", type="primary", use_container_width=True, help="بدء كشط جميع المتاجر بالتوازي فوراً"):
-            _sa_mod = _get_scraper_advanced_module()
-            if _sa_mod:
-                stores = _sa_mod._load_stores()
-                active_count = 0
-                for s in stores:
-                    d = _sa_mod._domain(s)
-                    if not _sa_mod._is_thread_alive(d):
-                        _sa_mod._launch_store(s, concurrency=_sa_mod._effective_concurrency())
-                        active_count += 1
-                if active_count > 0:
-                    st.success(f"✅ تم إطلاق {active_count} متجر بالتوازي!")
-                    time.sleep(1)
-                    st.rerun()
-            else:
-                st.error("❌ تعذّر تحميل محرك الكشط.")
+        if st.button("🚀 تشغيل جماعي", type="primary", use_container_width=True, disabled=(_dash_stores_count == 0), help="الانتقال لصفحة الكشط وبدء التشغيل تلقائياً"):
+            st.session_state["_scraper_autostart"] = True
+            st.session_state["_nav_pending"] = "🕷️ كشط المنافسين"
+            st.session_state["nav_flash"] = "🚀 تم تجهيز التشغيل الجماعي"
+            st.rerun()
+    with sc_col3:
+        if st.button("🕷️ فتح صفحة الكشط", use_container_width=True, help="الانتقال المباشر لصفحة الكشط"):
+            st.session_state["_nav_pending"] = "🕷️ كشط المنافسين"
+            st.rerun()
 
     # ── Phase 2: Auto-Analysis after scraper completion ─────────────────
     # Fires ONCE — locked by _sc_auto_analysis_pending (consumed here)
@@ -4875,6 +4869,12 @@ elif page == "🕷️ كشط المنافسين":
                 )
         else:
             st.caption("⚠️ وحدة الجدولة غير متاحة (scrapers/scheduler.py)")
+
+    # تشغيل تلقائي إذا جاء المستخدم من لوحة التحكم بزر التشغيل الجماعي
+    if st.session_state.pop("_scraper_autostart", False) and not _is_alive:
+        _start_scraper_bg()
+        st.session_state["_sc_msg"] = ("success", "✅ بدأ التشغيل الجماعي تلقائياً من لوحة التحكم")
+        st.rerun()
 
     # ════════════════════════════════════════════════════════════════════════
     #  القسم 3 — أزرار التشغيل الرئيسية + تقدير الحجم
