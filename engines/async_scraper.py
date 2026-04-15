@@ -249,15 +249,23 @@ class Progress:
     stores_results: Dict[str, int] = field(default_factory=dict)
     stores_http_errors: Dict[str, dict] = field(default_factory=dict)
 
-    def save(self, path: str = PROGRESS_FILE) -> None:
+    def save(self, path: str = None) -> None:
+        """حفظ التقدم في ملف خاص بالمتجر لضمان التوازي وعدم التداخل."""
         try:
+            # إذا لم يتم تحديد مسار، نستخدم المسار العام (للجدولة الكلية)
+            # أما في حالة الكشط الفردي/الجماعي المتوازي، نستخدم مساراً خاصاً بالمتجر
+            target_path = path or PROGRESS_FILE
+            if self.current_store and target_path == PROGRESS_FILE:
+                # إنشاء مسار خاص بالمتجر: data/_sc_live_{domain}.json
+                target_path = os.path.join(_DATA_DIR, f"_sc_live_{self.current_store}.json")
+
             self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.pid = os.getpid()
             with _PROGRESS_WRITE_LOCK:
-                with open(path, "w", encoding="utf-8") as f:
+                with open(target_path, "w", encoding="utf-8") as f:
                     json.dump(asdict(self), f, ensure_ascii=False, indent=2)
         except Exception:
-            logger.warning(f"تعذّر حفظ التقدم: {traceback.format_exc()}")
+            logger.warning(f"تعذّر حفظ التقدم في {path}: {traceback.format_exc()}")
 
     @classmethod
     def load(cls, path: str = PROGRESS_FILE) -> "Progress":
@@ -1109,14 +1117,19 @@ def run_single_store(
     try:
         progress.phase = "scraping"
         progress.save()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # تعديل لتمكين تشغيل عدة خيوط (Threads) متوازية لكل متجر بشكل مستقل
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
         rows = loop.run_until_complete(
             scrape_one_store(
                 store_url, progress, state,
                 concurrency=concurrency,
                 max_products=max_products,
-                resume=False, # Architectural Fix: Force fetch for UI requests
+                resume=False,
                 single_mode=True,
             )
         )
