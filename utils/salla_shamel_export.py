@@ -735,3 +735,28 @@ def build_salla_shamel_description_html(
 ) -> str:
     brand = resolved_brand or brand_raw or "غير متوفر"
     return generate_salla_html_description(product_name=product_name, brand_name=brand)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Omega Reverse Forge Integration
+#  Receives aggregated missing products from OmegaEngine.reverse_forge
+#  and exports them as a 40-column Salla-ready CSV
+# ══════════════════════════════════════════════════════════════════════════
+def export_omega_missing_to_salla(
+    missing_df: pd.DataFrame,
+    export_mode: str = "safe",
+) -> tuple[bytes, int]:
+    """
+    Direct export path for Omega Pillar 4 (Reverse Forge).
+    Expects a DataFrame with AI-enhanced columns (وصف_AI, الماركة_الرسمية, etc.)
+    already populated by OmegaEngine.
+
+    Returns: (csv_bytes, product_count)
+    """
+    csv_bytes, count, _ = export_to_salla_shamel_csv(
+        missing_df,
+        our_catalog_df=None,
+        verify_missing=False,
+        export_mode=export_mode,
+    )
+    return csv_bytes, count
