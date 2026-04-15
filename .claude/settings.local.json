@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\('app.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('engines/async_scraper.py', doraise=True\\); print\\('async_scraper.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('engines/ai_engine.py', doraise=True\\); print\\('ai_engine.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('utils/brand_manager.py', doraise=True\\); print\\('brand_manager.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('engines/sitemap_resolve.py', doraise=True\\); print\\('sitemap_resolve.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('utils/data_helpers.py', doraise=True\\); print\\('data_helpers.py OK'\\)\")"
+    ]
+  }
+}
