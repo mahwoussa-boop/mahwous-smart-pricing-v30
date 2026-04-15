@@ -293,6 +293,7 @@ _defaults = {
     "hidden_products": set(),  # منتجات أُرسلت لـ Make أو أُزيلت
     "nav_flash": None,    # رسالة انتقال سريعة من أزرار لوحة التحكم
     "last_audit_stats": None,  # عدادات تدقيق من run_full_analysis
+    "omega_result": None,      # نتيجة Omega System (المحاسبة الصارمة)
     "reconciliation_report": None,
     "reconciliation_failed_csv": None,
     "_action_toast": None, # رسالة نجاح/فشل Callback تُعرض كـ toast
@@ -742,6 +743,60 @@ def _render_audit_bar(audit_stats: dict):
         st.error(
             f"🚨 تحذير تدقيق: المدخلات ({ti}) لا تساوي مجموع الحالات ({tot}) — "
             f"معالج={pr} + بدون منافس={nc} + فارغ={se} + عينة/صغير={sk}."
+        )
+
+
+def _render_omega_accounting(omega_result=None):
+    """
+    Omega Strict Accounting Dashboard — proves mathematically that
+    Total_Input == Confirmed + Review + Samples + Missing + Damaged.
+    """
+    if omega_result is None:
+        omega_result = st.session_state.get("omega_result")
+    if omega_result is None:
+        return
+
+    try:
+        ab = omega_result.accounting_breakdown
+    except AttributeError:
+        # Not an OmegaResult object
+        return
+
+    total = ab["total_input"]
+    if total <= 0:
+        return
+
+    confirmed = ab["confirmed"]
+    review = ab["review"]
+    samples = ab["samples"]
+    missing = ab["missing"]
+    damaged = ab["damaged"]
+    routed_sum = confirmed + review + samples + missing + damaged
+    is_balanced = (routed_sum == total)
+
+    st.markdown("##### معادلة المحاسبة الصارمة (Strict Accounting Equation)")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("📥 إجمالي المدخلات", f"{total:,}")
+    c2.metric("✅ مطابق", f"{confirmed:,}")
+    c3.metric("⚠️ للمراجعة", f"{review:,}")
+    c4.metric("🧪 عينات", f"{samples:,}")
+    c5.metric("🛒 مفقودة / فرص", f"{missing:,}")
+    c6.metric("🗑️ سجلات تالفة", f"{damaged:,}")
+
+    if is_balanced:
+        st.success(
+            f"✅ معادلة المحاسبة محققة: "
+            f"{total:,} = {confirmed:,} + {review:,} + {samples:,} + {missing:,} + {damaged:,} "
+            f"(Zero Data Loss)"
+        )
+    else:
+        gap = total - routed_sum
+        st.error(
+            f"🚨 **انتهاك معادلة المحاسبة** — "
+            f"المدخل ({total:,}) ≠ مجموع المخرجات ({routed_sum:,}) | "
+            f"فجوة = {gap:+d} صف\n\n"
+            f"مطابق={confirmed} + مراجعة={review} + عينات={samples} "
+            f"+ مفقودة={missing} + تالفة={damaged}"
         )
 
 
@@ -2059,6 +2114,13 @@ if page == "✨ مصنع المنتجات":
 if page == "📊 لوحة التحكم":
     st.header("📊 لوحة التحكم")
     db_log("dashboard", "view")
+    # ── Omega Accounting Dashboard (if available) ──────────────────────
+    if st.session_state.get("omega_result"):
+        try:
+            _render_omega_accounting()
+        except Exception as _omega_err:
+            st.error(f"⚠️ خطأ في عرض لوحة Omega: {_omega_err}")
+
     if st.session_state.get("last_audit_stats"):
         try:
             _render_audit_bar(st.session_state.last_audit_stats)
