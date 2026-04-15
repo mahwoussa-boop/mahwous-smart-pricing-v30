@@ -1,18 +1,59 @@
+# ══════════════════════════════════════════════════════════════
+#  Mahwous .dockerignore — Lean Build Context
+# ══════════════════════════════════════════════════════════════
+
+# Version control
 .git
 .gitignore
-.cursor
+.gitattributes
+
+# Python bytecode & virtual environments
 **/__pycache__
 **/*.pyc
 **/*.pyo
-*.db
-.env
+*.egg-info
 .venv
 venv
-.streamlit/secrets.toml
-.dockerignore
-terminals
-agent-transcripts
-mcps
+env
 
-# ملفات البيانات المحلية — تُحقن عبر env vars أو Railway Volume
-data/
+# IDE & editor
+.cursor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets (NEVER ship)
+.env
+.env.*
+.streamlit/secrets.toml
+credentials*.json
+
+# Local data files (injected via Railway Volume or env vars)
+data/*.csv
+data/*.jsonl
+data/*.json
+data/*.xlsx
+data/*.db
+data/_scraper_chunks/
+
+# Development artifacts
+terminals/
+agent-transcripts/
+mcps/
+*.md
+LICENSE
+tests/
+*.test.py
+*.spec.py
+
+# Docker meta (avoid recursive context)
+.dockerignore
+Dockerfile
+docker-compose*.yml

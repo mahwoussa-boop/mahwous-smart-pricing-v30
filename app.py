@@ -40,7 +40,6 @@ from config import *
 
 # ── تجاوز SECTIONS لإضافة مصنع المنتجات وإعادة الترتيب (v26.0 UI Update) ──
 SECTIONS = [
-    "🧬 محرك التحليل",      # ← NEW: Analysis Challenge Engine
     "✨ مصنع المنتجات",
     "📊 لوحة التحكم",
     "🔴 سعر أعلى",
@@ -159,7 +158,7 @@ def _get_scraper_advanced_module():
         return None
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=500)
 def _cached_thumb_from_product_url(page_url: str) -> str:
     """صورة معاينة من صفحة المنتج عندما لا يوجد عمود صورة في الجدول المحفوظ."""
     u = (page_url or "").strip()
@@ -171,10 +170,34 @@ def _cached_thumb_from_product_url(page_url: str) -> str:
     return favicon_url_for_site(u)
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=500)
 def _cached_title_from_product_url(page_url: str) -> str:
     """عنوان المنتج من og:title / <title> عندما يكون الاسم مخزّناً كرابط."""
     return fetch_page_title_from_url(page_url) or ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 4: Safe DataFrame Rendering — prevents UI OOM on massive datasets
+# ══════════════════════════════════════════════════════════════════════════════
+_UI_MAX_DISPLAY_ROWS = int(os.environ.get("UI_MAX_DISPLAY_ROWS", "1000"))
+
+
+def safe_dataframe(df: pd.DataFrame, **kwargs) -> None:
+    """
+    Wrapper آمن حول st.dataframe — يقصّ العرض على _UI_MAX_DISPLAY_ROWS صف
+    ويعرض تحذيراً عند القصّ. يمنع تجميد واجهة المتصفح بالكامل.
+    """
+    if df is None or df.empty:
+        st.info("لا توجد بيانات للعرض.")
+        return
+    if len(df) > _UI_MAX_DISPLAY_ROWS:
+        st.caption(
+            f"⚠️ يعرض النظام أول {_UI_MAX_DISPLAY_ROWS:,} منتج فقط "
+            f"لتسريع الواجهة. البيانات كاملة ({len(df):,} صف) محفوظة وجاهزة للتصدير."
+        )
+        st.dataframe(df.head(_UI_MAX_DISPLAY_ROWS), **kwargs)
+    else:
+        st.dataframe(df, **kwargs)
 
 
 def _norm_dup_text(s: str) -> str:
@@ -2015,28 +2038,9 @@ _fallback_page = SECTIONS[0] if SECTIONS else "📊 لوحة التحكم"
 page = st.session_state.get("main_nav", _fallback_page)
 
 # ════════════════════════════════════════════════
-#  🧬 محرك التحليل — Analysis Challenge Engine
-# ════════════════════════════════════════════════
-if page == "🧬 محرك التحليل":
-    try:
-        if _analysis_challenge_mod is not None and hasattr(_analysis_challenge_mod, "render"):
-            _analysis_challenge_mod.render()
-        elif _analysis_challenge_mod is not None:
-            st.error("⚠️ دالة render() غير موجودة في pages/analysis_challenge.py")
-        else:
-            st.error("❌ تعذر تحميل محرك التحليل — تحقق من وجود ملف pages/analysis_challenge.py")
-            if hasattr(st, "exception"):
-                st.exception(_ac_import_err)
-    except Exception as _page_err:
-        st.error(f"خطأ في صفحة محرك التحليل: {_page_err}")
-        import traceback
-        with st.expander("تفاصيل الخطأ"):
-            st.code(traceback.format_exc())
-
-# ════════════════════════════════════════════════
 #  0. مصنع المنتجات (Magic Factory) — مدمج من pages/magic_factory.py
 # ════════════════════════════════════════════════
-elif page == "✨ مصنع المنتجات":
+if page == "✨ مصنع المنتجات":
     try:
         if _magic_factory_mod is not None and hasattr(_magic_factory_mod, "show"):
             _magic_factory_mod.show()
@@ -2668,6 +2672,19 @@ if page == "📊 لوحة التحكم":
                     prog.progress(1.0, "✅ اكتمل!")
                     st.balloons()
                     st.rerun()
+
+    # ── 🧬 محرك التحليل المتقدم (مدمج في لوحة التحكم) ──────────────────
+    st.markdown("---")
+    with st.expander("🧬 محرك التحليل المتقدم (Analysis Challenge Engine)", expanded=False):
+        try:
+            if _analysis_challenge_mod is not None and hasattr(_analysis_challenge_mod, "render"):
+                _analysis_challenge_mod.render()
+            else:
+                st.info("⚠️ محرك التحليل غير متوفر حالياً — تحقق من وجود ملف pages/analysis_challenge.py")
+        except Exception as _ace_err:
+            st.error(f"❌ خطأ في محرك التحليل: {_ace_err}")
+            import traceback as _tb_ace
+            st.code(_tb_ace.format_exc())
 
 
 # ════════════════════════════════════════════════
@@ -4036,6 +4053,7 @@ elif page == "⚡ أتمتة Make":
             with c2:
                 if st.button("🗑️ مسح القرارات"):
                     st.session_state.decisions_pending = {}
+                    import gc as _gc_clear; _gc_clear.collect()
                     st.rerun()
         else:
             st.info("لا توجد قرارات معلقة")
@@ -4986,7 +5004,7 @@ elif page == "🕷️ كشط المنافسين":
                 _display_cols = [c for c in ("product_name", "competitor", "price", "brand", "updated_at") if c in _local_prods_df.columns]
                 _col_rename = {"product_name": "المنتج", "competitor": "المنافس", "price": "السعر (ر.س)", "brand": "الماركة", "updated_at": "آخر تحديث"}
                 _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
-                st.dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
+                safe_dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
         else:
             st.info("لا توجد منتجات لهذا المنافس.")
     else:
@@ -5058,6 +5076,7 @@ elif page == "🕷️ كشط المنافسين":
                 st.session_state.analysis_df = None
                 st.session_state.last_audit_stats = None
                 st.session_state.nav_flash = "🤖 تم تفعيل البيانات الآلية"
+                import gc as _gc_reset; _gc_reset.collect()
                 st.rerun()
 
     # ── Auto-Analysis Trigger (fires ONCE per completed scrape) ──────────
