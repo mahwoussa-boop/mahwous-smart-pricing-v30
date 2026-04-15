@@ -254,7 +254,8 @@ class AdvancedScraper:
 
     def __init__(self, max_concurrent: int = 8):
         # Keep concurrency modest since each Selenium render is expensive.
-        self.max_concurrent = max(1, min(int(max_concurrent or 1), 3))
+        # رفع حد التوازي من 3 إلى 10 لزيادة سرعة الكشط الكلي للمتاجر المتعددة
+        self.max_concurrent = max(1, min(int(max_concurrent or 1), 10))
 
     async def scrape_product_page(self, url: str, store_name: str) -> Dict[str, Any]:
         """Scrape one URL by delegating to Selenium stealth engine."""

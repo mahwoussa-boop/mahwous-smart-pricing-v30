@@ -217,9 +217,10 @@ def render_page(url: str, timeout: int = 25, proxy: str = "", user_agent: str = 
         driver = _create_driver(user_agent=ua, proxy=proxy)
         driver.get(url)
         # Simulate human reading/clicking delay
-        time.sleep(random.uniform(2.5, 5.5))
-        _wait_for_product_signals(driver, timeout=min(timeout, 20))
-        time.sleep(1.2)
+        # تقليل أزمنة الانتظار لتسريع الكشط (من 2.5-5.5 إلى 1.0-2.5 ثانية)
+        time.sleep(random.uniform(1.0, 2.5))
+        _wait_for_product_signals(driver, timeout=min(timeout, 10))
+        time.sleep(0.5)
         try:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.45);")
             time.sleep(0.5)
@@ -415,7 +416,8 @@ def scrape_many_products_v30(
             ai_price_extractor=ai_price_extractor,
         )
 
-    workers = max(1, min(int(max_workers or 1), 3))
+    # رفع حد التوازي من 3 إلى 10 لزيادة السرعة مع مراعاة موارد Cloud Run (2GB RAM)
+    workers = max(1, min(int(max_workers or 1), 10))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {executor.submit(_run, u): u for u in url_list}
         for future in concurrent.futures.as_completed(future_map):
