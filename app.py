@@ -40,6 +40,7 @@ from config import *
 
 # ── تجاوز SECTIONS لإضافة مصنع المنتجات وإعادة الترتيب (v26.0 UI Update) ──
 SECTIONS = [
+    "🧬 محرك التحليل",      # ← NEW: Analysis Challenge Engine
     "✨ مصنع المنتجات",
     "📊 لوحة التحكم",
     "🔴 سعر أعلى",
@@ -127,6 +128,12 @@ try:
     import pages.magic_factory as _magic_factory_mod
 except Exception as _mf_import_err:
     _magic_factory_mod = None
+
+# ── محرك التحليل — استيراد آمن ───────────────────────────────────────────
+try:
+    import pages.analysis_challenge as _analysis_challenge_mod
+except Exception as _ac_import_err:
+    _analysis_challenge_mod = None
 
 _scraper_advanced_mod = None
 _scraper_advanced_import_error = None
@@ -2008,9 +2015,28 @@ _fallback_page = SECTIONS[0] if SECTIONS else "📊 لوحة التحكم"
 page = st.session_state.get("main_nav", _fallback_page)
 
 # ════════════════════════════════════════════════
+#  🧬 محرك التحليل — Analysis Challenge Engine
+# ════════════════════════════════════════════════
+if page == "🧬 محرك التحليل":
+    try:
+        if _analysis_challenge_mod is not None and hasattr(_analysis_challenge_mod, "render"):
+            _analysis_challenge_mod.render()
+        elif _analysis_challenge_mod is not None:
+            st.error("⚠️ دالة render() غير موجودة في pages/analysis_challenge.py")
+        else:
+            st.error("❌ تعذر تحميل محرك التحليل — تحقق من وجود ملف pages/analysis_challenge.py")
+            if hasattr(st, "exception"):
+                st.exception(_ac_import_err)
+    except Exception as _page_err:
+        st.error(f"خطأ في صفحة محرك التحليل: {_page_err}")
+        import traceback
+        with st.expander("تفاصيل الخطأ"):
+            st.code(traceback.format_exc())
+
+# ════════════════════════════════════════════════
 #  0. مصنع المنتجات (Magic Factory) — مدمج من pages/magic_factory.py
 # ════════════════════════════════════════════════
-if page == "✨ مصنع المنتجات":
+elif page == "✨ مصنع المنتجات":
     try:
         if _magic_factory_mod is not None and hasattr(_magic_factory_mod, "show"):
             _magic_factory_mod.show()
