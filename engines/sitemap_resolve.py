@@ -91,12 +91,15 @@ _ZID_DOMAINS = re.compile(
 
 # صفحة منتج — أنماط شائعة عبر المنصات
 _PRODUCT_URL_RE = re.compile(
-    r"(/p\d{5,}$"         # سلة: /p123456789
-    r"|/products?/"       # Shopify / WooCommerce
+    r"(/p\d{5,}$"            # سلة: /p123456789
+    r"|/products?/"          # Shopify / WooCommerce
+    r"|/product/[^/?#]{3,}"  # Generic: /product/slug (Golden Scent, etc.)
     r"|/item/"
     r"|/shop/"
     r"|/ar/p/"
     r"|/en/p/"
+    r"|/ar/product/"         # Golden Scent Arabic
+    r"|/en/product/"         # Golden Scent English
     r"|/product-page/"
     r"|منتج"
     r")",
@@ -400,9 +403,10 @@ def _filter_product_entries(entries: List[SitemapEntry], base: str) -> List[Site
     salla = _is_salla(base)
     product_entries: List[SitemapEntry] = []
     
-    # ─── v26.1: تحسين لـ worldgivenchy والمواقع متعددة اللغات ───
+    # ─── v26.2: تحسين لـ worldgivenchy والمواقع متعددة اللغات + Golden Scent ───
     import urllib.parse
     is_worldgivenchy = "worldgivenchy.com" in base.lower()
+    is_goldenscent = "goldenscent.com" in base.lower()
     seen_slugs = set()
 
     for e in entries:
@@ -436,6 +440,17 @@ def _filter_product_entries(entries: List[SitemapEntry], base: str) -> List[Site
             ]
             if any(x in url_decoded for x in bad_keywords):
                 continue
+
+        # ─── Golden Scent: /ar/product/SLUG or /en/product/SLUG ───
+        if is_goldenscent:
+            path_low = (p.path or "").lower()
+            # قبول صفحات المنتجات فقط
+            if "/product/" in path_low or "/products/" in path_low:
+                slug = p.path.rstrip('/').split('/')[-1]
+                if slug and slug not in seen_slugs:
+                    product_entries.append(e)
+                    seen_slugs.add(slug)
+            continue  # تخطي الفلاتر العامة لـ Golden Scent
 
         if salla:
             if _is_salla_product(e.url):

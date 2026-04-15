@@ -62,6 +62,19 @@ _RE_SMART_PRICE_PATTERNS = [
     _re.compile(r'(?:ر\.س|SAR|SR)\s*(\d+(?:[\.,]\d+)?)', _re.I),
 ]
 
+# ─── Currency conversion for USD stores (e.g. alkhabeershop.com) ─────────
+_USD_TO_SAR = float(os.environ.get("USD_TO_SAR_RATE", "3.75"))
+_USD_STORES = {"alkhabeershop.com", "alkhabeer.com"}
+
+def _is_usd_store(store_url: str) -> bool:
+    """يتحقق إذا كان المتجر يسعّر بالدولار (مثل الخبير للعطور)."""
+    domain = _domain(store_url).lower()
+    return any(usd in domain for usd in _USD_STORES)
+
+def _convert_usd_to_sar(price: float) -> float:
+    """يحوّل السعر من USD إلى SAR."""
+    return round(price * _USD_TO_SAR, 2) if price > 0 else 0.0
+
 # ─── Anti-ban imports مُسبقة على مستوى الـ Module ─────────────────────────
 try:
     from scrapers.anti_ban import stealth_manager, fetch_with_retry
@@ -436,6 +449,11 @@ def extract_product(data: dict, store_url: str) -> dict | None:
     brand = str(data.get("vendor") or data.get("brand") or data.get("الماركة") or "")
     cat   = str(data.get("product_type") or data.get("category") or "")
     avail = str(data.get("available") or data.get("in_stock") or "true")
+
+    # ── تحويل العملة للمتاجر التي تسعّر بالدولار (مثل alkhabeershop.com) ──
+    if _is_usd_store(store_url):
+        price = _convert_usd_to_sar(price)
+        orig  = _convert_usd_to_sar(orig)
 
     return {
         "store":          _domain(store_url),

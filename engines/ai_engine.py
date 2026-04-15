@@ -1511,7 +1511,12 @@ top_notes, heart_notes, base_notes, gender_hint, is_perfume
 true إن كان المنتج عطراً (EDP/EDT/Parfum/Cologne… أو سياق واضح)، وإلا false.
 
 ## 6) top_notes, heart_notes, base_notes
-نص عربي موجز (أو مفصول بفواصل) مستخرج من المدخلات؛ إن لم تُذكر مكونات، اكتب "غير مذكور في المصدر" أو استنتجاً حذراً من العائلة العطرية المعروفة للاسم **دون اختلاق تفاصيل كيميائية دقيقة**.
+نص عربي موجز (أو مفصول بفواصل) مستخرج من المدخلات.
+🚨 قاعدة المكونات الحقيقية (CRITICAL):
+- ابحث في معرفتك عن المكونات الحقيقية المعروفة لهذا العطر من مصادر مثل Fragrantica و Parfumo.
+- إن كان العطر معروفاً: اكتب المكونات الحقيقية بالتحديد (مثلاً: البرغموت، الياسمين، خشب الصندل).
+- إن لم يكن معروفاً: اكتب "غير مذكور في المصدر" — لا تختلق مكونات وهمية أبداً.
+- لا تكتب عبارات عامة مثل "مكونات شرقية فاخرة" بدون تسمية المكونات الفعلية.
 
 ## 7) seo_title و seo_description
 - seo_title: ≤ 60 حرفاً (عربي)، يضم ماركة + اسم عطر/منتج + كلمات بحثية طبيعية.
@@ -1617,7 +1622,7 @@ def enhance_competitor_product_for_salla(
 """
 
     raw = (
-        _call_gemini(prompt, MAGIC_FACTORY_SALLA_SYSTEM, temperature=0.3, max_tokens=8192)
+        _call_gemini(prompt, MAGIC_FACTORY_SALLA_SYSTEM, temperature=0.1, max_tokens=8192)
         or _call_openrouter(prompt, MAGIC_FACTORY_SALLA_SYSTEM)
         or _call_cohere(prompt, MAGIC_FACTORY_SALLA_SYSTEM)
     )
