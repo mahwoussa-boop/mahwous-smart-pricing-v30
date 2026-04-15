@@ -324,13 +324,15 @@ def extract_dna(df: pd.DataFrame, name_col: str) -> pd.DataFrame:
 
 @dataclass
 class OmegaRouteResult:
-    """Result of the Omega routing — 4 isolated DataFrames + dead letters."""
+    """Result of the Omega routing — 5 isolated DataFrames + dead letters."""
     confirmed_df: pd.DataFrame       # 100% DNA match (score ≥ 95%)
     review_df: pd.DataFrame          # Swarm Court (80-95% text match)
     samples_vault_df: pd.DataFrame   # Size < 10ml
     missing_forge_df: pd.DataFrame   # Zero matches in our database
+    damaged_df: pd.DataFrame         # Unparseable name / mangled DNA
     dead_letters: DeadLetterCollector
     routing_stats: Dict[str, int]
+    total_input_count: int           # Original comp_df length for accounting
 
 
 def _compute_fuzz_scores_vectorized(
@@ -362,54 +364,102 @@ def route_products(
     dead_letters: DeadLetterCollector,
 ) -> OmegaRouteResult:
     """
-    Pillar 2: Route EVERY competitor row to exactly one of 4 DataFrames.
-    Uses DNA-strict matching: Brand+Size+Concentration+Tester must align exactly.
-    RapidFuzz is ONLY applied to BaseName.
+    Pillar 2: Route EVERY competitor row to exactly one of 5 DataFrames.
+    Uses index-tracked set arithmetic to guarantee:
+        Total_Input == Confirmed + Review + Samples + Missing + Damaged
 
-    NO use of `continue` for dropping rows. EVERY row is accounted for.
+    The Sweep-Up Phase at the end mathematically guarantees any index NOT
+    claimed by (confirmed | review | samples | damaged) defaults to missing.
     """
+    total_input = len(comp_df)
     stats: Dict[str, int] = {
-        "total_comp_rows": len(comp_df),
+        "total_comp_rows": total_input,
         "confirmed": 0,
         "review": 0,
         "samples_vault": 0,
         "missing_forge": 0,
+        "damaged": 0,
         "dead_letters": 0,
     }
 
-    # ── Step 1: Extract DNA for both DataFrames ──────────────────────────
+    # ── Canonical index: the single source of truth ──────────────────────
+    # Reset index to 0..N-1 so we can track every row by integer position
+    comp_work = comp_df.copy().reset_index(drop=True)
+    all_indices = set(comp_work.index)  # {0, 1, 2, ..., N-1}
+
+    # Sets to track which indices have been claimed
+    confirmed_idx: set = set()
+    review_idx: set = set()
+    samples_idx: set = set()
+    damaged_idx: set = set()
+    # missing_idx is computed as the remainder (sweep-up)
+
+    # ── Step 1: Extract DNA for our catalog ──────────────────────────────
     try:
         our_dna = extract_dna(our_df, our_name_col)
     except Exception as e:
         dead_letters.catch(-1, {"step": "our_dna_extraction"}, e, "P1")
+        # All competitor rows → missing (our DNA failed, can't match anything)
         return OmegaRouteResult(
-            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), comp_df.copy(),
-            dead_letters, stats,
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+            comp_work.copy(), pd.DataFrame(),
+            dead_letters, stats, total_input,
         )
 
+    # ── Step 2: Extract DNA for competitor products ──────────────────────
     try:
-        comp_dna = extract_dna(comp_df, comp_name_col)
+        comp_dna = extract_dna(comp_work, comp_name_col)
     except Exception as e:
         dead_letters.catch(-1, {"step": "comp_dna_extraction"}, e, "P1")
         return OmegaRouteResult(
-            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), comp_df.copy(),
-            dead_letters, stats,
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+            comp_work.copy(), pd.DataFrame(),
+            dead_letters, stats, total_input,
         )
 
-    # ── Step 2: Isolate samples (Size < 10ml) FIRST ─────────────────────
-    sample_mask = (comp_dna["_dna_size_ml"] > 0) & (comp_dna["_dna_size_ml"] < 10)
-    samples_vault_df = comp_dna[sample_mask].copy()
-    remaining = comp_dna[~sample_mask].copy()
-    stats["samples_vault"] = len(samples_vault_df)
+    # ── Step 3: Identify DAMAGED records ─────────────────────────────────
+    # Damaged = name is empty/unparseable OR basename is empty after full extraction
+    names = comp_dna[comp_name_col].fillna("").astype(str).str.strip()
+    basenames = comp_dna["_dna_basename"].fillna("").astype(str).str.strip()
+    name_empty = names.isin(["", "nan", "none", "<na>"]) | (names.str.len() < 2)
+    basename_empty = basenames.str.len() < 1
+
+    # A record is damaged if: name is unparseable AND no brand AND no size could be extracted
+    brand_empty = comp_dna["_dna_brand"].fillna("").astype(str).str.strip().str.len() < 1
+    no_size = comp_dna["_dna_size_ml"].fillna(0) == 0
+
+    damaged_mask = name_empty | (basename_empty & brand_empty & no_size)
+    damaged_idx = set(comp_dna.index[damaged_mask].tolist())
+    stats["damaged"] = len(damaged_idx)
+
+    # ── Step 4: Identify SAMPLES (Size < 10ml, not already damaged) ──────
+    sample_mask = (
+        (comp_dna["_dna_size_ml"] > 0)
+        & (comp_dna["_dna_size_ml"] < 10)
+        & ~comp_dna.index.isin(damaged_idx)
+    )
+    samples_idx = set(comp_dna.index[sample_mask].tolist())
+    stats["samples_vault"] = len(samples_idx)
+
+    # ── Step 5: Remaining indices for DNA matching ───────────────────────
+    claimed_so_far = damaged_idx | samples_idx
+    remaining_idx = all_indices - claimed_so_far
+    remaining = comp_dna.loc[comp_dna.index.isin(remaining_idx)].copy()
 
     if remaining.empty:
+        # All rows are damaged or samples — sweep-up: nothing left for missing
         return OmegaRouteResult(
-            pd.DataFrame(), pd.DataFrame(), samples_vault_df,
-            pd.DataFrame(), dead_letters, stats,
+            confirmed_df=pd.DataFrame(),
+            review_df=pd.DataFrame(),
+            samples_vault_df=comp_dna.loc[comp_dna.index.isin(samples_idx)].copy(),
+            missing_forge_df=pd.DataFrame(),
+            damaged_df=comp_dna.loc[comp_dna.index.isin(damaged_idx)].copy(),
+            dead_letters=dead_letters,
+            routing_stats=stats,
+            total_input_count=total_input,
         )
 
-    # ── Step 3: DNA-strict cross join on Brand+Size+Concentration+Tester ─
-    # Build join keys (vectorized)
+    # ── Step 6: DNA-strict cross join on Brand+Size+Concentration+Tester ─
     def _make_join_key(df: pd.DataFrame) -> pd.Series:
         brand = df["_dna_brand"].fillna("").astype(str).str.strip().str.lower()
         size = df["_dna_size_ml"].fillna(0).astype(int).astype(str)
@@ -420,21 +470,12 @@ def route_products(
     our_dna["_join_key"] = _make_join_key(our_dna)
     remaining["_join_key"] = _make_join_key(remaining)
 
-    # Index our products by join key for fast lookup
     our_keys = set(our_dna["_join_key"].unique())
-
-    # Partition remaining: has_dna_match (key exists in our catalog) vs no_match
     has_match_mask = remaining["_join_key"].isin(our_keys)
     matchable = remaining[has_match_mask].copy()
-    no_dna_match = remaining[~has_match_mask].copy()
 
-    # ── Step 4: For matchable rows, compute BaseName fuzz score ──────────
-    confirmed_rows = []
-    review_rows = []
-    missing_from_matchable = []
-
+    # ── Step 7: For matchable rows, compute BaseName fuzz score ──────────
     if not matchable.empty:
-        # Build our basename lookup: join_key → list of basenames
         our_basename_lookup: Dict[str, List[str]] = {}
         for _, r in our_dna.iterrows():
             key = r["_join_key"]
@@ -455,62 +496,89 @@ def route_products(
                 our_basenames_list = our_basename_lookup.get(join_key, [])
 
                 if not our_basenames_list or not comp_basename:
-                    missing_from_matchable.append(row)
-                    continue  # this continue is safe — row is routed to missing_from_matchable
-
-                # Find best fuzzy score among our basenames with same DNA
-                best_score = 0.0
-                if rf_fuzz is not None:
-                    for ob in our_basenames_list:
-                        if not ob:
-                            continue
-                        s = rf_fuzz.token_set_ratio(comp_basename, ob)
-                        if s > best_score:
-                            best_score = s
+                    # No basename to compare → will fall through to sweep-up (missing)
+                    pass
                 else:
-                    # Fallback: exact containment
-                    for ob in our_basenames_list:
-                        if comp_basename in ob or ob in comp_basename:
-                            best_score = 90.0
-                            break
+                    best_score = 0.0
+                    if rf_fuzz is not None:
+                        for ob in our_basenames_list:
+                            if not ob:
+                                pass  # skip empty but don't break
+                            else:
+                                s = rf_fuzz.token_set_ratio(comp_basename, ob)
+                                if s > best_score:
+                                    best_score = s
+                    else:
+                        for ob in our_basenames_list:
+                            if comp_basename in ob or ob in comp_basename:
+                                best_score = 90.0
+                                break
 
-                row_with_score = row.copy()
-                row_with_score["_fuzz_score"] = best_score
+                    comp_dna.at[idx, "_fuzz_score"] = best_score
 
-                if best_score >= 95:
-                    confirmed_rows.append(row_with_score)
-                elif best_score >= 80:
-                    review_rows.append(row_with_score)
-                else:
-                    missing_from_matchable.append(row_with_score)
+                    if best_score >= 95:
+                        confirmed_idx.add(idx)
+                    elif best_score >= 80:
+                        review_idx.add(idx)
+                    # else: falls through to sweep-up → missing
 
             except Exception as e:
-                dead_letters.catch(int(idx) if isinstance(idx, (int, np.integer)) else 0,
-                                   row.to_dict() if hasattr(row, 'to_dict') else {}, e, "P2")
+                dead_letters.catch(
+                    int(idx) if isinstance(idx, (int, np.integer)) else 0,
+                    row.to_dict() if hasattr(row, "to_dict") else {},
+                    e, "P2",
+                )
                 stats["dead_letters"] += 1
-                # Route to missing on error — NEVER drop
-                missing_from_matchable.append(row)
+                # On error: row stays unclaimed → sweep-up assigns it to missing
 
-    # ── Step 5: Assemble the 4 output DataFrames ────────────────────────
-    confirmed_df = pd.DataFrame(confirmed_rows) if confirmed_rows else pd.DataFrame()
-    review_df = pd.DataFrame(review_rows) if review_rows else pd.DataFrame()
-    missing_forge_df = pd.concat(
-        [no_dna_match, pd.DataFrame(missing_from_matchable)] if missing_from_matchable
-        else [no_dna_match],
-        ignore_index=True,
-    ) if not no_dna_match.empty or missing_from_matchable else pd.DataFrame()
+    # ══════════════════════════════════════════════════════════════════════
+    #  THE SWEEP-UP PHASE — Mathematical Guarantee of Zero Data Loss
+    #  Any index not in (confirmed | review | samples | damaged) → missing
+    # ══════════════════════════════════════════════════════════════════════
+    claimed_final = confirmed_idx | review_idx | samples_idx | damaged_idx
+    missing_idx = all_indices - claimed_final  # ← THE ACCOUNTING EQUATION
 
-    stats["confirmed"] = len(confirmed_df)
-    stats["review"] = len(review_df)
-    stats["missing_forge"] = len(missing_forge_df)
+    stats["confirmed"] = len(confirmed_idx)
+    stats["review"] = len(review_idx)
+    stats["missing_forge"] = len(missing_idx)
+
+    # ── Build output DataFrames from index sets ──────────────────────────
+    confirmed_df = comp_dna.loc[comp_dna.index.isin(confirmed_idx)].copy() if confirmed_idx else pd.DataFrame()
+    review_df = comp_dna.loc[comp_dna.index.isin(review_idx)].copy() if review_idx else pd.DataFrame()
+    samples_vault_df = comp_dna.loc[comp_dna.index.isin(samples_idx)].copy() if samples_idx else pd.DataFrame()
+    missing_forge_df = comp_dna.loc[comp_dna.index.isin(missing_idx)].copy() if missing_idx else pd.DataFrame()
+    damaged_df = comp_dna.loc[comp_dna.index.isin(damaged_idx)].copy() if damaged_idx else pd.DataFrame()
+
+    # ── ASSERTION: The Strict Accounting Equation ────────────────────────
+    routed_total = len(confirmed_df) + len(review_df) + len(samples_vault_df) + len(missing_forge_df) + len(damaged_df)
+    if routed_total != total_input:
+        logger.error(
+            "ACCOUNTING VIOLATION: input=%d but routed=%d "
+            "(confirmed=%d review=%d samples=%d missing=%d damaged=%d)",
+            total_input, routed_total,
+            len(confirmed_df), len(review_df), len(samples_vault_df),
+            len(missing_forge_df), len(damaged_df),
+        )
+    assert routed_total == total_input, (
+        f"Omega Accounting Equation FAILED: {total_input} != "
+        f"{len(confirmed_df)}+{len(review_df)}+{len(samples_vault_df)}"
+        f"+{len(missing_forge_df)}+{len(damaged_df)} = {routed_total}"
+    )
+    logger.info(
+        "Omega Accounting: %d == %d+%d+%d+%d+%d (BALANCED)",
+        total_input, len(confirmed_df), len(review_df),
+        len(samples_vault_df), len(missing_forge_df), len(damaged_df),
+    )
 
     return OmegaRouteResult(
         confirmed_df=confirmed_df,
         review_df=review_df,
         samples_vault_df=samples_vault_df,
         missing_forge_df=missing_forge_df,
+        damaged_df=damaged_df,
         dead_letters=dead_letters,
         routing_stats=stats,
+        total_input_count=total_input,
     )
 
 
@@ -798,17 +866,41 @@ def reverse_forge_to_salla(
 
 @dataclass
 class OmegaResult:
-    """Complete result of the Omega System analysis."""
+    """Complete result of the Omega System analysis — 5 DataFrames + accounting proof."""
     confirmed_df: pd.DataFrame
     review_df: pd.DataFrame
     samples_vault_df: pd.DataFrame
     missing_forge_df: pd.DataFrame
+    damaged_df: pd.DataFrame              # NEW: unparseable/mangled records
     aggregated_missing_df: pd.DataFrame
     salla_csv_bytes: Optional[bytes]
     salla_product_count: int
     dead_letters_df: pd.DataFrame
     routing_stats: Dict[str, int]
     dead_letter_count: int
+    total_input_count: int                # NEW: original comp_df length
+
+    @property
+    def is_balanced(self) -> bool:
+        """True if the Strict Accounting Equation holds."""
+        routed = (
+            len(self.confirmed_df) + len(self.review_df)
+            + len(self.samples_vault_df) + len(self.missing_forge_df)
+            + len(self.damaged_df)
+        )
+        return routed == self.total_input_count
+
+    @property
+    def accounting_breakdown(self) -> Dict[str, int]:
+        """Returns the full accounting breakdown for UI display."""
+        return {
+            "total_input": self.total_input_count,
+            "confirmed": len(self.confirmed_df),
+            "review": len(self.review_df),
+            "samples": len(self.samples_vault_df),
+            "missing": len(self.missing_forge_df),
+            "damaged": len(self.damaged_df),
+        }
 
 
 class OmegaEngine:
@@ -850,6 +942,8 @@ class OmegaEngine:
         # ── P2: Route all competitor products ────────────────────────────
         if progress_callback:
             progress_callback(0.1, "DNA Extraction & Routing...")
+
+        total_input = len(comp_df)
 
         route_result = route_products(
             our_df, comp_df, our_name_col, comp_name_col, self._dead_letters,
@@ -902,32 +996,34 @@ class OmegaEngine:
 
         logger.info("Omega Engine: Complete — %s", final_stats)
 
-        # Cleanup DNA columns from output
-        dna_cols = [c for c in ["_dna_brand", "_dna_basename", "_dna_size_ml",
-                                "_dna_concentration", "_dna_is_tester", "_join_key",
-                                "_fuzz_score"] if True]
-
-        def _clean_dna(df):
-            if df is None or df.empty:
-                return df
-            drop = [c for c in dna_cols if c in df.columns]
-            return df.drop(columns=drop, errors="ignore") if drop else df
-
         # Memory cleanup
         gc.collect()
 
-        return OmegaResult(
+        result = OmegaResult(
             confirmed_df=route_result.confirmed_df,
             review_df=validated_review,
             samples_vault_df=route_result.samples_vault_df,
             missing_forge_df=missing_forge_df,
+            damaged_df=route_result.damaged_df,
             aggregated_missing_df=aggregated_missing,
             salla_csv_bytes=salla_csv_bytes,
             salla_product_count=salla_count,
             dead_letters_df=self._dead_letters.to_dataframe(),
             routing_stats=final_stats,
             dead_letter_count=self._dead_letters.count,
+            total_input_count=total_input,
         )
+
+        # Log the accounting proof
+        ab = result.accounting_breakdown
+        logger.info(
+            "Omega Accounting Proof: %d == %d+%d+%d+%d+%d (balanced=%s)",
+            ab["total_input"], ab["confirmed"], ab["review"],
+            ab["samples"], ab["missing"], ab["damaged"],
+            result.is_balanced,
+        )
+
+        return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
