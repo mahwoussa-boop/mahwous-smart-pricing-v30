@@ -296,6 +296,8 @@ _defaults = {
     "omega_result": None,      # نتيجة Omega System (المحاسبة الصارمة)
     "reconciliation_report": None,
     "reconciliation_failed_csv": None,
+    "reconciliation_duplicates_csv": None,
+    "barrier_rejected_csv": None,
     "_action_toast": None, # رسالة نجاح/فشل Callback تُعرض كـ toast
 }
 for k, v in _defaults.items():
@@ -873,6 +875,45 @@ def _render_reconciliation_dashboard(audit_stats: dict):
             file_name="failed_rows.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_failed_rows_log",
+        )
+    # ═══ أزرار تحميل المنتجات المكررة والمستبعدة من الحاجز ═══
+    _dup_bytes = st.session_state.get("reconciliation_duplicates_csv")
+    if not _dup_bytes:
+        from pathlib import Path
+        _dp = audit_stats.get("reconciliation_duplicates_csv_path")
+        if _dp:
+            p = Path(str(_dp))
+            if p.is_file():
+                try:
+                    _dup_bytes = p.read_bytes()
+                except OSError:
+                    _dup_bytes = None
+    if _dup_bytes:
+        st.download_button(
+            label=f"🔄 تنزيل المنتجات المكررة ({int(audit_stats.get('duplicate_count', 0)):,})",
+            data=_dup_bytes,
+            file_name="duplicates.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_duplicates_log",
+        )
+    _rej_bytes = st.session_state.get("barrier_rejected_csv")
+    if not _rej_bytes:
+        from pathlib import Path
+        _rp = audit_stats.get("barrier_rejected_csv_path")
+        if _rp:
+            p = Path(str(_rp))
+            if p.is_file():
+                try:
+                    _rej_bytes = p.read_bytes()
+                except OSError:
+                    _rej_bytes = None
+    if _rej_bytes:
+        st.download_button(
+            label=f"🚫 تنزيل المستبعدة من النواقص ({int(audit_stats.get('barrier_rejected_count', 0)):,})",
+            data=_rej_bytes,
+            file_name="barrier_rejected.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_barrier_rejected_log",
         )
     st.caption(
         "الأرقام تعكس **صفوف ملفات المنافس** في آخر تشغيل؛ إن فعّلت الدمج التراكمي قد يزيد عدد "
@@ -2673,21 +2714,61 @@ if page == "📊 لوحة التحكم":
                             if _rec.failed_df is not None and not _rec.failed_df.empty
                             else None
                         )
+                        # حفظ المنتجات المكررة للتحميل
+                        st.session_state.reconciliation_duplicates_csv = (
+                            failed_rows_to_xlsx_bytes(_rec.duplicates_df)
+                            if _rec.duplicates_df is not None and not _rec.duplicates_df.empty
+                            else None
+                        )
+                        # حفظ المنتجات المستبعدة من الحاجز الذكي للتحميل
+                        st.session_state.barrier_rejected_csv = (
+                            failed_rows_to_xlsx_bytes(_rec.barrier_rejected_df)
+                            if _rec.barrier_rejected_df is not None and not _rec.barrier_rejected_df.empty
+                            else None
+                        )
+                        import os
+                        _dd = os.environ.get("DATA_DIR", "data")
+                        os.makedirs(_dd, exist_ok=True)
+                        _job_tag = st.session_state.get('job_id') or 'local'
                         if _rec.failed_df is not None and not _rec.failed_df.empty:
-                            import os
-
-                            _dd = os.environ.get("DATA_DIR", "data")
-                            os.makedirs(_dd, exist_ok=True)
-                            _fj = os.path.join(
-                                _dd,
-                                f"failed_rows_{st.session_state.get('job_id') or 'local'}.xlsx",
-                            )
+                            _fj = os.path.join(_dd, f"failed_rows_{_job_tag}.xlsx")
                             try:
                                 _rec.failed_df.to_excel(_fj, index=False, engine="openpyxl")
                                 audit_stats["reconciliation_failed_csv_path"] = _fj
                                 st.session_state.last_audit_stats = audit_stats
                             except OSError:
                                 pass
+                        if _rec.duplicates_df is not None and not _rec.duplicates_df.empty:
+                            _dj = os.path.join(_dd, f"duplicates_{_job_tag}.xlsx")
+                            try:
+                                _rec.duplicates_df.to_excel(_dj, index=False, engine="openpyxl")
+                                audit_stats["reconciliation_duplicates_csv_path"] = _dj
+                                audit_stats["duplicate_count"] = len(_rec.duplicates_df)
+                            except OSError:
+                                pass
+                        if _rec.barrier_rejected_df is not None and not _rec.barrier_rejected_df.empty:
+                            _rj = os.path.join(_dd, f"barrier_rejected_{_job_tag}.xlsx")
+                            try:
+                                _rec.barrier_rejected_df.to_excel(_rj, index=False, engine="openpyxl")
+                                audit_stats["barrier_rejected_csv_path"] = _rj
+                                audit_stats["barrier_rejected_count"] = len(_rec.barrier_rejected_df)
+                            except OSError:
+                                pass
+
+                        # ═══ Phase 5: Ironclad Guarantee — التحقق النهائي ═══
+                        _total_input = _rec.total_read
+                        _total_output = (
+                            _rec.matched + _rec.new_ready + _rec.corrupted + _rec.duplicate_count
+                        )
+                        if _total_input != _total_output:
+                            _gap = _total_input - _total_output
+                            st.warning(
+                                f"⚠️ تحذير المحاسبة: المدخل={_total_input} ≠ المخرج={_total_output} — فجوة={_gap} منتج"
+                            )
+                            audit_stats["ironclad_warning"] = (
+                                f"المدخل={_total_input} ≠ المخرج={_total_output} فجوة={_gap}"
+                            )
+                            st.session_state.last_audit_stats = audit_stats
                     except Exception as _rec_err:
                         st.warning(f"⚠️ محرك المحاسبة: {_rec_err} — يُستخدم مسار المفقودات السابق.")
                         raw_missing_df = find_missing_products(our_df, comp_dfs)
