@@ -1,12 +1,101 @@
 """
 دوال مساعدة خالصة (بدون واجهة ولا session_state) — تجهيز البيانات والنصوص.
 """
+import gc
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Optional
 
+import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 4: Memory-Optimized DataFrame Downcasting
+# ══════════════════════════════════════════════════════════════════════════════
+
+# أعمدة منخفضة الـ cardinality شائعة في بيانات العطور — تُحوّل إلى category
+_CATEGORY_CANDIDATES = {
+    "brand", "الماركة", "category", "تصنيف المنتج", "التصنيف",
+    "availability", "out_of_stock", "status", "الحالة", "store",
+    "gender", "الجنس", "نوع المنتج", "النوع ", "concentration", "التركيز",
+    "competitor", "المنافس", "القرار", "نوع_منتج_المنافس",
+    "مستوى_الثقة", "هل يتطلب شحن؟", "خاضع للضريبة ؟",
+}
+
+
+def optimize_dataframe_memory(df: pd.DataFrame, *, deep: bool = True) -> pd.DataFrame:
+    """
+    تقليل استهلاك الذاكرة لـ DataFrame بنسبة 40-70% عبر:
+    1. تحويل float64 → float32
+    2. تحويل int64 → أصغر int يسع القيم
+    3. تحويل أعمدة النصوص منخفضة الـ cardinality → category
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+    deep : bool — إذا True يحسب الحجم قبل/بعد ويسجّله
+
+    Returns
+    -------
+    pd.DataFrame — نفس الجدول بأنواع بيانات محسّنة (in-place safe)
+    """
+    if df.empty:
+        return df
+
+    if deep:
+        _before = df.memory_usage(deep=True).sum()
+
+    for col in df.columns:
+        col_dtype = df[col].dtype
+
+        # ── Float downcasting ──
+        if col_dtype == np.float64:
+            df[col] = df[col].astype(np.float32)
+
+        # ── Integer downcasting ──
+        elif col_dtype in (np.int64, np.int32):
+            col_min = df[col].min()
+            col_max = df[col].max()
+            if col_min >= 0:
+                if col_max <= np.iinfo(np.uint8).max:
+                    df[col] = df[col].astype(np.uint8)
+                elif col_max <= np.iinfo(np.uint16).max:
+                    df[col] = df[col].astype(np.uint16)
+                elif col_max <= np.iinfo(np.uint32).max:
+                    df[col] = df[col].astype(np.uint32)
+            else:
+                if col_min >= np.iinfo(np.int8).min and col_max <= np.iinfo(np.int8).max:
+                    df[col] = df[col].astype(np.int8)
+                elif col_min >= np.iinfo(np.int16).min and col_max <= np.iinfo(np.int16).max:
+                    df[col] = df[col].astype(np.int16)
+                elif col_min >= np.iinfo(np.int32).min and col_max <= np.iinfo(np.int32).max:
+                    df[col] = df[col].astype(np.int32)
+
+        # ── Object → Category (low cardinality) ──
+        elif col_dtype == object:
+            col_lower = col.strip().lower()
+            n_unique = df[col].nunique()
+            n_total = len(df[col])
+            # تحويل إذا: اسم العمود معروف أو cardinality < 5% من عدد الصفوف
+            if col_lower in _CATEGORY_CANDIDATES or (
+                n_total > 100 and n_unique < n_total * 0.05
+            ):
+                df[col] = df[col].astype("category")
+
+    if deep:
+        _after = df.memory_usage(deep=True).sum()
+        _pct = (1 - _after / max(_before, 1)) * 100
+        logger.info(
+            f"[Memory] DataFrame optimized: {_before / 1024 / 1024:.1f} MB → "
+            f"{_after / 1024 / 1024:.1f} MB ({_pct:.0f}% reduction, {len(df):,} rows)"
+        )
+
+    return df
 
 # أول رابط صورة http(s) — يتوقف عند الفاصلة (إنجليزي/عربي) حتى لا يُلتقط رابطان في src واحد
 _FIRST_HTTP_IMAGE_URL = re.compile(
@@ -318,12 +407,14 @@ def merge_price_analysis_dataframes(
     prev2 = prev.reindex(columns=all_cols)
     new2 = new.reindex(columns=all_cols)
     out = pd.concat([prev2, new2], ignore_index=True)
+    del prev2, new2  # Phase 4: free intermediates
     subset = _analysis_dedupe_columns(out)
     if subset:
-        # FIX: Relaxed Constraints — عدم استخدام الاسم كمفتاح دمج لتفادي فقدان نتائج متشابهة.
         out = out.drop_duplicates(subset=subset, keep="last")
-    # FIX: Relaxed Constraints — عند غياب مفاتيح قوية نبقي كل الصفوف (Zero Data Loss).
-    return out.reset_index(drop=True)
+    result = out.reset_index(drop=True)
+    del out  # Phase 4: free pre-reset copy
+    gc.collect()
+    return result
 
 
 def _missing_dedupe_columns(df: pd.DataFrame) -> list[str]:
@@ -351,9 +442,13 @@ def merge_missing_products_dataframes(
     p2 = prev.reindex(columns=all_cols)
     n2 = new.reindex(columns=all_cols)
     out = pd.concat([p2, n2], ignore_index=True)
+    del p2, n2  # Phase 4: free intermediates
     subset = _missing_dedupe_columns(out)
     if subset:
         out = out.drop_duplicates(subset=subset, keep="last")
     else:
         out = out.drop_duplicates(keep="last")
-    return out.reset_index(drop=True)
+    result = out.reset_index(drop=True)
+    del out
+    gc.collect()
+    return result
