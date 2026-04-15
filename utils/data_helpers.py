@@ -57,34 +57,57 @@ def optimize_dataframe_memory(df: pd.DataFrame, *, deep: bool = True) -> pd.Data
         if col_dtype == np.float64:
             df[col] = df[col].astype(np.float32)
 
-        # ── Integer downcasting ──
+        # ── Integer downcasting (SAFE: skip if column has mixed types) ──
         elif col_dtype in (np.int64, np.int32):
-            col_min = df[col].min()
-            col_max = df[col].max()
-            if col_min >= 0:
-                if col_max <= np.iinfo(np.uint8).max:
-                    df[col] = df[col].astype(np.uint8)
-                elif col_max <= np.iinfo(np.uint16).max:
-                    df[col] = df[col].astype(np.uint16)
-                elif col_max <= np.iinfo(np.uint32).max:
-                    df[col] = df[col].astype(np.uint32)
-            else:
-                if col_min >= np.iinfo(np.int8).min and col_max <= np.iinfo(np.int8).max:
-                    df[col] = df[col].astype(np.int8)
-                elif col_min >= np.iinfo(np.int16).min and col_max <= np.iinfo(np.int16).max:
-                    df[col] = df[col].astype(np.int16)
-                elif col_min >= np.iinfo(np.int32).min and col_max <= np.iinfo(np.int32).max:
-                    df[col] = df[col].astype(np.int32)
+            try:
+                col_min = df[col].min()
+                col_max = df[col].max()
+                if col_min >= 0:
+                    if col_max <= np.iinfo(np.uint8).max:
+                        df[col] = df[col].astype(np.uint8)
+                    elif col_max <= np.iinfo(np.uint16).max:
+                        df[col] = df[col].astype(np.uint16)
+                    elif col_max <= np.iinfo(np.uint32).max:
+                        df[col] = df[col].astype(np.uint32)
+                else:
+                    if col_min >= np.iinfo(np.int8).min and col_max <= np.iinfo(np.int8).max:
+                        df[col] = df[col].astype(np.int8)
+                    elif col_min >= np.iinfo(np.int16).min and col_max <= np.iinfo(np.int16).max:
+                        df[col] = df[col].astype(np.int16)
+                    elif col_min >= np.iinfo(np.int32).min and col_max <= np.iinfo(np.int32).max:
+                        df[col] = df[col].astype(np.int32)
+            except (TypeError, ValueError):
+                # Mixed-type column (e.g. "1 عبوه") — force to string to prevent PyArrow crash
+                df[col] = df[col].astype(str)
 
-        # ── Object → Category (low cardinality) ──
+        # ── Object → Category (low cardinality) — SAFE: verify pure text ──
         elif col_dtype == object:
             col_lower = col.strip().lower()
+
+            # PyArrow Fix: detect columns that LOOK numeric but contain text
+            # (e.g., "[1] القيمة" with values like "1 عبوه", "100 مل")
+            # These must stay as object/string — NEVER convert to category
+            # because category with mixed numeric inference crashes PyArrow
+            _has_text = False
+            _sample = df[col].dropna().head(200)
+            if not _sample.empty:
+                _str_sample = _sample.astype(str)
+                # Column has text if any value contains Arabic/Latin letters
+                _has_text = _str_sample.str.contains(r'[a-zA-Z\u0600-\u06FF]', regex=True).any()
+
+            # Salla option columns — NEVER downcast (mixed "100 مل", "1 عبوه", etc.)
+            _salla_option_cols = {"[1] القيمة", "[2] القيمة", "[3] القيمة",
+                                  "[1] الاسم", "[2] الاسم", "[3] الاسم",
+                                  "[1] النوع", "[2] النوع", "[3] النوع"}
+            if col.strip() in _salla_option_cols:
+                continue  # leave as object — safe for PyArrow
+
             n_unique = df[col].nunique()
             n_total = len(df[col])
-            # تحويل إذا: اسم العمود معروف أو cardinality < 5% من عدد الصفوف
-            if col_lower in _CATEGORY_CANDIDATES or (
+            # Only convert to category if: known low-cardinality AND purely text
+            if (col_lower in _CATEGORY_CANDIDATES or (
                 n_total > 100 and n_unique < n_total * 0.05
-            ):
+            )) and _has_text:
                 df[col] = df[col].astype("category")
 
     if deep:
