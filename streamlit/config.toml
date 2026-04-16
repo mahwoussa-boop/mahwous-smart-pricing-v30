@@ -1,19 +1,13 @@
-# ══════════════════════════════════════════════════════════════
-#  Mahwous Streamlit Configuration — Production-Hardened
-# ══════════════════════════════════════════════════════════════
-
-[server]
-maxMessageSize = 500
-maxUploadSize = 1000
-enableXsrfProtection = true
-headless = true
-
-[browser]
-gatherUsageStats = false
-
 [theme]
 primaryColor = "#00C853"
 backgroundColor = "#0e1117"
 secondaryBackgroundColor = "#1a1a2e"
 textColor = "#fafafa"
 font = "sans serif"
+
+[server]
+maxUploadSize = 200
+# Required for Cloud Run: run without browser, accept external connections
+headless = true
+enableCORS = false
+enableXsrfProtection = false
