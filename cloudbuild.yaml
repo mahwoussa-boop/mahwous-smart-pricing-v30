@@ -43,4 +43,4 @@ images:
   - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
 
 options:
-  logging: CLOUD_LOGGING
+  logging: 'CLOUD_LOGGING_ONLY'
