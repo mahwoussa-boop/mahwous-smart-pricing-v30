@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 
+from engines.async_scraper import CSV_COLS
+
 # ── مسارات ─────────────────────────────────────────────────────────────────
 _DATA_DIR        = os.environ.get("DATA_DIR", "data")
 _COMPETITORS_FILE = os.path.join(_DATA_DIR, "competitors_list.json")
@@ -40,7 +42,7 @@ _RESULT_LOCK   = threading.Lock()
 # session_state is NOT safe to write from background threads.
 _RT_LOCK     = threading.Lock()
 _RT_PROGRESS: dict = {"phase": "idle"}   # idle | scraping | matching | complete | error
-_RT_RESULTS:  dict = {"df": None, "audit": None}
+_RT_RESULTS: dict = {"df": pd.DataFrame(columns=CSV_COLS), "audit": None}
 
 
 @st.fragment(run_every=2)
@@ -726,7 +728,7 @@ def show() -> None:
             st.warning("⚠️ لا توجد متاجر منافسة. أضفها من تبويب «إضافة منافس» أولاً.")
         else:
             # ── Options row ──────────────────────────────────────────────────
-            _oc1, _oc2, _oc3 = st.columns(3)
+            _oc1, _oc2, _oc3, _oc4 = st.columns(4)
             with _oc1:
                 st.number_input(
                     "التزامن per متجر",
@@ -736,6 +738,13 @@ def show() -> None:
                 )
             with _oc2:
                 st.number_input(
+                    "متاجر متوازية (War Machine)",
+                    min_value=1, max_value=50, step=1, value=5,
+                    key="rt_parallel_stores",
+                    help="يُمرَّر للـ Pipeline؛ كل المتاجر تُشغَّل دفعة واحدة بدون قفل تسلسلي",
+                )
+            with _oc3:
+                st.number_input(
                     "الحد الأقصى للمنتجات (0 = بدون حد لشفط المتجر بالكامل)",
                     min_value=0,
                     step=50,
@@ -743,7 +752,7 @@ def show() -> None:
                     key="rt_max_products",
                     help="الحد الأقصى للمنتجات (0 = بدون حد لشفط المتجر بالكامل)",
                 )
-            with _oc3:
+            with _oc4:
                 st.checkbox(
                     "مطابقة بالذكاء الاصطناعي (AI)",
                     value=False,
@@ -781,17 +790,20 @@ def show() -> None:
                     _snap_concurrency = int(st.session_state.get("rt_concurrency", 6))
                     _snap_max_prod    = int(st.session_state.get("rt_max_products", 0))
                     _snap_use_ai      = bool(st.session_state.get("rt_use_ai", False))
+                    _snap_parallel      = max(1, int(st.session_state.get("rt_parallel_stores", 5)))
 
                     # Reset shared state before launch
+                    _snap_domains = [_domain(u) for u in _snap_stores]
                     with _RT_LOCK:
                         _RT_PROGRESS.clear()
                         _RT_PROGRESS.update({
-                            "phase":         "scraping",
-                            "started_at":    datetime.now().isoformat(),
-                            "store_counts":  {},
-                            "total_scraped": 0,
+                            "phase":          "scraping",
+                            "started_at":     datetime.now().isoformat(),
+                            "store_counts":   {},
+                            "total_scraped":  0,
+                            "store_status":   {d: "scraping" for d in _snap_domains},
                         })
-                        _RT_RESULTS["df"]    = None
+                        _RT_RESULTS["df"]    = pd.DataFrame(columns=CSV_COLS)
                         _RT_RESULTS["audit"] = None
 
                     def _rt_event_handler(event_type: str, data: dict) -> None:
@@ -802,19 +814,32 @@ def show() -> None:
                                 _RT_PROGRESS["total_scraped"] = sum(
                                     _RT_PROGRESS["store_counts"].values()
                                 )
+                                _row = data.get("row")
+                                if isinstance(_row, dict) and _row:
+                                    _chunk = pd.DataFrame([_row]).reindex(columns=CSV_COLS)
+                                    _RT_RESULTS["df"] = pd.concat(
+                                        [_RT_RESULTS["df"], _chunk],
+                                        ignore_index=True,
+                                    )
                             elif event_type == "scraping_done":
                                 # Finalise store count (might not have changed)
                                 _RT_PROGRESS["store_counts"][data["store"]] = data["total"]
                                 _RT_PROGRESS["total_scraped"] = sum(
                                     _RT_PROGRESS["store_counts"].values()
                                 )
+                                _RT_PROGRESS.setdefault("store_status", {})[data["store"]] = "done"
                             elif event_type == "matching_start":
                                 _RT_PROGRESS["phase"]      = "matching"
                                 _RT_PROGRESS["total_rows"] = data.get("total_rows", 0)
                             elif event_type == "complete":
-                                _RT_PROGRESS["phase"]  = "complete"
-                                _RT_RESULTS["df"]      = data.get("df")
-                                _RT_RESULTS["audit"]   = data.get("audit")
+                                _RT_PROGRESS["phase"] = "complete"
+                                _done_df = data.get("df")
+                                _RT_RESULTS["df"] = (
+                                    _done_df
+                                    if isinstance(_done_df, pd.DataFrame)
+                                    else pd.DataFrame()
+                                )
+                                _RT_RESULTS["audit"] = data.get("audit")
 
                     def _rt_thread_target() -> None:
                         """Daemon thread: runs the async pipeline synchronously."""
@@ -827,6 +852,7 @@ def show() -> None:
                                 max_products_per_store=_snap_max_prod,
                                 use_ai=_snap_use_ai,
                                 result_callback=_rt_event_handler,
+                                parallel_stores=_snap_parallel,
                             )
                         except Exception as _exc:
                             with _RT_LOCK:
@@ -854,7 +880,7 @@ def show() -> None:
                     with _RT_LOCK:
                         _RT_PROGRESS.clear()
                         _RT_PROGRESS["phase"] = "idle"
-                        _RT_RESULTS["df"]     = None
+                        _RT_RESULTS["df"]     = pd.DataFrame(columns=CSV_COLS)
                         _RT_RESULTS["audit"]  = None
 
             # ── Live status placeholder ───────────────────────────────────────
@@ -872,6 +898,7 @@ def show() -> None:
                 _rt_error  = _RT_PROGRESS.get("error", "")
                 _rt_df     = _RT_RESULTS.get("df")
                 _rt_audit  = _RT_RESULTS.get("audit")
+                _rt_store_stat = dict(_RT_PROGRESS.get("store_status", {}))
 
             # Status banner
             if _rt_phase == "idle":
@@ -901,7 +928,7 @@ def show() -> None:
                 )
 
             elif _rt_phase == "complete":
-                _result_len = len(_rt_df) if _rt_df is not None and not _rt_df.empty else 0
+                _result_len = len(_rt_df) if not _rt_df.empty else 0
                 _ph_status.success(
                     f"✅ Pipeline اكتمل!  "
                     f"{_rt_total:,} منتج مكشوط — {_result_len:,} نتيجة مطابقة جاهزة"
@@ -910,48 +937,89 @@ def show() -> None:
             elif _rt_phase == "error":
                 _ph_status.error(f"❌ خطأ في Pipeline: {_rt_error}")
 
-            # Per-store product count metrics (single HTML block in one placeholder)
-            if _rt_counts:
+            # Per-store status + counts (all non-done stores show 🔄 Scraping during scrape)
+            _all_rt_domains = [_domain(u) for u in _rt_stores]
+            if _all_rt_domains:
                 _store_html = (
                     "<div style='display:flex;flex-wrap:wrap;gap:10px;margin:12px 0'>"
                 )
-                for _store_name, _store_count in sorted(_rt_counts.items()):
-                    _dot_color = (
-                        "#00C853" if _rt_phase in ("complete", "matching")
-                        else "#4fc3f7"
-                    )
+                for _store_name in _all_rt_domains:
+                    _store_count = int(_rt_counts.get(_store_name, 0))
+                    _st = _rt_store_stat.get(_store_name, "")
+                    if _rt_phase == "scraping":
+                        if _st == "done":
+                            _badge, _bcls = "✅ تم", "done-b"
+                        else:
+                            _badge, _bcls = "🔄 Scraping", "run-b"
+                    elif _rt_phase == "matching":
+                        _badge, _bcls = (
+                            ("✅ تم", "done-b") if _st == "done" else ("🔄 Scraping", "run-b")
+                        )
+                    elif _rt_phase == "complete":
+                        _badge, _bcls = "✅ تم", "done-b"
+                    elif _rt_phase == "error":
+                        _badge, _bcls = "❌ خطأ", "error-b"
+                    else:
+                        _badge, _bcls = "⏳ Pending", "pend-b"
+                    _dot_color = "#00C853" if _badge.startswith("✅") else "#4fc3f7"
                     _store_html += (
-                        f"<div class='sc-kpi' style='min-width:130px'>"
-                        f"<div class='num' style='color:{_dot_color};font-size:1.3rem'>"
+                        f"<div class='sc-kpi' style='min-width:168px;text-align:left'>"
+                        f"<span class='sc-badge {_bcls}' style='margin-bottom:6px;display:inline-block'>"
+                        f"{_badge}</span>"
+                        f"<div class='num' style='color:{_dot_color};font-size:1.25rem'>"
                         f"{_store_count:,}</div>"
-                        f"<div class='lbl'>{_store_name}</div>"
+                        f"<div class='lbl' style='word-break:break-all'>{_store_name}</div>"
                         f"</div>"
                     )
                 _store_html += "</div>"
                 _ph_metrics.markdown(_store_html, unsafe_allow_html=True)
 
-            # Results table (only when complete and data available)
-            if _rt_phase == "complete" and _rt_df is not None and not _rt_df.empty:
-                _display_cols = [
-                    c for c in [
-                        "المنتج", "السعر", "منتج_المنافس", "سعر_المنافس",
-                        "الفرق", "القرار", "الخطورة", "المنافس", "نسبة_التطابق",
-                    ]
-                    if c in _rt_df.columns
+            # Live scrape + match results — st.dataframe every refresh (~2s) via fragment
+            if _rt_df is None or not isinstance(_rt_df, pd.DataFrame):
+                _rt_df = pd.DataFrame(columns=CSV_COLS)
+            _match_cols = [
+                c for c in [
+                    "المنتج", "السعر", "منتج_المنافس", "سعر_المنافس",
+                    "الفرق", "القرار", "الخطورة", "المنافس", "نسبة_التطابق",
                 ]
+                if c in _rt_df.columns
+            ]
+            if _rt_phase == "complete" and _match_cols:
                 _ph_table.dataframe(
-                    _rt_df[_display_cols].head(100) if _display_cols else _rt_df.head(100),
+                    _rt_df[_match_cols].head(200),
+                    use_container_width=True,
+                    height=420,
+                )
+            elif _rt_phase == "complete" and not _rt_df.empty:
+                _ph_table.dataframe(
+                    _rt_df.head(200),
+                    use_container_width=True,
+                    height=420,
+                )
+            elif _rt_phase in ("scraping", "matching", "error"):
+                _live_cols = [c for c in CSV_COLS if c in _rt_df.columns]
+                _slice = (
+                    _rt_df[_live_cols].tail(500)
+                    if _live_cols
+                    else _rt_df.tail(500)
+                )
+                _ph_table.dataframe(
+                    _slice,
+                    use_container_width=True,
+                    height=420,
+                )
+            else:
+                _ph_table.dataframe(
+                    pd.DataFrame(columns=CSV_COLS),
                     use_container_width=True,
                     height=420,
                 )
 
-                # Persist results to session_state so other pages can use them
-                # This assignment is safe here (main thread, no race condition)
+            if _rt_phase == "complete" and not _rt_df.empty:
                 st.session_state["live_results"] = _rt_df
                 if _rt_audit:
                     st.session_state["last_audit_stats"] = _rt_audit
 
-                # ── Action buttons (outside placeholders — rendered each cycle) ──
                 st.markdown("---")
                 _ab1, _ab2 = st.columns(2)
                 with _ab1:
@@ -977,7 +1045,6 @@ def show() -> None:
                         key="rt_download",
                     )
 
-                # Audit summary
                 if _rt_audit:
                     with st.expander("📋 تقرير المطابقة التفصيلي", expanded=False):
                         _audit_items = {
