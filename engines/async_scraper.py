@@ -805,8 +805,13 @@ async def scrape_one_store(
                     _circuit_broken = True
 
         # ── Phase 2: per-store wall-clock timeout ─────────────────
-        # Scales with store size: min 10min, ~3s/URL, max 45min
-        _STORE_WALL_TIMEOUT = max(600, min(2700, len(pending_urls) * 3))
+        # With an explicit product cap, keep a bounded wall clock. With max_products==0
+        # (full store / no ceiling), scale with URL count — no 45-minute cap that aborts
+        # 8k–20k+ product catalogs mid-run.
+        if max_products > 0:
+            _STORE_WALL_TIMEOUT = max(600, min(2700, len(pending_urls) * 3))
+        else:
+            _STORE_WALL_TIMEOUT = max(3600, len(pending_urls) * 4)
 
         async def _run_batches():
             nonlocal _circuit_broken

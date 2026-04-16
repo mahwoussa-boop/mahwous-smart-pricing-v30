@@ -70,7 +70,9 @@ async def run_realtime_pipeline(
         our_df                : our product catalogue (DataFrame)
         store_urls            : list of competitor store root URLs
         concurrency           : max parallel URL fetches *per store*
-        max_products_per_store: cap per store (0 = unlimited)
+        max_products_per_store: cap per store; 0 means no cap (process until each
+            store stream ends). The consumer has no row batch limit — it runs until
+            every producer sends its finished sentinel (payload is None).
         use_ai                : pass to run_full_analysis(); False = fast fuzzy only
         result_callback       : optional sync callable(event_type, data) on each event
                                 (same tuples as yielded); must be thread-safe if used

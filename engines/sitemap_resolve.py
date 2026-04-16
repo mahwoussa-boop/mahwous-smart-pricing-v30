@@ -78,7 +78,7 @@ async def _fetch_sitemap_text(
                 "[Sitemap] HTTP 200 but bot challenge HTML for %s — trying TLS bypass",
                 url,
             )
-        elif text and not _looks_like_xml(text) and url.endswith(".xml"):
+        elif text and not _looks_like_xml(text) and _loc_xml_path_endswith_xml(url):
             logger.warning(
                 "[Sitemap] HTTP 200 but non-XML body for %s — trying TLS bypass",
                 url,
@@ -100,7 +100,7 @@ async def _fetch_sitemap_text(
             url,
         )
         return None
-    if sync_text and url.endswith(".xml") and not _looks_like_xml(sync_text):
+    if sync_text and _loc_xml_path_endswith_xml(url) and not _looks_like_xml(sync_text):
         logger.error(
             "[Sitemap] Expected XML from %s but got non-XML after bypass attempts",
             url,
@@ -141,21 +141,6 @@ _ZID_DOMAINS = re.compile(
     r"(zid\.store|\.zid\.sa|zid\.sa)", re.I
 )
 
-# صفحة منتج — أنماط شائعة عبر المنصات (+ سلة على دومين مخصص: /ar/slug، /en/slug)
-_PRODUCT_URL_RE = re.compile(
-    r"(/p\d{5,}$"         # سلة: /p123456789
-    r"|/products?/"       # Shopify / WooCommerce
-    r"|/item/"
-    r"|/shop/"
-    r"|/ar/p/"
-    r"|/en/p/"
-    r"|/(?:ar|en)/[^/?#]+"  # سلة دومين خاص: .../ar/product-slug
-    r"|/product-page/"
-    r"|منتج"
-    r")",
-    re.I,
-)
-
 _EXCLUDE_URL_RE = re.compile(
     r"(/blog/|/page/|/category/|/categories/|/tag/|/cart|/checkout"
     r"|/account|/contact|/about|/faq|/privacy|/terms"
@@ -175,6 +160,7 @@ class SitemapEntry:
     """رابط منتج مع تاريخ آخر تعديل (اختياري)."""
     url: str
     lastmod: str = ""
+    discovered_from: str = ""
 
 
 @dataclass
@@ -194,6 +180,12 @@ class SitemapDiag:
 def _base_url(url: str) -> str:
     p = urlparse(url)
     return f"{p.scheme}://{p.netloc}"
+
+
+def _loc_xml_path_endswith_xml(loc_text: str) -> bool:
+    """Treat ?query on sitemap URLs as non-part of the file extension (e.g. …/x.xml?from=1)."""
+    pth = (urlparse(loc_text).path or "").lower().rstrip("/")
+    return pth.endswith(".xml")
 
 
 def _is_salla(url: str) -> bool:
@@ -245,7 +237,7 @@ def _parse_sitemap_xml(xml_text: str) -> Tuple[List[SitemapEntry], List[str]]:
         if not sub_sitemaps:
             for el in root.iter():
                 tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-                if tag == "loc" and el.text and el.text.strip().endswith(".xml"):
+                if tag == "loc" and el.text and _loc_xml_path_endswith_xml(el.text.strip()):
                     sub_sitemaps.append(el.text.strip())
         return entries, sub_sitemaps
 
@@ -264,7 +256,7 @@ def _parse_sitemap_xml(xml_text: str) -> Tuple[List[SitemapEntry], List[str]]:
             tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
             if tag == "loc" and el.text:
                 u = el.text.strip()
-                if u.endswith(".xml"):
+                if _loc_xml_path_endswith_xml(u):
                     sub_sitemaps.append(u)
                 elif u.startswith("http"):
                     entries.append(SitemapEntry(url=u))
@@ -277,10 +269,12 @@ async def resolve_sitemap_recursively(
     sitemap_url: str,
     max_depth: int = 3,
     current_depth: int = 0,
-) -> set[str]:
-    # FIX: Deep Sitemap & AI Fallback Integrated
+) -> Dict[str, str]:
+    """
+    يعيد dict: url → رابط ملف الـ urlset الذي احتوى <loc> (لتلميحات الفلترة الاختيارية).
+    """
     if current_depth > max_depth:
-        return set()
+        return {}
     try:
         referer = f"https://{urlparse(sitemap_url).netloc}/"
         xml_text = await _fetch_sitemap_text(
@@ -291,24 +285,21 @@ async def resolve_sitemap_recursively(
                 "[Sitemap] Failed after anti-ban retries (likely 403/429): %s",
                 sitemap_url,
             )
-            return set()
+            return {}
         root = ET.fromstring(xml_text)
 
-        # FIX: Deep Sitemap & AI Fallback Integrated
-        # إزالة Namespaces لتسهيل البحث الآمن عبر جميع القوالب.
         for elem in root.iter():
             if "}" in elem.tag:
                 elem.tag = elem.tag.split("}", 1)[1]
 
-        urls: set[str] = set()
+        merged: Dict[str, str] = {}
         if root.tag == "sitemapindex":
-            # روابط sitemap فرعية — نفس مسار الجلب ضد الحظر لكل طفل (داخل الاستدعاء التالي).
             child_urls: List[str] = []
             for loc in root.findall(".//loc"):
                 if not loc.text:
                     continue
                 cu = loc.text.strip()
-                if cu.startswith("http") and cu.lower().rstrip().endswith(".xml"):
+                if cu.startswith("http") and _loc_xml_path_endswith_xml(cu):
                     child_urls.append(cu)
             if not child_urls:
                 logger.warning(
@@ -339,24 +330,25 @@ async def resolve_sitemap_recursively(
                         "or strict filter): %s",
                         cu,
                     )
-                urls.update(res)
+                    continue
+                for u, src in res.items():
+                    merged.setdefault(u, src)
         elif root.tag == "urlset":
-            # لا تُسقِط روابط سلة /ar/slug هنا — الفلترة النهائية في _filter_product_entries.
             for loc in root.findall(".//loc"):
                 if not loc.text:
                     continue
                 loc_text = loc.text.strip()
                 if not loc_text.startswith("http"):
                     continue
-                low = loc_text.lower()
-                if low.rstrip().endswith(".xml") and "sitemap" in low:
+                if _loc_xml_path_endswith_xml(loc_text) and "sitemap" in loc_text.lower():
                     nested = await resolve_sitemap_recursively(
                         session,
                         loc_text,
                         max_depth,
                         current_depth + 1,
                     )
-                    urls.update(nested)
+                    for u, src in nested.items():
+                        merged.setdefault(u, src)
                     if not nested:
                         logger.warning(
                             "[Sitemap] urlset <loc> looked like nested sitemap but yielded "
@@ -364,11 +356,11 @@ async def resolve_sitemap_recursively(
                             loc_text,
                         )
                     continue
-                urls.add(loc_text)
-        return urls
+                merged.setdefault(loc_text, sitemap_url)
+        return merged
     except Exception as exc:
         logger.debug("resolve_sitemap_recursively failed for %s: %s", sitemap_url, exc)
-        return set()
+        return {}
 
 
 async def _fetch_and_parse_sitemap(
@@ -391,7 +383,10 @@ async def _fetch_and_parse_sitemap(
     )
     if not urls:
         return []
-    return [SitemapEntry(url=u) for u in urls]
+    return [
+        SitemapEntry(url=u, discovered_from=src)
+        for u, src in urls.items()
+    ]
 
 
 async def _sitemaps_from_robots(
@@ -413,92 +408,27 @@ async def _sitemaps_from_robots(
     return found
 
 
-def _is_product_url(url: str) -> bool:
-    """هل الرابط يبدو صفحة منتج؟"""
-    if _EXCLUDE_URL_RE.search(url):
-        return False
-    return bool(_PRODUCT_URL_RE.search(url))
-
-
-def _is_salla_product(url: str) -> bool:
-    """سلة: /p12345…، /ar|en/slug، معرّف رقمي طويل، أو مسارات /product(s)/."""
-    path = urlparse(url).path or ""
-    if re.search(r"/p\d{5,}$", path):
-        return True
-    if re.search(r"/\d{8,}$", path):
-        return True
-    if "/products/" in path.lower() or "/product/" in path.lower():
-        return True
-    if re.search(r"/(?:ar|en)/[^/]+/?$", path, re.I):
-        if _EXCLUDE_URL_RE.search(url):
-            return False
-        return True
-    segs = [s for s in path.split("/") if s]
-    if len(segs) == 1 and re.match(
-        r"^[a-z0-9\u0600-\u06ff][\w\u0600-\u06ff-]{2,}$",
-        segs[0],
-        re.I,
-    ):
-        if _EXCLUDE_URL_RE.search(url):
-            return False
-        return True
-    return False
-
-
 def _filter_product_entries(entries: List[SitemapEntry], base: str) -> List[SitemapEntry]:
-    """يُبقي فقط صفحات المنتجات ويُزيل CDN/blog/static."""
-    salla = _is_salla(base)
-    product_entries: List[SitemapEntry] = []
-    
-    # ─── v26.1: تحسين لـ worldgivenchy والمواقع متعددة اللغات ───
-    import urllib.parse
-    is_worldgivenchy = "worldgivenchy.com" in base.lower()
-    seen_slugs = set()
+    """
+    سياسة القائمة السوداء: كل <loc> من الـ sitemap يُقبل ما لم يطابق _EXCLUDE_URL_RE
+    أو يكن على استضافة CDN.
 
+    إن وُجد ``discovered_from`` (رابط ملف الـ urlset) وفيه ``product`` أو ``item``،
+    فتُقبل كل الروابط بنفس القاعدة: استثناءات صريحة فقط (لا أنماط مسار/منصة).
+    """
+    _ = base
+    product_entries: List[SitemapEntry] = []
     for e in entries:
         try:
             p = urlparse(e.url)
         except Exception:
             continue
-        
-        # فك تشفير الرابط للتعامل مع الحروف العربية في الفلترة
-        url_decoded = urllib.parse.unquote(e.url).lower()
-        url_lower = e.url.lower()
         host = (p.netloc or "").lower()
-        
         if "cdn." in host:
             continue
         if _EXCLUDE_URL_RE.search(e.url):
             continue
-            
-        # ─── فلاتر خاصة بـ worldgivenchy ───
-        if is_worldgivenchy:
-            # تجاهل النسخة الإنجليزية لتجنب التكرار (نفضل العربي)
-            if "/en/" in url_lower:
-                continue
-            # تجاهل صفحات التصنيفات والروابط العامة التي تتبع نمط /p/
-            bad_keywords = [
-                "/tester", "/الاسئلة-الشائعة", "/brands", "/category",
-                "/التوصيل-والاستلام", "/خدمة-التوصيل", "/خدمة-تغليف", "/لماذا-تختار",
-                "/سياسة-الاستبدال", "/اتصل-بنا", "/من-نحن", "/الخصوصية",
-                "/الدفع-والشحن", "/المتجر", "/brands", "/all", "/faq",
-                "/تجهيز-الطلبات", "/اربح-معنا", "شركه-عالم-جيفينشي-التجارية"
-            ]
-            if any(x in url_decoded for x in bad_keywords):
-                continue
-
-        if salla:
-            if _is_salla_product(e.url):
-                product_entries.append(e)
-        elif _is_salla_product(e.url):
-            # دومين مخصص على منصة سلة — نفس أنماط المسار دون الاعتماد على نطاق salla.*
-            product_entries.append(e)
-        elif _is_product_url(e.url):
-            # منع تكرار نفس المنتج بلغات مختلفة عبر فحص الـ slug الأخير
-            slug = p.path.rstrip('/').split('/')[-1]
-            if slug and slug not in seen_slugs:
-                product_entries.append(e)
-                seen_slugs.add(slug)
+        product_entries.append(e)
 
     return product_entries
 
