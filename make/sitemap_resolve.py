@@ -6,6 +6,7 @@ make/sitemap_resolve.py — Shim (توافق رجعي)
 """
 from engines.sitemap_resolve import *  # noqa: F401, F403
 from engines.sitemap_resolve import (  # noqa: F401
+    SitemapDiscoveryError,
     SitemapEntry,
     SitemapDiag,
     resolve_product_urls,
