@@ -675,6 +675,9 @@ async def scrape_one_store(
 
     connector = aiohttp.TCPConnector(ssl=False, limit=max(100, concurrency * 5))
     session: aiohttp.ClientSession | None = None
+    # Always defined — code after `finally` and error paths must never hit NameError
+    rows: List[dict] = []
+    store_http_status: Dict[str, int] = {"403": 0, "429": 0}
 
     try:
         session = aiohttp.ClientSession(
@@ -719,10 +722,8 @@ async def scrape_one_store(
         progress.store_urls_total  = total
 
         semaphore         = asyncio.Semaphore(concurrency)
-        rows: List[dict]  = []
         done_count        = resume_idx
         checkpoint_every  = max(50, min(200, total // 10 + 1))
-        store_http_status = {"403": 0, "429": 0}
 
         _TASK_TIMEOUT = 60.0  # Phase 2: per-URL timeout (was 45)
 

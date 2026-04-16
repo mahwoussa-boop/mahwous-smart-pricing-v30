@@ -39,7 +39,7 @@ import asyncio
 import logging
 import traceback
 from datetime import datetime
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -60,6 +60,7 @@ async def run_realtime_pipeline(
     concurrency: int = 10,
     max_products_per_store: int = 0,
     use_ai: bool = False,
+    result_callback: Optional[Callable[[str, Any], None]] = None,
 ) -> AsyncGenerator[Tuple[str, Any], None]:
     """
     Async generator that drives the full scrape-then-match pipeline and
@@ -71,6 +72,9 @@ async def run_realtime_pipeline(
         concurrency           : max parallel URL fetches *per store*
         max_products_per_store: cap per store (0 = unlimited)
         use_ai                : pass to run_full_analysis(); False = fast fuzzy only
+        result_callback       : optional sync callable(event_type, data) on each event
+                                (same tuples as yielded); must be thread-safe if used
+                                from mixed contexts.
 
     Yields:
         ("scraping_progress", {"store": str, "count": int})
@@ -107,23 +111,18 @@ async def run_realtime_pipeline(
     # Lazy import — avoids circular imports at module load time
     from engines.async_scraper import scrape_one_store_streaming, _domain
 
-    # ── Phase 1: Concurrent streaming scrape ──────────────────────────────────
-    # One asyncio.Task per store writes events to a shared queue.
-    # Consumer (this generator) drains the queue until all stores signal done.
+    # ── Phase 1: Producer / raw-queue / Consumer ─────────────────────────────
+    # Producers: one task per store → raw_queue (domain, row|None sentinel).
+    # Consumer: drains raw_queue, appends rows with per-row try/except, forwards
+    #            structured events to event_queue. One bad row never kills the pipe.
 
-    # maxsize=500: allows up to 500 buffered events before producers slow down.
-    # At ~10 rows/s per store this is ~50 seconds of buffer — more than enough.
+    raw_queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue(maxsize=500)
     event_queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue(maxsize=500)
 
-    # Per-store row accumulator — used later to build competitor DataFrames
     store_rows: Dict[str, List[dict]] = {_domain(u): [] for u in store_urls}
-    domain_to_url: Dict[str, str]     = {_domain(u): u for u in store_urls}
 
-    async def _scrape_store(url: str) -> None:
-        """
-        Producer: streams one store and posts events to the shared queue.
-        All exceptions are caught so one failing store never kills others.
-        """
+    async def _producer(url: str) -> None:
+        """Scrape one store; push (domain, row) or (domain, None) when finished."""
         domain = _domain(url)
         try:
             async for row in scrape_one_store_streaming(
@@ -131,44 +130,92 @@ async def run_realtime_pipeline(
                 concurrency=concurrency,
                 max_products=max_products_per_store,
             ):
-                store_rows[domain].append(row)
-                # Non-blocking put — if queue is full we await (backpressure)
-                await event_queue.put(
-                    ("scraping_progress", {"store": domain, "count": len(store_rows[domain])})
-                )
-        except Exception as exc:
+                await raw_queue.put((domain, row))
+        except Exception:
             logger.error(
-                "Pipeline scraping error for %s: %s",
+                "Pipeline producer error for %s: %s",
                 domain, traceback.format_exc()[:300],
             )
         finally:
-            # Always signal completion — even on error
-            await event_queue.put(
-                ("scraping_done", {"store": domain, "total": len(store_rows[domain])})
-            )
+            await raw_queue.put((domain, None))
 
-    # Launch all store tasks concurrently
-    scrape_tasks = [
-        asyncio.create_task(_scrape_store(url))
-        for url in store_urls
+    async def _consumer() -> None:
+        """Drain raw_queue; isolate per-row failures; emit UI / callback events."""
+        finished_stores = 0
+        total = len(store_urls)
+        while finished_stores < total:
+            domain, payload = await raw_queue.get()
+            if payload is None:
+                finished_stores += 1
+                try:
+                    await event_queue.put(
+                        (
+                            "scraping_done",
+                            {"store": domain, "total": len(store_rows[domain])},
+                        )
+                    )
+                except Exception:
+                    logger.error(
+                        "Pipeline consumer (scraping_done): %s",
+                        traceback.format_exc()[:200],
+                    )
+                continue
+            try:
+                if not isinstance(payload, dict):
+                    continue
+                store_rows[domain].append(payload)
+                await event_queue.put(
+                    (
+                        "scraping_progress",
+                        {
+                            "store": domain,
+                            "count": len(store_rows[domain]),
+                        },
+                    )
+                )
+            except Exception:
+                logger.error(
+                    "Pipeline consumer skipped bad row for %s: %s",
+                    domain,
+                    traceback.format_exc()[:300],
+                )
+
+    consumer_task = asyncio.create_task(_consumer())
+    producer_tasks = [
+        asyncio.create_task(_producer(url)) for url in store_urls
     ]
 
-    # ── Consumer: drain queue until every store signals done ─────────────────
     stores_finished = 0
-    total_stores    = len(store_urls)
+    total_stores = len(store_urls)
 
-    while stores_finished < total_stores:
-        event_type, data = await event_queue.get()
-        yield (event_type, data)                    # forward to Streamlit caller
-        if event_type == "scraping_done":
-            stores_finished += 1
-            logger.info(
-                "Pipeline: %s finished — %d rows  (%d/%d stores done)",
-                data["store"], data["total"], stores_finished, total_stores,
-            )
-
-    # Ensure all producer tasks are fully cleaned up
-    await asyncio.gather(*scrape_tasks, return_exceptions=True)
+    try:
+        while stores_finished < total_stores:
+            event_type, data = await event_queue.get()
+            if result_callback is not None:
+                try:
+                    result_callback(event_type, data)
+                except Exception:
+                    logger.error(
+                        "result_callback error: %s",
+                        traceback.format_exc()[:200],
+                    )
+            yield (event_type, data)
+            if event_type == "scraping_done":
+                stores_finished += 1
+                logger.info(
+                    "Pipeline: %s finished — %d rows  (%d/%d stores done)",
+                    data["store"],
+                    data["total"],
+                    stores_finished,
+                    total_stores,
+                )
+    finally:
+        for t in producer_tasks:
+            if not t.done():
+                t.cancel()
+        if not consumer_task.done():
+            consumer_task.cancel()
+        await asyncio.gather(*producer_tasks, consumer_task, return_exceptions=True)
 
     # ── Phase 2: Build competitor DataFrames from accumulated rows ────────────
     comp_dfs: Dict[str, pd.DataFrame] = {}
@@ -230,6 +277,7 @@ def run_realtime_pipeline_sync(
     max_products_per_store: int = 0,
     use_ai: bool = False,
     on_event: Optional[Any] = None,
+    result_callback: Optional[Callable[[str, Any], None]] = None,
 ) -> pd.DataFrame:
     """
     Synchronous wrapper around run_realtime_pipeline().
@@ -238,25 +286,25 @@ def run_realtime_pipeline_sync(
     Returns the final results DataFrame.
 
     Args:
-        on_event: optional callable(event_type: str, data: dict) — called for
-                  every event so callers can print progress without async.
+        on_event: optional legacy alias for result_callback (if both given,
+                  result_callback wins).
+        result_callback: optional callable(event_type: str, data: Any) per event.
 
     Returns:
         pd.DataFrame with match results (empty if scraping failed).
     """
+    _cb = result_callback if result_callback is not None else on_event
+
     async def _run() -> pd.DataFrame:
         result_df = pd.DataFrame()
         async for event_type, data in run_realtime_pipeline(
-            our_df, store_urls,
+            our_df,
+            store_urls,
             concurrency=concurrency,
             max_products_per_store=max_products_per_store,
             use_ai=use_ai,
+            result_callback=_cb,
         ):
-            if on_event is not None:
-                try:
-                    on_event(event_type, data)
-                except Exception:
-                    pass
             if event_type == "complete":
                 result_df = data.get("df", pd.DataFrame())
         return result_df
