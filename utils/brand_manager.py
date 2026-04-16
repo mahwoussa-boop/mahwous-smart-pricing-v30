@@ -355,9 +355,6 @@ class BrandManager:
             from engines.ai_engine import generate_salla_brand_info
             data = generate_salla_brand_info(brand_name)
             if data and data.get("brand_name"):
-                # جلب لوجو حقيقي إن لم يوفّره AI
-                if not data.get("logo_url"):
-                    data["logo_url"] = fetch_brand_logo(brand_name)
                 return data
         except Exception as e:
             _logger.warning("BrandManager._generate_brand_data: %s", e)
@@ -507,48 +504,6 @@ def _safe_seo_url(raw_url: str, brand_name: str) -> str:
     return f"{slug}_mahwous"
 
 
-def fetch_brand_logo(brand_name: str) -> str:
-    """
-    يجلب رابط لوجو الماركة عبر Clearbit Logo API.
-    يستخرج الجزء الإنجليزي من الاسم ويحوّله إلى domain مُحتمل.
-    يُعيد رابط URL مباشر للصورة أو سلسلة فارغة عند الفشل.
-    """
-    import requests as _req
-
-    clean = str(brand_name or "").strip()
-    if not clean:
-        return ""
-
-    # استخرج الجزء الإنجليزي
-    if "|" in clean:
-        parts = [p.strip() for p in clean.split("|")]
-        en_part = next((p for p in parts if re.search(r"[a-zA-Z]", p)), None)
-    else:
-        en_part = clean if re.search(r"[a-zA-Z]", clean) else None
-
-    if not en_part:
-        return ""
-
-    # حوّل الاسم إلى domain محتمل
-    slug = re.sub(r"[^a-zA-Z0-9]+", "", en_part.lower().strip())
-    if not slug or len(slug) < 2:
-        return ""
-
-    # جرّب أنماط domain شائعة
-    candidates = [f"{slug}.com", f"{slug}parfums.com", f"{slug}fragrances.com"]
-    for domain in candidates:
-        logo_url = f"https://logo.clearbit.com/{domain}"
-        try:
-            resp = _req.head(logo_url, timeout=5, allow_redirects=True)
-            if resp.status_code == 200:
-                _logger.info("BrandManager: لوجو %s → %s", brand_name, logo_url)
-                return logo_url
-        except Exception:
-            continue
-
-    return ""
-
-
 def _minimal_brand_data(brand_name: str) -> dict:
     """بيانات ماركة أساسية (Fallback إذا فشل AI)."""
     clean = str(brand_name or "").strip()[:_MAX_BRAND_NAME]
@@ -556,7 +511,7 @@ def _minimal_brand_data(brand_name: str) -> dict:
     return {
         "brand_name":   clean,
         "description":  f"عطور {clean} الأصلية — اكتشف التميز والفخامة في متجر مهووس للعطور."[:_MAX_BRAND_DESC],
-        "logo_url":     fetch_brand_logo(brand_name),
+        "logo_url":     "",
         "logo_prompt":  "",
         "seo_title":    f"عطور {clean} الأصلية | متجر مهووس"[:_MAX_PAGE_TITLE],
         "seo_url":      f"{safe}_mahwous",

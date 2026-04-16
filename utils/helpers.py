@@ -48,11 +48,16 @@ def format_diff(diff) -> str:
 
 # ===== get_filter_options =====
 def get_filter_options(df: pd.DataFrame) -> dict:
-    """استخراج خيارات الفلاتر من DataFrame"""
+    """
+    Extract all filter option lists from a DataFrame.
+    Extended (Task 3.1): now includes gender and size options.
+    """
     opts = {
-        "brands": ["الكل"],
+        "brands":      ["الكل"],
         "competitors": ["الكل"],
-        "types": ["الكل"],
+        "types":       ["الكل"],
+        "genders":     ["الكل"],   # Task 3.1 — gender (الجنس column)
+        "sizes":       ["الكل"],   # Task 3.1 — perfume size (الحجم column)
     }
     if df is None or df.empty:
         return opts
@@ -72,20 +77,39 @@ def get_filter_options(df: pd.DataFrame) -> dict:
         types = sorted([str(t) for t in types if str(t).strip() and str(t) != "nan"])
         opts["types"] = ["الكل"] + types
 
+    # Task 3.1: gender options — NEVER treat gender markers as stopwords
+    if "الجنس" in df.columns:
+        genders = df["الجنس"].dropna().unique().tolist()
+        genders = sorted([str(g) for g in genders if str(g).strip() and str(g) not in ("nan", "None")])
+        if genders:
+            opts["genders"] = ["الكل"] + genders
+
+    # Task 3.1: size options (e.g. "100ml", "50ml") — only if column present
+    if "الحجم" in df.columns:
+        sizes = df["الحجم"].dropna().unique().tolist()
+        sizes = sorted([str(s) for s in sizes if str(s).strip() and str(s) not in ("nan", "None", "")])
+        if sizes:
+            opts["sizes"] = ["الكل"] + sizes
+
     return opts
 
 
 # ===== apply_filters =====
 def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
-    """تطبيق الفلاتر على DataFrame"""
+    """
+    Apply all active filter values to a DataFrame.
+    Extended (Task 3.1): supports gender and size filters.
+    All filters are additive (AND logic). Safe: never modifies the original df.
+    """
     if df is None or df.empty:
         return df
 
     result = df.copy()
 
+    # Text search across multiple product name columns
     search = filters.get("search", "").strip()
     if search:
-        mask = pd.Series([False] * len(result))
+        mask = pd.Series([False] * len(result), index=result.index)
         for col in ["المنتج", "منتج_المنافس", "الماركة"]:
             if col in result.columns:
                 mask = mask | result[col].astype(str).str.contains(search, case=False, na=False)
@@ -114,6 +138,16 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     price_max = filters.get("price_max")
     if price_max and price_max > 0 and "السعر" in result.columns:
         result = result[result["السعر"] <= float(price_max)]
+
+    # Task 3.1 — gender filter (never treat gender markers as stopwords)
+    gender_f = filters.get("gender", "الكل")
+    if gender_f and gender_f != "الكل" and "الجنس" in result.columns:
+        result = result[result["الجنس"].astype(str) == gender_f]
+
+    # Task 3.1 — perfume size filter (exact match on الحجم column)
+    size_f = filters.get("size", "الكل")
+    if size_f and size_f != "الكل" and "الحجم" in result.columns:
+        result = result[result["الحجم"].astype(str) == size_f]
 
     return result.reset_index(drop=True)
 

@@ -1013,79 +1013,26 @@ def get_all_competitors() -> list:
 #  محرك تراكم بيانات المنافسين عبر الجلسات — Persistent Competitor Store
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _get_competitor_store_db():
-    """اتصال جدول المنافسين: MySQL دائم على Cloud Run إن توفر، وإلا SQLite محلي."""
-    use_mysql = str(os.environ.get("USE_MYSQL", "True") or "True").lower() == "true"
-    mysql_user = (os.environ.get("MYSQL_USER") or "").strip()
-    mysql_password = (os.environ.get("MYSQL_PASSWORD") or "").strip()
-    mysql_db = (os.environ.get("MYSQL_DB") or "").strip()
-    mysql_host = (os.environ.get("MYSQL_HOST") or "").strip()
-
-    if use_mysql and mysql_user and mysql_password and mysql_db and mysql_host:
-        try:
-            import pymysql
-            conn_kwargs = {
-                "user": mysql_user,
-                "password": mysql_password,
-                "database": mysql_db,
-                "charset": "utf8mb4",
-                "autocommit": False,
-                "cursorclass": pymysql.cursors.DictCursor,
-            }
-            if mysql_host.startswith("/cloudsql/"):
-                conn_kwargs["unix_socket"] = mysql_host
-            else:
-                conn_kwargs["host"] = mysql_host
-            return pymysql.connect(**conn_kwargs), "mysql"
-        except Exception as e:
-            _logger.warning("فشل الاتصال بـ MySQL لجدول المنافسين، سيتم الرجوع إلى SQLite: %s", e)
-
-    return get_db(), "sqlite"
-
-
 def init_competitor_store() -> None:
     """يُنشئ جدول التراكم إذا لم يكن موجوداً — آمن للاستدعاء المتكرر."""
-    conn, db_type = _get_competitor_store_db()
-    try:
-        if db_type == "mysql":
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS competitor_products_store (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        competitor VARCHAR(255) NOT NULL,
-                        product_name TEXT NOT NULL,
-                        norm_name VARCHAR(255) NOT NULL,
-                        price DECIMAL(10,2) DEFAULT 0,
-                        image_url TEXT,
-                        product_url TEXT,
-                        brand VARCHAR(255) DEFAULT '',
-                        size VARCHAR(255) DEFAULT '',
-                        gender VARCHAR(255) DEFAULT '',
-                        added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE KEY uniq_competitor_norm_name (competitor, norm_name)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """)
-            conn.commit()
-        else:
-            conn.execute("""CREATE TABLE IF NOT EXISTS competitor_products_store (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                competitor    TEXT NOT NULL,
-                product_name  TEXT NOT NULL,
-                norm_name     TEXT NOT NULL,
-                price         REAL DEFAULT 0,
-                image_url     TEXT DEFAULT '',
-                product_url   TEXT DEFAULT '',
-                brand         TEXT DEFAULT '',
-                size          TEXT DEFAULT '',
-                gender        TEXT DEFAULT '',
-                added_at      TEXT DEFAULT (datetime('now','localtime')),
-                updated_at    TEXT DEFAULT (datetime('now','localtime')),
-                UNIQUE(competitor, norm_name)
-            )""")
-            conn.commit()
-    finally:
-        conn.close()
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS competitor_products_store (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        competitor    TEXT NOT NULL,
+        product_name  TEXT NOT NULL,
+        norm_name     TEXT NOT NULL,
+        price         REAL DEFAULT 0,
+        image_url     TEXT DEFAULT '',
+        product_url   TEXT DEFAULT '',
+        brand         TEXT DEFAULT '',
+        size          TEXT DEFAULT '',
+        gender        TEXT DEFAULT '',
+        added_at      TEXT DEFAULT (datetime('now','localtime')),
+        updated_at    TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(competitor, norm_name)
+    )""")
+    conn.commit()
+    conn.close()
 
 
 def _normalize_for_store(s: str) -> str:
@@ -1095,7 +1042,7 @@ def _normalize_for_store(s: str) -> str:
     t = _re.sub(r"[أإآا]", "ا", t)
     t = _re.sub(r"[ةه]", "ه", t)
     t = _re.sub(r"[يى]", "ي", t)
-    return _re.sub(r"\s+", " ", t).strip().lower()[:255]
+    return _re.sub(r"\s+", " ", t).strip().lower()
 
 
 def upsert_competitor_products(
@@ -1109,114 +1056,60 @@ def upsert_competitor_products(
     يُعيد {'inserted': N, 'updated': M}
     """
     init_competitor_store()
-    conn, db_type = _get_competitor_store_db()
+    conn = get_db()
     inserted = updated = 0
     today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Phase 4: Atomic transaction — prevents race conditions during high-volume scraping
     try:
-        if db_type == "sqlite":
+        conn.execute("BEGIN IMMEDIATE;")
+    except Exception:
+        pass  # SQLite auto-transaction fallback
+
+    try:
+        for p in products:
+            pname = str(p.get(name_key, "") or "").strip()
+            if not pname or len(pname) < 2:
+                continue
+            norm = _normalize_for_store(pname)
             try:
-                conn.execute("BEGIN IMMEDIATE;")
-            except Exception:
-                pass
+                price = float(str(p.get(price_key, 0) or 0).replace(",", ""))
+            except (ValueError, TypeError):
+                price = 0.0
 
-        if db_type == "mysql":
-            with conn.cursor() as cur:
-                for p in products:
-                    pname = str(p.get(name_key, "") or "").strip()
-                    if not pname or len(pname) < 2:
-                        continue
-                    norm = _normalize_for_store(pname)
-                    try:
-                        price = float(str(p.get(price_key, 0) or 0).replace(",", ""))
-                    except (ValueError, TypeError):
-                        price = 0.0
+            existing = conn.execute(
+                "SELECT id FROM competitor_products_store WHERE competitor=? AND norm_name=?",
+                (competitor, norm)
+            ).fetchone()
 
-                    cur.execute(
-                        "SELECT id FROM competitor_products_store WHERE competitor=%s AND norm_name=%s LIMIT 1",
-                        (competitor, norm),
-                    )
-                    existing = cur.fetchone()
-
-                    image_url = str(p.get("image_url", "") or "")
-                    product_url = str(p.get("product_url", "") or "")
-                    brand = str(p.get("brand", "") or "")
-                    size = str(p.get("size", "") or "")
-                    gender = str(p.get("gender", "") or "للجنسين")
-
-                    if existing:
-                        cur.execute(
-                            """UPDATE competitor_products_store
-                               SET price=%s,
-                                   updated_at=%s,
-                                   image_url=CASE WHEN %s <> '' THEN %s ELSE image_url END,
-                                   product_url=CASE WHEN %s <> '' THEN %s ELSE product_url END,
-                                   brand=%s,
-                                   size=%s,
-                                   gender=%s
-                               WHERE id=%s""",
-                            (price, today, image_url, image_url, product_url, product_url,
-                             brand, size, gender, existing["id"]),
-                        )
-                        updated += 1
-                    else:
-                        cur.execute(
-                            """INSERT INTO competitor_products_store
-                               (competitor, product_name, norm_name, price, image_url,
-                                product_url, brand, size, gender, added_at, updated_at)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (competitor, pname, norm, price, image_url, product_url,
-                             brand, size, gender, today, today),
-                        )
-                        inserted += 1
-        else:
-            for p in products:
-                pname = str(p.get(name_key, "") or "").strip()
-                if not pname or len(pname) < 2:
-                    continue
-                norm = _normalize_for_store(pname)
-                try:
-                    price = float(str(p.get(price_key, 0) or 0).replace(",", ""))
-                except (ValueError, TypeError):
-                    price = 0.0
-
-                existing = conn.execute(
-                    "SELECT id FROM competitor_products_store WHERE competitor=? AND norm_name=?",
-                    (competitor, norm)
-                ).fetchone()
-
-                if existing:
-                    conn.execute(
-                        """UPDATE competitor_products_store
-                           SET price=?, updated_at=?,
-                               image_url=COALESCE(NULLIF(?,''),(SELECT image_url FROM competitor_products_store WHERE id=?)),
-                               product_url=COALESCE(NULLIF(?,''),(SELECT product_url FROM competitor_products_store WHERE id=?)),
-                               brand=?, size=?, gender=?
-                           WHERE id=?""",
-                        (price, today,
-                         str(p.get("image_url","") or ""), existing[0],
-                         str(p.get("product_url","") or ""), existing[0],
-                         str(p.get("brand","") or ""),
-                         str(p.get("size","") or ""),
-                         str(p.get("gender","") or "للجنسين"),
-                         existing[0])
-                    )
-                    updated += 1
-                else:
-                    conn.execute(
-                        """INSERT INTO competitor_products_store
-                           (competitor, product_name, norm_name, price, image_url,
-                            product_url, brand, size, gender, added_at, updated_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                        (competitor, pname, norm, price,
-                         str(p.get("image_url","") or ""),
-                         str(p.get("product_url","") or ""),
-                         str(p.get("brand","") or ""),
-                         str(p.get("size","") or ""),
-                         str(p.get("gender","") or "للجنسين"),
-                         today, today)
-                    )
-                    inserted += 1
+            if existing:
+                conn.execute(
+                    """UPDATE competitor_products_store
+                       SET price=?, updated_at=?,
+                           image_url=COALESCE(NULLIF(?,''),(SELECT image_url FROM competitor_products_store WHERE id=?)),
+                           product_url=COALESCE(NULLIF(?,''),(SELECT product_url FROM competitor_products_store WHERE id=?))
+                       WHERE id=?""",
+                    (price, today,
+                     str(p.get("image_url","") or ""), existing[0],
+                     str(p.get("product_url","") or ""), existing[0],
+                     existing[0])
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """INSERT INTO competitor_products_store
+                       (competitor, product_name, norm_name, price, image_url,
+                        product_url, brand, size, gender, added_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (competitor, pname, norm, price,
+                     str(p.get("image_url","") or ""),
+                     str(p.get("product_url","") or ""),
+                     str(p.get("brand","") or ""),
+                     str(p.get("size","") or ""),
+                     str(p.get("gender","") or "للجنسين"),
+                     today, today)
+                )
+                inserted += 1
 
         conn.commit()
     except Exception:
@@ -1233,46 +1126,24 @@ def upsert_competitor_products(
 def get_all_competitor_products(competitor: str = "") -> list[dict]:
     """يُرجع كل منتجات المنافس (أو الكل إذا competitor فارغ)."""
     init_competitor_store()
-    conn, db_type = _get_competitor_store_db()
-    try:
-        if db_type == "mysql":
-            with conn.cursor() as cur:
-                if competitor:
-                    cur.execute(
-                        """SELECT competitor, product_name, price, image_url, product_url,
-                                  brand, size, gender, added_at, updated_at
-                           FROM competitor_products_store WHERE competitor=%s
-                           ORDER BY updated_at DESC""",
-                        (competitor,),
-                    )
-                else:
-                    cur.execute(
-                        """SELECT competitor, product_name, price, image_url, product_url,
-                                  brand, size, gender, added_at, updated_at
-                           FROM competitor_products_store
-                           ORDER BY competitor, updated_at DESC"""
-                    )
-                rows = cur.fetchall()
-                return list(rows)
-        else:
-            if competitor:
-                rows = conn.execute(
-                    """SELECT competitor, product_name, price, image_url, product_url,
-                              brand, size, gender, added_at, updated_at
-                       FROM competitor_products_store WHERE competitor=?
-                       ORDER BY updated_at DESC""",
-                    (competitor,)
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT competitor, product_name, price, image_url, product_url,
-                              brand, size, gender, added_at, updated_at
-                       FROM competitor_products_store
-                       ORDER BY competitor, updated_at DESC"""
-                ).fetchall()
-            return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    conn = get_db()
+    if competitor:
+        rows = conn.execute(
+            """SELECT competitor, product_name, price, image_url, product_url,
+                      brand, size, gender, added_at, updated_at
+               FROM competitor_products_store WHERE competitor=?
+               ORDER BY updated_at DESC""",
+            (competitor,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT competitor, product_name, price, image_url, product_url,
+                      brand, size, gender, added_at, updated_at
+               FROM competitor_products_store
+               ORDER BY competitor, updated_at DESC"""
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_competitor_products_df(competitor: str = "") -> "pd.DataFrame":
@@ -1287,60 +1158,28 @@ def get_competitor_products_df(competitor: str = "") -> "pd.DataFrame":
 def get_competitor_store_stats() -> dict:
     """إحصاءات جدول التراكم."""
     init_competitor_store()
-    conn, db_type = _get_competitor_store_db()
-    try:
-        if db_type == "mysql":
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS total FROM competitor_products_store")
-                total = cur.fetchone()["total"]
-                cur.execute("SELECT COUNT(*) AS total FROM competitor_products_store WHERE price > 0.009")
-                with_price = cur.fetchone()["total"]
-                cur.execute("SELECT competitor, COUNT(*) AS cnt FROM competitor_products_store GROUP BY competitor")
-                comps = cur.fetchall()
-                return {
-                    "total_products": int(total or 0),
-                    "with_price": int(with_price or 0),
-                    "by_competitor": {str(r["competitor"]): int(r["cnt"]) for r in comps},
-                }
-        else:
-            total = conn.execute("SELECT COUNT(*) FROM competitor_products_store").fetchone()[0]
-            with_price = conn.execute(
-                "SELECT COUNT(*) FROM competitor_products_store WHERE price > 0.009"
-            ).fetchone()[0]
-            comps = conn.execute(
-                "SELECT competitor, COUNT(*) as cnt FROM competitor_products_store GROUP BY competitor"
-            ).fetchall()
-            return {
-                "total_products": total,
-                "with_price": int(with_price),
-                "by_competitor": {r[0]: r[1] for r in comps},
-            }
-    finally:
-        conn.close()
+    conn = get_db()
+    total = conn.execute("SELECT COUNT(*) FROM competitor_products_store").fetchone()[0]
+    comps = conn.execute(
+        "SELECT competitor, COUNT(*) as cnt FROM competitor_products_store GROUP BY competitor"
+    ).fetchall()
+    conn.close()
+    return {
+        "total_products": total,
+        "by_competitor": {r[0]: r[1] for r in comps},
+    }
 
 
 def clear_competitor_store(competitor: str = "") -> int:
     """يحذف منتجات منافس محدد أو الكل. يُعيد عدد الصفوف المحذوفة."""
     init_competitor_store()
-    conn, db_type = _get_competitor_store_db()
-    try:
-        if db_type == "mysql":
-            with conn.cursor() as cur:
-                if competitor:
-                    cur.execute("DELETE FROM competitor_products_store WHERE competitor=%s", (competitor,))
-                else:
-                    cur.execute("DELETE FROM competitor_products_store")
-                deleted = cur.rowcount
-            conn.commit()
-            return int(deleted or 0)
-        else:
-            if competitor:
-                conn.execute("DELETE FROM competitor_products_store WHERE competitor=?", (competitor,))
-            else:
-                conn.execute("DELETE FROM competitor_products_store")
-            deleted = conn.execute("SELECT changes()").fetchone()[0]
-            conn.commit()
-            return deleted
-    finally:
-        conn.close()
+    conn = get_db()
+    if competitor:
+        conn.execute("DELETE FROM competitor_products_store WHERE competitor=?", (competitor,))
+    else:
+        conn.execute("DELETE FROM competitor_products_store")
+    deleted = conn.execute("SELECT changes()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    return deleted
 

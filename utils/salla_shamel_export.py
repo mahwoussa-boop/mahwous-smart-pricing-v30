@@ -543,7 +543,8 @@ def build_salla_shamel_dataframe(
         out["سعر المنتج"]                = price
         out["الوصف"]                     = description
         out["هل يتطلب شحن؟"]            = "نعم"
-        out["رمز المنتج sku"]            = ""
+        # FIX: extract SKU from input row if available (e.g. magic factory)
+        out["رمز المنتج sku"]            = _safe_str(r.get("رمز المنتج sku", ""))
         out["سعر التكلفة"]               = ""
         out["السعر المخفض"]              = ""
         out["تاريخ بداية التخفيض"]       = ""
@@ -554,9 +555,10 @@ def build_salla_shamel_dataframe(
         out["الوزن"]                     = 0.2
         out["وحدة الوزن"]               = "kg"
         out["الماركة"]                   = safe_brand  # FIX: Salla Strict CSV Validation
-        out["العنوان الترويجي"]          = ""
+        # FIX: extract promotional title & barcode from input row if available
+        out["العنوان الترويجي"]          = _safe_str(r.get("العنوان الترويجي", ""))
         out["تثبيت المنتج"]              = ""
-        out["الباركود"]                  = ""
+        out["الباركود"]                  = _safe_str(r.get("الباركود", ""))
         out["السعرات الحرارية"]          = ""
         out["MPN"]                       = ""
         out["GTIN"]                      = ""
@@ -735,28 +737,3 @@ def build_salla_shamel_description_html(
 ) -> str:
     brand = resolved_brand or brand_raw or "غير متوفر"
     return generate_salla_html_description(product_name=product_name, brand_name=brand)
-
-
-# ══════════════════════════════════════════════════════════════════════════
-#  Omega Reverse Forge Integration
-#  Receives aggregated missing products from OmegaEngine.reverse_forge
-#  and exports them as a 40-column Salla-ready CSV
-# ══════════════════════════════════════════════════════════════════════════
-def export_omega_missing_to_salla(
-    missing_df: pd.DataFrame,
-    export_mode: str = "safe",
-) -> tuple[bytes, int]:
-    """
-    Direct export path for Omega Pillar 4 (Reverse Forge).
-    Expects a DataFrame with AI-enhanced columns (وصف_AI, الماركة_الرسمية, etc.)
-    already populated by OmegaEngine.
-
-    Returns: (csv_bytes, product_count)
-    """
-    csv_bytes, count, _ = export_to_salla_shamel_csv(
-        missing_df,
-        our_catalog_df=None,
-        verify_missing=False,
-        export_mode=export_mode,
-    )
-    return csv_bytes, count

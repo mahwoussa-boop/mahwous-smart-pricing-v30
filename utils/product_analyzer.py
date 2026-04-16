@@ -316,7 +316,17 @@ def execute_action(action: str, params: dict) -> dict:
         status = status_map.get(action, action)
 
         # 1. حفظ في جدول المعالجة
-        save_processed(pname, pid, comp, status, old_p, new_p, notes)
+        # FIX: use keyword args to match save_processed() signature correctly
+        save_processed(
+            product_key=pid or pname,
+            product_name=pname,
+            competitor=comp,
+            action=status,
+            old_price=old_p,
+            new_price=new_p,
+            product_id=pid,
+            notes=notes,
+        )
         # 2. إخفاء من الواجهة
         save_hidden_product(pname, pid, comp)
 
