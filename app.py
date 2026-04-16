@@ -383,6 +383,37 @@ def _split_results(df):
     }
 
 
+# ── تحديث حي بدون مكوّنات مخصصة (streamlit-autorefresh يفشل غالباً على السحابة/الوكيل) ───────────────
+@st.fragment(run_every=4)
+def _render_analysis_job_progress_live() -> None:
+    """شريط تقدّم التحليل الخلفي؛ يُحدَّث كل 4 ث داخل الـ fragment دون أصول خارجية."""
+    jid = st.session_state.get("job_id")
+    if not jid:
+        return
+    job = get_job_progress(jid)
+    if not job:
+        return
+    if str(job.get("status", "")) != "running":
+        st.rerun()
+        return
+    tot = max(int(job.get("total") or 0), 1)
+    proc = min(int(job.get("processed") or 0), tot)
+    pct = proc / tot
+    pct_lbl = f"{100.0 * pct:.1f}%"
+    st.progress(min(pct, 0.99), f"⚙️ {proc}/{tot} منتج — {pct_lbl}")
+    st.caption("تحليل خلفي — يُحدَّث كل بضع ثوانٍ. لا تغلق الصفحة حتى يكتمل.")
+
+
+@st.fragment(run_every=3)
+def _scraper_main_tab_live_rerun_tick() -> None:
+    """إعادة تشغيل السكربت كاملاً كل 3 ث أثناء الكشط؛ يتخطى أول استدعاء فوري لـ st.fragment."""
+    k = "_app_scraper_live_tick_n"
+    st.session_state[k] = int(st.session_state.get(k, 0)) + 1
+    if st.session_state[k] <= 1:
+        return
+    st.rerun()
+
+
 def _analysis_mask_for_review_row(adf: pd.DataFrame, row: pd.Series) -> pd.Series:
     """مفتاح مطابقة صف المراجعة مع جدول التحليل الكامل."""
     try:
@@ -2017,43 +2048,22 @@ with st.sidebar:
         job = get_job_progress(st.session_state.job_id)
         if job:
             if job["status"] == "running":
-                tot = max(int(job.get("total") or 0), 1)
-                proc = min(int(job.get("processed") or 0), tot)
-                pct = proc / tot
-                pct_lbl = f"{100.0 * pct:.1f}%"
-                st.progress(
-                    min(pct, 0.99),
-                    f"⚙️ {proc}/{tot} منتج — {pct_lbl}",
-                )
-                st.caption("تحليل خلفي — يُحدَّث كل بضع ثوانٍ. لا تغلق الصفحة حتى يكتمل.")
-                # تحديث تلقائي كل 4 ثوانٍ بدون إعادة تشغيل الكود كاملاً
-                try:
-                    from streamlit_autorefresh import st_autorefresh
-                    st_autorefresh(interval=4000, key="progress_refresh")
-                except ImportError:
-                    # fallback: rerun عادي إذا لم تكن المكتبة موجودة
-                    # ✅ إصلاح: بدون time.sleep() في Main Thread — يجمّد الـ UI ويخالف القاعدة #2
-                    # المستخدم يرى الشريط ويضغط تحديث يدوي، أو يثبّت streamlit-autorefresh
-                    st.info(
-                        "💡 للتحديث التلقائي: `pip install streamlit-autorefresh`  \n"
-                        "أو اضغط الزر أدناه لتحديث الحالة يدوياً.",
-                        icon="ℹ️",
-                    )
-                    if st.button("🔄 تحديث الحالة", key="manual_progress_refresh"):
-                        st.rerun()
-                # اكتمل — حمّل النتائج تلقائياً مع استعادة القوائم
-                if job.get("results"):
-                    _restored = restore_results_from_json(job["results"])
-                    df_all = pd.DataFrame(_restored)
-                    missing_df = pd.DataFrame(job.get("missing", [])) if job.get("missing") else pd.DataFrame()
-                    _r = _split_results(df_all)
-                    _r["missing"] = missing_df
-                    st.session_state.results     = _r
-                    st.session_state.analysis_df = df_all
-                st.session_state.last_audit_stats = job.get("audit") or {}
-                st.session_state.job_running = False
-                st.balloons()
-                st.rerun()
+                _render_analysis_job_progress_live()
+            elif str(job.get("status", "")) == "done":
+                if st.session_state.get("_applied_job_results_id") != st.session_state.job_id:
+                    st.session_state["_applied_job_results_id"] = st.session_state.job_id
+                    if job.get("results"):
+                        _restored = restore_results_from_json(job["results"])
+                        df_all = pd.DataFrame(_restored)
+                        missing_df = pd.DataFrame(job.get("missing", [])) if job.get("missing") else pd.DataFrame()
+                        _r = _split_results(df_all)
+                        _r["missing"] = missing_df
+                        st.session_state.results = _r
+                        st.session_state.analysis_df = df_all
+                    st.session_state.last_audit_stats = job.get("audit") or {}
+                    st.session_state.job_running = False
+                    st.balloons()
+                    st.rerun()
             elif job["status"].startswith("error"):
                 st.error(f"❌ فشل: {job['status'][7:80]}")
     page = st.radio("الأقسام", SECTIONS, label_visibility="collapsed", key="main_nav")
@@ -2696,6 +2706,7 @@ if page == "📊 لوحة التحكم":
                         st.session_state.comp_dfs = comp_dfs
                         job_id = str(uuid.uuid4())[:8]
                         st.session_state.job_id = job_id
+                        st.session_state.pop("_applied_job_results_id", None)
                         comp_names = ",".join(comp_dfs.keys())
                         _prep_ok = True
 
@@ -4867,13 +4878,12 @@ elif page == "🕷️ كشط المنافسين":
     st.markdown("---")
     st.subheader("📊 لوحة المراقبة")
 
-    # ── تحديث تلقائي فقط عند التشغيل الفعلي (لا infinite reruns) ─────────
+    # ── تحديث تلقائي أثناء التشغيل (بدون مكوّن خارجي) ─────────────────────
     if _is_alive:
-        try:
-            from streamlit_autorefresh import st_autorefresh
-            st_autorefresh(interval=3000, key="sc_autorefresh", limit=None)
-        except ImportError:
-            st.caption("💡 ثبّت `streamlit-autorefresh` للتحديث التلقائي")
+        st.session_state["_app_scraper_live_tick_n"] = 0
+        _scraper_main_tab_live_rerun_tick()
+    else:
+        st.session_state.pop("_app_scraper_live_tick_n", None)
 
     # ── تعريف labels لكل حالة ─────────────────────────────────────────────
     _PHASE_META = {
