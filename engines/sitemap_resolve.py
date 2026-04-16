@@ -26,36 +26,88 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
-from lxml import etree
 
-from scrapers.anti_ban import get_xml_headers, get_browser_headers
+from scrapers.anti_ban import (
+    fetch_with_retry,
+    get_browser_headers,
+    get_xml_headers,
+    looks_like_bot_challenge,
+    try_all_sync_fallbacks,
+)
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+class SitemapDiscoveryError(RuntimeError):
+    """Sitemap / robots discovery failed after anti-ban retries (often Cloudflare 403/429)."""
 
 
-async def get_all_products_from_sitemap(sitemap_url: str) -> List[str]:
+def _looks_like_xml(text: str) -> bool:
+    t = (text or "").lstrip()[:8000].lower()
+    return bool(
+        t.startswith("<?xml")
+        or "<urlset" in t
+        or "<sitemapindex" in t
+    )
+
+
+async def _fetch_sitemap_text(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    referer: str,
+) -> Optional[str]:
     """
-    Fast sitemap reader used by v30 automation flows.
-    Returns all <loc> URLs from the given sitemap XML.
+    Sitemap / robots body as text: aiohttp + fetch_with_retry first, then
+    curl_cffi / cloudscraper sync chain if the response is a bot challenge.
     """
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(
-                sitemap_url,
-                ssl=False,
-                allow_redirects=True,
-                timeout=_TIMEOUT,
-            ) as response:
-                if response.status != 200:
-                    return []
-                content = await response.read()
-        tree = etree.fromstring(content)
-        return [loc.text.strip() for loc in tree.xpath("//*[local-name()='loc']") if getattr(loc, "text", None)]
-    except Exception:
-        return []
+    ref = referer or f"https://{urlparse(url).netloc}/"
+    resp = await fetch_with_retry(session, url, max_retries=4, referer=ref)
+    if resp is not None:
+        try:
+            text = await resp.text(errors="ignore")
+        finally:
+            resp.close()
+        if text and (
+            _looks_like_xml(text)
+            or url.rstrip("/").lower().endswith("/robots.txt")
+        ):
+            return text
+        if text and looks_like_bot_challenge(text):
+            logger.warning(
+                "[Sitemap] HTTP 200 but bot challenge HTML for %s — trying TLS bypass",
+                url,
+            )
+        elif text and not _looks_like_xml(text) and url.endswith(".xml"):
+            logger.warning(
+                "[Sitemap] HTTP 200 but non-XML body for %s — trying TLS bypass",
+                url,
+            )
+
+    loop = asyncio.get_running_loop()
+    sync_text = await loop.run_in_executor(
+        None,
+        lambda u=url: try_all_sync_fallbacks(u, timeout=28),
+    )
+    if sync_text and (
+        _looks_like_xml(sync_text)
+        or url.rstrip("/").lower().endswith("/robots.txt")
+    ):
+        return sync_text
+    if sync_text and looks_like_bot_challenge(sync_text):
+        logger.error(
+            "[Sitemap] BLOCKED after retries and sync fallback (Cloudflare/challenge): %s",
+            url,
+        )
+        return None
+    if sync_text and url.endswith(".xml") and not _looks_like_xml(sync_text):
+        logger.error(
+            "[Sitemap] Expected XML from %s but got non-XML after bypass attempts",
+            url,
+        )
+        return None
+    return sync_text
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  ثوابت ومسارات Sitemap
@@ -91,15 +143,12 @@ _ZID_DOMAINS = re.compile(
 
 # صفحة منتج — أنماط شائعة عبر المنصات
 _PRODUCT_URL_RE = re.compile(
-    r"(/p\d{5,}$"            # سلة: /p123456789
-    r"|/products?/"          # Shopify / WooCommerce
-    r"|/product/[^/?#]{3,}"  # Generic: /product/slug (Golden Scent, etc.)
+    r"(/p\d{5,}$"         # سلة: /p123456789
+    r"|/products?/"       # Shopify / WooCommerce
     r"|/item/"
     r"|/shop/"
     r"|/ar/p/"
     r"|/en/p/"
-    r"|/ar/product/"         # Golden Scent Arabic
-    r"|/en/product/"         # Golden Scent English
     r"|/product-page/"
     r"|منتج"
     r")",
@@ -155,20 +204,14 @@ def _is_zid(url: str) -> bool:
 async def _fetch_xml(
     session: aiohttp.ClientSession, url: str
 ) -> Optional[str]:
-    """GET مع رؤوس XML وتجاهل TLS — يُرجع نص XML أو None."""
+    """GET عبر fetch_with_retry + تخطي التحدي عند الحاجة."""
+    ref = f"https://{urlparse(url).netloc}/"
     try:
-        async with session.get(
-            url,
-            headers=get_xml_headers(),
-            ssl=False,
-            allow_redirects=True,
-            timeout=_TIMEOUT,
-        ) as resp:
-            if resp.status == 200:
-                ct = (resp.headers.get("Content-Type") or "").lower()
-                if "xml" in ct or "text" in ct or url.endswith(".xml"):
-                    return await resp.text(errors="ignore")
-            logger.debug("_fetch_xml %s → HTTP %s", url, resp.status)
+        text = await _fetch_sitemap_text(session, url, referer=ref)
+        if not text:
+            logger.debug("_fetch_xml empty body %s", url)
+            return None
+        return text
     except Exception as exc:
         logger.debug("_fetch_xml %s → %s", url, exc)
     return None
@@ -229,64 +272,62 @@ def _parse_sitemap_xml(xml_text: str) -> Tuple[List[SitemapEntry], List[str]]:
 async def resolve_sitemap_recursively(
     session: aiohttp.ClientSession,
     sitemap_url: str,
-    max_depth: int = 6,
+    max_depth: int = 3,
     current_depth: int = 0,
 ) -> set[str]:
     # FIX: Deep Sitemap & AI Fallback Integrated
     if current_depth > max_depth:
         return set()
     try:
-        async with session.get(
-            sitemap_url,
-            headers=get_xml_headers(),
-            ssl=False,
-            allow_redirects=True,
-            timeout=30,
-        ) as response:
-            if response.status != 200:
-                return set()
-            content = await response.read()
-            root = ET.fromstring(content)
+        referer = f"https://{urlparse(sitemap_url).netloc}/"
+        xml_text = await _fetch_sitemap_text(
+            session, sitemap_url, referer=referer
+        )
+        if not xml_text:
+            logger.error(
+                "[Sitemap] Failed after anti-ban retries (likely 403/429): %s",
+                sitemap_url,
+            )
+            return set()
+        root = ET.fromstring(xml_text)
 
+        # FIX: Deep Sitemap & AI Fallback Integrated
+        # إزالة Namespaces لتسهيل البحث الآمن عبر جميع القوالب.
+        for elem in root.iter():
+            if "}" in elem.tag:
+                elem.tag = elem.tag.split("}", 1)[1]
+
+        urls: set[str] = set()
+        if root.tag == "sitemapindex":
             # FIX: Deep Sitemap & AI Fallback Integrated
-            # إزالة Namespaces لتسهيل البحث الآمن عبر جميع القوالب.
-            for elem in root.iter():
-                if "}" in elem.tag:
-                    elem.tag = elem.tag.split("}", 1)[1]
-
-            urls: set[str] = set()
-            if root.tag == "sitemapindex":
-                # FIX: Deep Sitemap & AI Fallback Integrated
-                # تتبع sitemapindex المتداخل بالتوازي الكامل.
-                tasks = []
-                for loc in root.findall(".//loc"):
-                    if loc.text:
-                        tasks.append(
-                            resolve_sitemap_recursively(
-                                session,
-                                loc.text.strip(),
-                                max_depth,
-                                current_depth + 1,
-                            )
+            # تتبع sitemapindex المتداخل بالتوازي الكامل.
+            tasks = []
+            for loc in root.findall(".//loc"):
+                if loc.text:
+                    tasks.append(
+                        resolve_sitemap_recursively(
+                            session,
+                            loc.text.strip(),
+                            max_depth,
+                            current_depth + 1,
                         )
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for res in results:
-                    if isinstance(res, set):
-                        urls.update(res)
-            elif root.tag == "urlset":
-                # جمع كل روابط <loc> من urlset — الفلترة الدقيقة لاحقاً في _filter_product_entries.
-                # السابق كان يستبعد آلاف روابط المنتجات (سلugs بدون كلمة product أو /p/).
-                for loc in root.findall(".//loc"):
-                    if not loc.text:
-                        continue
-                    loc_text = loc.text.strip()
-                    if not loc_text.startswith("http"):
-                        continue
-                    low = loc_text.lower()
-                    if low.endswith(".xml"):
-                        continue
+                    )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, set):
+                    urls.update(res)
+        elif root.tag == "urlset":
+            for loc in root.findall(".//loc"):
+                if not loc.text:
+                    continue
+                loc_text = loc.text.strip()
+                if (
+                    "/p/" in loc_text
+                    or "-p" in loc_text
+                    or "product" in loc_text.lower()
+                ):
                     urls.add(loc_text)
-            return urls
+        return urls
     except Exception as exc:
         logger.debug("resolve_sitemap_recursively failed for %s: %s", sitemap_url, exc)
         return set()
@@ -296,7 +337,7 @@ async def _fetch_and_parse_sitemap(
     session: aiohttp.ClientSession,
     url: str,
     depth: int = 0,
-    max_depth: int = 6,
+    max_depth: int = 3,
     sem: Optional[asyncio.Semaphore] = None,
 ) -> List[SitemapEntry]:
     """
@@ -342,59 +383,14 @@ def _is_product_url(url: str) -> bool:
 
 
 def _is_salla_product(url: str) -> bool:
-    """
-    سلة: المنتجات تأتي بأنماط متعددة:
-      /p123456789          (الأكثر شيوعاً)
-      /p/slug-name         (نمط slug)
-      /products/slug       (نمط Shopify-like)
-      /product/slug
-      /ar/p/slug           (متعدد اللغات)
-      /en/p/slug
-      /slug-name           (منتج مباشر على الجذر — شائع في سلة)
-
-    v2.2: توسيع جذري لتجنب فقدان المنتجات.
-    الفلسفة: في سلة، أي رابط ليس صفحة نظام (cart, account, blog...) هو غالباً منتج.
-    """
+    """سلة: المنتجات عادة /p[0-9]+ أو تنتهي بمعرّف رقمي طويل."""
     path = urlparse(url).path or ""
-    path_lower = path.lower().rstrip("/")
-
-    # ─── أنماط مؤكدة (fast path) ───
-    if re.search(r"/p\d{3,}$", path):          # /p12345 (خفّضنا من 5 أرقام إلى 3)
+    if re.search(r"/p\d{5,}$", path):
         return True
-    if re.search(r"/\d{6,}$", path):           # /12345678 (خفّضنا من 8 إلى 6)
+    if re.search(r"/\d{8,}$", path):
         return True
-    if re.search(r"/p/[^/]+$", path_lower):    # /p/slug-name
+    if "/products/" in path.lower() or "/product/" in path.lower():
         return True
-    if "/products/" in path_lower or "/product/" in path_lower:
-        return True
-    if re.search(r"/ar/p/|/en/p/", path_lower):
-        return True
-
-    # ─── نمط الجذر المباشر: /slug-name (شائع جداً في سلة) ───
-    # نقبل أي مسار من مقطع واحد يحتوي حروف (عربية أو لاتينية) وليس صفحة نظام
-    segments = [s for s in path.strip("/").split("/") if s]
-    if len(segments) == 1:
-        slug = segments[0].lower()
-        # استبعاد صفحات النظام المعروفة
-        _salla_system_slugs = {
-            "cart", "checkout", "login", "register", "account", "profile",
-            "contact", "about", "blog", "faq", "privacy", "terms",
-            "categories", "brands", "offers", "wishlist", "search",
-            "sitemap.xml", "robots.txt", "favicon.ico",
-        }
-        if slug not in _salla_system_slugs and not slug.endswith((".xml", ".js", ".css", ".png", ".jpg", ".webp")):
-            return True
-
-    # ─── مسار ثنائي: /category/slug — نقبله إذا لم يكن تصنيفاً صريحاً ───
-    if len(segments) == 2:
-        parent = segments[0].lower()
-        _salla_non_product_parents = {
-            "blog", "page", "pages", "category", "categories", "tag", "tags",
-            "account", "cart", "checkout", "auth",
-        }
-        if parent not in _salla_non_product_parents:
-            return True
-
     return False
 
 
@@ -403,10 +399,9 @@ def _filter_product_entries(entries: List[SitemapEntry], base: str) -> List[Site
     salla = _is_salla(base)
     product_entries: List[SitemapEntry] = []
     
-    # ─── v26.2: تحسين لـ worldgivenchy والمواقع متعددة اللغات + Golden Scent ───
+    # ─── v26.1: تحسين لـ worldgivenchy والمواقع متعددة اللغات ───
     import urllib.parse
     is_worldgivenchy = "worldgivenchy.com" in base.lower()
-    is_goldenscent = "goldenscent.com" in base.lower()
     seen_slugs = set()
 
     for e in entries:
@@ -440,17 +435,6 @@ def _filter_product_entries(entries: List[SitemapEntry], base: str) -> List[Site
             ]
             if any(x in url_decoded for x in bad_keywords):
                 continue
-
-        # ─── Golden Scent: /ar/product/SLUG or /en/product/SLUG ───
-        if is_goldenscent:
-            path_low = (p.path or "").lower()
-            # قبول صفحات المنتجات فقط
-            if "/product/" in path_low or "/products/" in path_low:
-                slug = p.path.rstrip('/').split('/')[-1]
-                if slug and slug not in seen_slugs:
-                    product_entries.append(e)
-                    seen_slugs.add(slug)
-            continue  # تخطي الفلاتر العامة لـ Golden Scent
 
         if salla:
             if _is_salla_product(e.url):
@@ -545,28 +529,11 @@ async def resolve_product_entries(
                 all_entries.extend(entries)
                 break
 
-    # 4) Salla Deep Pagination Supplement
-    #    إذا أعاد sitemap سلة عدداً محدوداً (< 1500)، نُكمل عبر API/HTML pagination
-    if _is_salla(base):
-        _sitemap_count = len(all_entries)
-        if _sitemap_count < 1500:
-            logger.info(
-                "🔍 %s — سلة: sitemap أعاد %d رابط فقط، يُفعّل Deep Pagination…",
-                base, _sitemap_count,
-            )
-            _salla_extra = await _fallback_salla_pagination(session, base, max_products)
-            if _salla_extra:
-                all_entries.extend(_salla_extra)
-                logger.info(
-                    "📦 %s — Deep Pagination أضاف %d رابط (المجموع: %d)",
-                    base, len(_salla_extra), len(all_entries),
-                )
-
-    # 5) Fallback: Shopify /products.json API
+    # 4) Fallback: Shopify /products.json API
     if not all_entries:
         all_entries.extend(await _fallback_shopify_api(session, base, max_products))
 
-    # 6) Fallback: HTML crawl of /products page
+    # 5) Fallback: HTML crawl of /products page
     if not all_entries:
         all_entries.extend(await _fallback_html_product_page(session, base))
 
@@ -591,6 +558,31 @@ async def resolve_product_entries(
     if max_products > 0:
         product_entries = product_entries[:max_products]
 
+    if not unique:
+        loop = asyncio.get_running_loop()
+        probe_url = f"{base}/sitemap.xml"
+        probe = await loop.run_in_executor(
+            None,
+            lambda u=probe_url: try_all_sync_fallbacks(u, timeout=28),
+        )
+        blocked = (
+            probe is None
+            or looks_like_bot_challenge(probe)
+            or (
+                probe
+                and "<html" in probe[:8000].lower()
+                and not _looks_like_xml(probe)
+            )
+        )
+        if blocked:
+            msg = (
+                f"Sitemap discovery for {base} returned 0 URLs; the store likely "
+                f"blocks scrapers (Cloudflare 403/429) or returned a challenge page. "
+                f"Try SCRAPER_PROXIES or open {probe_url} in a browser to verify."
+            )
+            logger.error(msg)
+            raise SitemapDiscoveryError(msg)
+
     logger.info(
         "resolve_product_entries %s → %d منتج (من %d رابط كلي)",
         base, len(product_entries), len(unique),
@@ -614,14 +606,15 @@ async def _fallback_shopify_api(
         while True:
             url = f"{base}/products.json?limit={limit}&page={page}"
             try:
-                async with session.get(
-                    url,
-                    headers=get_browser_headers(),
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as r:
-                    if r.status != 200:
-                        break
+                r = await fetch_with_retry(
+                    session, url, max_retries=3, referer=f"{base}/"
+                )
+                if r is None:
+                    break
+                try:
                     data = await r.json(content_type=None)
+                finally:
+                    r.close()
             except Exception:
                 break
             products = data.get("products") or []
@@ -641,151 +634,6 @@ async def _fallback_shopify_api(
     return entries
 
 
-async def _fallback_salla_pagination(
-    session: aiohttp.ClientSession,
-    base: str,
-    max_products: int = 0,
-) -> List[SitemapEntry]:
-    """
-    v2.2: Salla Deep Pagination Fallback.
-    عندما يُعيد sitemap سلة عدداً محدوداً (~800)، نُكمل الاكتشاف عبر:
-    1. Salla storefront API: GET /api/products?page=N (JSON response)
-    2. HTML pagination crawl: GET /?page=N واستخراج روابط المنتجات من HTML
-
-    يُلحق النتائج بقائمة الـ entries الموجودة (لا يُعيد تكرارات).
-    """
-    entries: List[SitemapEntry] = []
-    seen: set = set()
-
-    # ─── طريقة 1: Salla Storefront API ───
-    _api_paths = ["/api/products", "/api/store/products"]
-    for api_path in _api_paths:
-        page = 1
-        _empty_streak = 0
-        try:
-            while _empty_streak < 3:  # 3 صفحات فارغة متتالية = توقف
-                url = f"{base}{api_path}?page={page}&per_page=50"
-                try:
-                    async with session.get(
-                        url,
-                        headers=get_browser_headers(),
-                        timeout=aiohttp.ClientTimeout(total=20),
-                        ssl=False,
-                    ) as r:
-                        if r.status == 404:
-                            break  # هذا الـ API غير موجود، جرّب المسار التالي
-                        if r.status != 200:
-                            _empty_streak += 1
-                            await asyncio.sleep(1.5)
-                            page += 1
-                            continue
-                        try:
-                            data = await r.json(content_type=None)
-                        except Exception:
-                            break
-                except asyncio.TimeoutError:
-                    _empty_streak += 1
-                    page += 1
-                    continue
-                except Exception:
-                    break
-
-                # Salla API يُرجع {data: [{url, name, ...}]} أو {products: [...]}
-                products = []
-                if isinstance(data, dict):
-                    products = data.get("data") or data.get("products") or []
-                elif isinstance(data, list):
-                    products = data
-
-                if not products:
-                    _empty_streak += 1
-                    page += 1
-                    continue
-
-                _empty_streak = 0
-                for p in products:
-                    purl = ""
-                    if isinstance(p, dict):
-                        purl = (p.get("url") or p.get("link") or p.get("href") or "").strip()
-                        if not purl:
-                            slug = p.get("slug") or p.get("handle") or ""
-                            pid = p.get("id") or ""
-                            if slug:
-                                purl = f"{base}/p/{slug}"
-                            elif pid:
-                                purl = f"{base}/p{pid}"
-                    if purl and purl not in seen:
-                        seen.add(purl)
-                        entries.append(SitemapEntry(url=purl))
-
-                if max_products > 0 and len(entries) >= max_products:
-                    break
-                page += 1
-                await asyncio.sleep(0.8)  # تهدئة لتجنب الحظر
-
-        except Exception as exc:
-            logger.debug("Salla API fallback failed on %s: %s", api_path, exc)
-            continue
-
-        if entries:
-            logger.info(
-                "_fallback_salla_pagination API %s%s → %d منتج إضافي",
-                base, api_path, len(entries),
-            )
-            return entries
-
-    # ─── طريقة 2: HTML Pagination Crawl ───
-    _product_href_re = re.compile(
-        r'href=["\']([^"\']*(?:/p\d{3,}|/p/[^"\'/?#]{2,}|/products?/[^"\'/?#]{3,}))["\']',
-        re.I,
-    )
-    page = 1
-    _empty_pages = 0
-    while _empty_pages < 3 and page <= 200:
-        try:
-            url = f"{base}/?page={page}"
-            async with session.get(
-                url, headers=get_browser_headers(),
-                timeout=aiohttp.ClientTimeout(total=15),
-                ssl=False,
-            ) as r:
-                if r.status != 200:
-                    _empty_pages += 1
-                    page += 1
-                    continue
-                html = await r.text(errors="ignore")
-        except Exception:
-            _empty_pages += 1
-            page += 1
-            continue
-
-        found = _product_href_re.findall(html)
-        if not found:
-            _empty_pages += 1
-            page += 1
-            continue
-
-        _empty_pages = 0
-        for href in found:
-            full = href if href.startswith("http") else f"{base}{href}"
-            full = full.split("?")[0].rstrip("/")
-            if full not in seen:
-                seen.add(full)
-                entries.append(SitemapEntry(url=full))
-
-        if max_products > 0 and len(entries) >= max_products:
-            break
-        page += 1
-        await asyncio.sleep(0.8)
-
-    if entries:
-        logger.info(
-            "_fallback_salla_pagination HTML crawl %s → %d منتج إضافي (%d صفحة)",
-            base, len(entries), page,
-        )
-    return entries
-
-
 async def _fallback_html_product_page(
     session: aiohttp.ClientSession,
     base: str,
@@ -797,18 +645,23 @@ async def _fallback_html_product_page(
     entries: List[SitemapEntry] = []
     candidates_pages = ["/products", "/shop", "/store", "/"]
     _product_href_re = re.compile(
-        r'href=["\']([^"\']*(?:/p\d{3,}|/p/[^"\'/?#]{2,}|/products?/[^"\'/?#]{3,}|/item/[^"\'/?#]{3,}))["\']',
+        r'href=["\']([^"\']*(?:/p\d{5,}|/products?/[^"\'/?#]{4,}|/item/[^"\'/?#]{4,}))["\']',
         re.I,
     )
     for path in candidates_pages:
         try:
-            async with session.get(
-                f"{base}{path}", headers=get_browser_headers(),
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as r:
-                if r.status != 200:
-                    continue
+            r = await fetch_with_retry(
+                session,
+                f"{base}{path}",
+                max_retries=3,
+                referer=f"{base}/",
+            )
+            if r is None:
+                continue
+            try:
                 html = await r.text(errors="ignore")
+            finally:
+                r.close()
         except Exception:
             continue
         found = _product_href_re.findall(html)

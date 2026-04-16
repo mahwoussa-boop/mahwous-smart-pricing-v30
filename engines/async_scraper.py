@@ -667,9 +667,12 @@ async def scrape_one_store(
     state.save()
 
     try:
-        from scrapers.sitemap_resolve import sitemap_resolver
+        from engines.sitemap_resolve import (
+            SitemapDiscoveryError,
+            resolve_product_urls,
+        )
     except ImportError:
-        logger.error("تعذّر تحميل sitemap_resolve")
+        logger.error("تعذّر تحميل engines.sitemap_resolve")
         state.mark_error(domain, "import_error")
         return []
 
@@ -691,13 +694,18 @@ async def scrape_one_store(
         progress.store_urls_total = 0
         progress.save()
 
-        logger.info(f"🗺️ {domain} — يحلل Sitemap بالتخفي العميق…")
+        logger.info(f"🗺️ {domain} — يحلل Sitemap عبر anti-ban على نفس الجلسة…")
         try:
             all_urls = await asyncio.wait_for(
-                sitemap_resolver.resolve(store_url), timeout=400
+                resolve_product_urls(store_url, session),
+                timeout=400,
             )
         except asyncio.TimeoutError:
             state.mark_error(domain, "sitemap_timeout")
+            return []
+        except SitemapDiscoveryError as exc:
+            logger.error("🛑 %s — Sitemap محجوب أو غير متاح: %s", domain, exc)
+            state.mark_error(domain, str(exc)[:200])
             return []
         except Exception:
             state.mark_error(domain, traceback.format_exc()[:150])
