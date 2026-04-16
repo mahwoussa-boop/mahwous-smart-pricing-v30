@@ -115,7 +115,8 @@ def _bundle_to_export_row(b: Dict[str, Any]) -> Dict[str, Any]:
             f"{b.get('product_name','')} {b.get('description_html','')}"
         )
 
-    # توحيد مسميات الأعمدة لتتوافق مع دالة التصدير
+    # FIX: unify column names to match both build_salla_shamel_dataframe()
+    # extractors (_extract_notes expects English keys) and the 40-column Salla template.
     return {
         "المنتج": b.get("product_name", ""),
         "الماركة": b.get("brand", ""),
@@ -130,10 +131,15 @@ def _bundle_to_export_row(b: Dict[str, Any]) -> Dict[str, Any]:
         "العنوان الترويجي": b.get("seo_title", ""),
         "وصف SEO": b.get("seo_description", ""),
         "الجنس": gender,
+        # Arabic aliases (kept for backward compat)
         "الافتتاحية": b.get("top_notes", ""),
         "القلب": b.get("heart_notes", ""),
         "القاعدة": b.get("base_notes", ""),
-        "is_perfume": b.get("is_perfume", True)
+        # English keys that _extract_notes() in salla_shamel_export expects
+        "top_notes": b.get("top_notes", ""),
+        "heart_notes": b.get("heart_notes", ""),
+        "base_notes": b.get("base_notes", ""),
+        "is_perfume": b.get("is_perfume", True),
     }
 
 
@@ -283,6 +289,23 @@ def show() -> None:
             seo_title = st.text_input("عنوان SEO / ترويجي", value=bundle.get("seo_title", ""))
             seo_desc = st.text_area("وصف SEO", value=bundle.get("seo_description", ""), height=80)
 
+        # FIX: expose AI-generated gender and is_perfume fields so user can review/correct
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            _gender_options = ["", "للرجال", "للنساء", "للجنسين"]
+            _cur_gender = bundle.get("gender_hint", "")
+            _gender_idx = _gender_options.index(_cur_gender) if _cur_gender in _gender_options else 0
+            gender_hint = st.selectbox(
+                "الجنس (رجالي / نسائي / للجنسين)",
+                options=_gender_options,
+                index=_gender_idx,
+            )
+        with gc2:
+            is_perfume = st.checkbox(
+                "المنتج عطر 🧴",
+                value=bundle.get("is_perfume", True),
+            )
+
         desc = st.text_area(
             "الوصف (HTML)",
             value=bundle.get("description_html", ""),
@@ -326,6 +349,8 @@ def show() -> None:
                 "top_notes": top_n.strip(),
                 "heart_notes": heart_n.strip(),
                 "base_notes": base_n.strip(),
+                "gender_hint": gender_hint,
+                "is_perfume": is_perfume,
                 "images": _uniq_keep_order(parts),
             }
         )
