@@ -1,59 +1,18 @@
-# ══════════════════════════════════════════════════════════════
-#  Mahwous .dockerignore — Lean Build Context
-# ══════════════════════════════════════════════════════════════
-
-# Version control
 .git
 .gitignore
-.gitattributes
-
-# Python bytecode & virtual environments
+.cursor
 **/__pycache__
 **/*.pyc
 **/*.pyo
-*.egg-info
+*.db
+.env
 .venv
 venv
-env
-
-# IDE & editor
-.cursor
-.vscode
-.idea
-*.swp
-*.swo
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Secrets (NEVER ship)
-.env
-.env.*
 .streamlit/secrets.toml
-credentials*.json
-
-# Local data files (injected via Railway Volume or env vars)
-data/*.csv
-data/*.jsonl
-data/*.json
-data/*.xlsx
-data/*.db
-data/_scraper_chunks/
-
-# Development artifacts
-terminals/
-agent-transcripts/
-mcps/
-*.md
-LICENSE
-tests/
-*.test.py
-*.spec.py
-
-# Docker meta (avoid recursive context)
 .dockerignore
-Dockerfile
-docker-compose*.yml
+terminals
+agent-transcripts
+mcps
+
+# ملفات البيانات المحلية — تُحقن عبر env vars أو Railway Volume
+data/

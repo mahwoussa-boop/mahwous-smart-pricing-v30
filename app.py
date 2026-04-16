@@ -1155,30 +1155,70 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
             '<div class="filter-inline-title">🔍 فلاتر — بحث، ماركة، منافس، نوع</div></div>',
             unsafe_allow_html=True,
         )
+        # Row 1: text search + brand + competitor + type
         c1, c2, c3, c4 = st.columns([1.15, 1, 1, 1])
-        search = c1.text_input("🔎 بحث", key=f"{prefix}_s")
+        search  = c1.text_input("🔎 بحث", key=f"{prefix}_s")
         brand_f = c2.selectbox("🏷️ الماركة", opts["brands"], key=f"{prefix}_b")
-        comp_f = c3.selectbox("🏪 المنافس", opts["competitors"], key=f"{prefix}_c")
-        type_f = c4.selectbox("🧴 النوع", opts["types"], key=f"{prefix}_t")
+        comp_f  = c3.selectbox("🏪 المنافس", opts["competitors"], key=f"{prefix}_c")
+        type_f  = c4.selectbox("🧴 النوع", opts["types"], key=f"{prefix}_t")
+        # Row 2: match threshold + price range
         c5, c6, c7 = st.columns([1.2, 1, 1])
         match_min = c5.slider("أقل تطابق %", 0, 100, 0, key=f"{prefix}_m")
         price_min = c6.number_input("سعر من", 0.0, key=f"{prefix}_p1")
         price_max = c7.number_input("سعر إلى", 0.0, key=f"{prefix}_p2")
+        # Row 3 (Task 3.1) — gender + size; shown only when columns exist in data
+        _has_gender = "الجنس" in df.columns and len(opts["genders"]) > 1
+        _has_size   = "الحجم" in df.columns  and len(opts["sizes"])   > 1
+        if _has_gender or _has_size:
+            c8, c9 = st.columns(2)
+            gender_f = (
+                c8.selectbox("🚻 الجنس", opts["genders"], key=f"{prefix}_g")
+                if _has_gender else "الكل"
+            )
+            size_f = (
+                c9.selectbox("📦 الحجم (مل)", opts["sizes"], key=f"{prefix}_sz")
+                if _has_size else "الكل"
+            )
+        else:
+            gender_f = "الكل"
+            size_f   = "الكل"
     else:
         with st.expander("🔍 فلاتر متقدمة", expanded=False):
+            # Row 1
             c1, c2, c3, c4 = st.columns(4)
-            search = c1.text_input("🔎 بحث", key=f"{prefix}_s")
+            search  = c1.text_input("🔎 بحث", key=f"{prefix}_s")
             brand_f = c2.selectbox("🏷️ الماركة", opts["brands"], key=f"{prefix}_b")
-            comp_f = c3.selectbox("🏪 المنافس", opts["competitors"], key=f"{prefix}_c")
-            type_f = c4.selectbox("🧴 النوع", opts["types"], key=f"{prefix}_t")
+            comp_f  = c3.selectbox("🏪 المنافس", opts["competitors"], key=f"{prefix}_c")
+            type_f  = c4.selectbox("🧴 النوع", opts["types"], key=f"{prefix}_t")
+            # Row 2
             c5, c6, c7 = st.columns(3)
             match_min = c5.slider("أقل تطابق%", 0, 100, 0, key=f"{prefix}_m")
             price_min = c6.number_input("سعر من", 0.0, key=f"{prefix}_p1")
             price_max = c7.number_input("سعر لـ", 0.0, key=f"{prefix}_p2")
+            # Row 3 (Task 3.1) — gender + size
+            _has_gender = "الجنس" in df.columns and len(opts["genders"]) > 1
+            _has_size   = "الحجم" in df.columns  and len(opts["sizes"])   > 1
+            if _has_gender or _has_size:
+                c8, c9 = st.columns(2)
+                gender_f = (
+                    c8.selectbox("🚻 الجنس", opts["genders"], key=f"{prefix}_g")
+                    if _has_gender else "الكل"
+                )
+                size_f = (
+                    c9.selectbox("📦 الحجم (مل)", opts["sizes"], key=f"{prefix}_sz")
+                    if _has_size else "الكل"
+                )
+            else:
+                gender_f = "الكل"
+                size_f   = "الكل"
 
     filters = {
-        "search": search, "brand": brand_f, "competitor": comp_f,
-        "type": type_f,
+        "search":    search,
+        "brand":     brand_f,
+        "competitor": comp_f,
+        "type":      type_f,
+        "gender":    gender_f,   # Task 3.1
+        "size":      size_f,     # Task 3.1
         "match_min": match_min if match_min > 0 else None,
         "price_min": price_min if price_min > 0 else 0.0,
         "price_max": price_max if price_max > 0 else None,
@@ -1303,7 +1343,87 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
     start = (page_num - 1) * PAGE_SIZE
     page_df = filtered.iloc[start:start + PAGE_SIZE]
 
-       # ── الجدول البصري ─────────────────────
+    # ── Task 3.2: Select-All / Deselect-All buttons ───────────────────────────
+    # These set checkbox widget state BEFORE the widgets are rendered, which is
+    # valid in Streamlit: the keys exist in session_state from the previous cycle.
+    _sa_col, _da_col, _sp = st.columns([1, 1, 6])
+    with _sa_col:
+        if st.button("☑️ تحديد الكل", key=f"{prefix}_sel_all", use_container_width=True):
+            for _si in page_df.index:
+                st.session_state[f"sel_{prefix}_{_si}"] = True
+            st.rerun()
+    with _da_col:
+        if st.button("⬜ إلغاء الكل", key=f"{prefix}_desel_all", use_container_width=True):
+            for _si in page_df.index:
+                st.session_state[f"sel_{prefix}_{_si}"] = False
+            st.rerun()
+
+    # ── Task 3.2: Bulk Action Bar ─────────────────────────────────────────────
+    # Reads checkbox state from the PREVIOUS render cycle (standard Streamlit pattern).
+    # None of the bulk actions are fully implemented yet — stubs use st.toast().
+    _sel_indices = [
+        _si for _si in page_df.index
+        if st.session_state.get(f"sel_{prefix}_{_si}", False)
+    ]
+    _n_sel = len(_sel_indices)
+
+    if _n_sel > 0:
+        st.markdown(
+            f"<div style='background:#0d2a1a;border:2px solid #00C853;border-radius:10px;"
+            f"padding:10px 16px;margin:8px 0;display:flex;align-items:center;gap:12px;"
+            f"flex-wrap:wrap'>"
+            f"<span style='color:#00C853;font-weight:700;font-size:1rem'>"
+            f"✅ {_n_sel} منتج محدد</span>"
+            f"<span style='color:#607d8b;font-size:.8rem'>"
+            f"(اختر إجراءً من الأزرار أدناه)</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        _ba1, _ba2, _ba3, _ba4 = st.columns(4)
+        with _ba1:
+            # Stub — will be wired in Phase 4 (soft-delete)
+            if st.button(
+                f"🗑️ حذف المحدد ({_n_sel})",
+                key=f"{prefix}_bulk_del",
+                use_container_width=True,
+            ):
+                st.toast(
+                    f"⚠️ حذف {_n_sel} منتج — الميزة قيد التطوير (المرحلة 3.3)",
+                    icon="🗑️",
+                )
+        with _ba2:
+            # Stub — export selected rows as CSV download
+            if st.button(
+                f"📥 تصدير المحدد ({_n_sel})",
+                key=f"{prefix}_bulk_export",
+                use_container_width=True,
+            ):
+                st.toast(
+                    f"📥 تصدير {_n_sel} منتج — قيد التطوير",
+                    icon="📥",
+                )
+        with _ba3:
+            # Stub — re-run engine analysis on selected rows
+            if st.button(
+                f"🔬 إعادة تحليل ({_n_sel})",
+                key=f"{prefix}_bulk_analyze",
+                use_container_width=True,
+            ):
+                st.toast(
+                    f"🔬 إعادة تحليل {_n_sel} منتج — قيد التطوير",
+                    icon="🔬",
+                )
+        with _ba4:
+            if st.button(
+                "❌ إلغاء التحديد",
+                key=f"{prefix}_bulk_clear",
+                use_container_width=True,
+            ):
+                for _si in page_df.index:
+                    st.session_state[f"sel_{prefix}_{_si}"] = False
+                st.rerun()
+
+    # ── الجدول البصري ─────────────────────
     for idx, row in page_df.iterrows():
         our_name   = str(row.get("المنتج", "—"))
         # تخطي المنتجات التي أُرسلت لـ Make أو أُزيلت
@@ -1346,7 +1466,9 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
         _comp_url_v = competitor_product_url_from_row(row)
         _our_url_v = our_product_url_from_row(row)
 
-        # بطاقة VS مع رقم المنتج + صور (lazy) عند توفرها — وضع مضغوط لقسم «سعر أعلى»
+        # Task 3.2: per-product selection checkbox (left column) + VS card (right column).
+        # Only the VS card HTML is wrapped in the narrow column layout; all action
+        # widgets below remain at full width so the existing layout is preserved.
         _vs_compact = bool(compact_cards and prefix == "raise")
         _vs_html = vs_card(our_name, our_price, comp_name,
                            comp_price, diff, comp_src, _pid_str,
@@ -1354,7 +1476,22 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
                            comp_url=_comp_url_v, our_url=_our_url_v,
                            accent_border=_vs_border, row_bg=_vs_row_bg,
                            compact=_vs_compact)
-        st.markdown(_vs_html, unsafe_allow_html=True)
+        _sel_key = f"sel_{prefix}_{idx}"
+        _chk_col, _card_col = st.columns([0.05, 0.95], gap="small")
+        with _chk_col:
+            # Vertical nudge so checkbox aligns with card body, not its top edge
+            st.markdown(
+                "<div style='padding-top:28px'></div>",
+                unsafe_allow_html=True,
+            )
+            st.checkbox(
+                "",
+                key=_sel_key,
+                label_visibility="collapsed",
+                help=f"تحديد: {our_name[:50]}",
+            )
+        with _card_col:
+            st.markdown(_vs_html, unsafe_allow_html=True)
 
         # شريط المعلومات
         match_color = ("#00C853" if match_pct >= 90

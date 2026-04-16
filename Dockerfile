@@ -1,51 +1,34 @@
-# Mahwous Smart Pricing - Google Cloud Run Dockerfile
-# Optimized for Cloud Run with Streamlit & Gemini API
-# ══════════════════════════════════════════════════════════════
-
-FROM python:3.11-slim
-
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    DATA_DIR=/data \
-    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
-    STREAMLIT_SERVER_HEADLESS=true \
-    STREAMLIT_SERVER_ADDRESS=0.0.0.0
+# Streamlit app — optimized for Google Cloud Run deployment.
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-# Install system dependencies
+# Persistent data directory (Cloud Run: mount a volume here if needed)
+ENV DATA_DIR=/data
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Install build dependencies + curl for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    gcc \
+    g++ \
+    libffi-dev \
     curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p /data /data/_scraper_chunks && \
-    mkdir -p /app/.streamlit
-
-# Create non-root user for security
-RUN useradd -m -u 1000 streamlit && \
-    chown -R streamlit:streamlit /app /data
-
-USER streamlit
-
-# Health check for Streamlit on Cloud Run dynamic PORT
-HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
-    CMD sh -c 'curl -sf http://localhost:${PORT:-8080}/_stcore/health || exit 1'
-
+# Cloud Run injects PORT=8080; expose the same default
 EXPOSE 8080
 
-# Run the application through the dynamic-port entrypoint
-CMD ["python", "docker_entrypoint.py"]
+# Health check — useful for local Docker and container platforms
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl --fail http://localhost:8080/_stcore/health || exit 1
+
+# Entrypoint restores data files from env vars, then launches Streamlit
+CMD ["python3", "docker_entrypoint.py"]

@@ -105,8 +105,7 @@ def _restore_data_files() -> None:
 
 
 def _port() -> int:
-    # Cloud Run يعتمد غالباً على PORT=8080. إذا لم يصل المتغير لأي سبب،
-    # نستخدم 8080 افتراضياً بدلاً من 8501 لتفادي فشل الـ startup probe.
+    # Cloud Run injects PORT=8080; use that as default instead of 8501
     raw = (os.environ.get("PORT") or "").strip() or "8080"
     try:
         p = int(raw)
@@ -130,7 +129,6 @@ def main() -> None:
     # ── خطوة 2: تشغيل Streamlit ─────────────────────────────────────────
     p = _port()
     _strip_broken_streamlit_server_env()
-    print(f"[entrypoint] Starting Streamlit on port {p}", flush=True)
     os.execvp(
         "streamlit",
         [
