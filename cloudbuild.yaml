@@ -1,67 +1,46 @@
-# ═══════════════════════════════════════════════════════════════
-# Google Cloud Build Configuration
-# لبناء ونشر تطبيق Mahwous Smart Pricing تلقائياً
-# ═══════════════════════════════════════════════════════════════
-
 steps:
-  # الخطوة 1: بناء صورة Docker
+  # 1. بناء صورة Docker
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-image'
     args:
       - 'build'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:$SHORT_SHA'
-      - '-t'
       - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
-      - '-f'
-      - 'Dockerfile'
       - '.'
-    waitFor: ['-']
 
-  # الخطوة 2: دفع الصورة إلى Container Registry
+  # 2. دفع الصورة إلى Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-image'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:$SHORT_SHA'
-    waitFor: ['build-image']
+      - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
 
-  # الخطوة 3: نشر على Cloud Run
-  - name: 'gcr.io/cloud-builders/gke-deploy'
+  # 3. النشر على Cloud Run مع ربط قاعدة البيانات والمتغيرات
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloud-run'
+    entrypoint: gcloud
     args:
-      - run
-      - deploy
-      - mahwous-smart-pricing
-      - '--image=gcr.io/$PROJECT_ID/mahwous-smart-pricing:$SHORT_SHA'
-      - '--platform=managed'
-      - '--region=us-central1'
-      - '--memory=2Gi'
-      - '--cpu=2'
-      - '--timeout=3600'
-      - '--max-instances=10'
-      - '--min-instances=0'
+      - 'run'
+      - 'deploy'
+      - 'mahwous-smart-pricing'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
+      - '--region'
+      - 'us-central1'
+      - '--add-cloudsql-instances'
+      - 'mahwous-smart-pricing-v30:us-central1:smart-pricing-db'
+      - '--update-env-vars'
+      - 'USE_MYSQL=True,MYSQL_USER=mahwous_user,MYSQL_PASSWORD=mahwous_pass_2026,MYSQL_DB=smart_pricing_db,MYSQL_HOST=/cloudsql/mahwous-smart-pricing-v30:us-central1:smart-pricing-db,GEMINI_KEY_1=AIzaSyD3BaXoNcmjweRuRZGhfYgUxr_YHAH8bZk,GEMINI_KEY_2=AIzaSyDtJgPxv3hXruK8tfFr8mWSC7ano40uAT0,OPENROUTER_API_KEY=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,WEBHOOK_NEW_PRODUCTS=https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm,WEBHOOK_UPDATE_PRICES=https://hook.eu2.make.com/8jia6gc7s1cpkeg6catlrvwck768sbfk'
       - '--allow-unauthenticated'
-      - '--set-env-vars=STREAMLIT_SERVER_HEADLESS=true,STREAMLIT_BROWSER_GATHER_USAGE_STATS=false'
-    waitFor: ['push-image']
+      - '--memory'
+      - '2Gi'
+      - '--cpu'
+      - '2'
+      - '--timeout'
+      - '3600'
 
-# الصور التي سيتم حفظها
 images:
-  - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:$SHORT_SHA'
   - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
 
-# المدة القصوى للبناء (بالثواني)
-timeout: '3600s'
-
-# خيارات البناء
 options:
-  machineType: 'N1_HIGHCPU_8'
-  logging: CLOUD_LOGGING_ONLY
-  
-# المتغيرات المستبدلة
-substitutions:
-  _REGION: 'us-central1'
-  _SERVICE_NAME: 'mahwous-smart-pricing'
-
-# الشروط التي تُفعّل البناء
-# يمكن تفعيل هذا من Cloud Build Triggers
+  logging: CLOUD_LOGGING
