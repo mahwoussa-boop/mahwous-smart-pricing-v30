@@ -141,7 +141,7 @@ _ZID_DOMAINS = re.compile(
     r"(zid\.store|\.zid\.sa|zid\.sa)", re.I
 )
 
-# صفحة منتج — أنماط شائعة عبر المنصات
+# صفحة منتج — أنماط شائعة عبر المنصات (+ سلة على دومين مخصص: /ar/slug، /en/slug)
 _PRODUCT_URL_RE = re.compile(
     r"(/p\d{5,}$"         # سلة: /p123456789
     r"|/products?/"       # Shopify / WooCommerce
@@ -149,6 +149,7 @@ _PRODUCT_URL_RE = re.compile(
     r"|/shop/"
     r"|/ar/p/"
     r"|/en/p/"
+    r"|/(?:ar|en)/[^/?#]+"  # سلة دومين خاص: .../ar/product-slug
     r"|/product-page/"
     r"|منتج"
     r")",
@@ -158,6 +159,8 @@ _PRODUCT_URL_RE = re.compile(
 _EXCLUDE_URL_RE = re.compile(
     r"(/blog/|/page/|/category/|/categories/|/tag/|/cart|/checkout"
     r"|/account|/contact|/about|/faq|/privacy|/terms"
+    r"|/(?:ar|en)/(?:blog|cart|category|categories|page|tag|account"
+    r"|collections?|pages)(?:/|$)"
     r"|/cdn\.|\\.js$|\\.css$|\\.png$|\\.jpg$|\\.webp$|\\.svg$"
     r"|/feed/|/rss|/amp/)",
     re.I,
@@ -299,34 +302,69 @@ async def resolve_sitemap_recursively(
 
         urls: set[str] = set()
         if root.tag == "sitemapindex":
-            # FIX: Deep Sitemap & AI Fallback Integrated
-            # تتبع sitemapindex المتداخل بالتوازي الكامل.
-            tasks = []
+            # روابط sitemap فرعية — نفس مسار الجلب ضد الحظر لكل طفل (داخل الاستدعاء التالي).
+            child_urls: List[str] = []
             for loc in root.findall(".//loc"):
-                if loc.text:
-                    tasks.append(
-                        resolve_sitemap_recursively(
-                            session,
-                            loc.text.strip(),
-                            max_depth,
-                            current_depth + 1,
-                        )
-                    )
+                if not loc.text:
+                    continue
+                cu = loc.text.strip()
+                if cu.startswith("http") and cu.lower().rstrip().endswith(".xml"):
+                    child_urls.append(cu)
+            if not child_urls:
+                logger.warning(
+                    "[Sitemap] sitemapindex has no <loc> child .xml URLs: %s",
+                    sitemap_url,
+                )
+            tasks = [
+                resolve_sitemap_recursively(
+                    session,
+                    cu,
+                    max_depth,
+                    current_depth + 1,
+                )
+                for cu in child_urls
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for res in results:
-                if isinstance(res, set):
-                    urls.update(res)
+            for cu, res in zip(child_urls, results):
+                if isinstance(res, BaseException):
+                    logger.error(
+                        "[Sitemap] Child sitemap fetch/parse raised for %s: %r",
+                        cu,
+                        res,
+                    )
+                    continue
+                if not res:
+                    logger.warning(
+                        "[Sitemap] Child sitemap returned 0 URLs (fetch empty, parse error, "
+                        "or strict filter): %s",
+                        cu,
+                    )
+                urls.update(res)
         elif root.tag == "urlset":
+            # لا تُسقِط روابط سلة /ar/slug هنا — الفلترة النهائية في _filter_product_entries.
             for loc in root.findall(".//loc"):
                 if not loc.text:
                     continue
                 loc_text = loc.text.strip()
-                if (
-                    "/p/" in loc_text
-                    or "-p" in loc_text
-                    or "product" in loc_text.lower()
-                ):
-                    urls.add(loc_text)
+                if not loc_text.startswith("http"):
+                    continue
+                low = loc_text.lower()
+                if low.rstrip().endswith(".xml") and "sitemap" in low:
+                    nested = await resolve_sitemap_recursively(
+                        session,
+                        loc_text,
+                        max_depth,
+                        current_depth + 1,
+                    )
+                    urls.update(nested)
+                    if not nested:
+                        logger.warning(
+                            "[Sitemap] urlset <loc> looked like nested sitemap but yielded "
+                            "0 URLs: %s",
+                            loc_text,
+                        )
+                    continue
+                urls.add(loc_text)
         return urls
     except Exception as exc:
         logger.debug("resolve_sitemap_recursively failed for %s: %s", sitemap_url, exc)
@@ -383,13 +421,26 @@ def _is_product_url(url: str) -> bool:
 
 
 def _is_salla_product(url: str) -> bool:
-    """سلة: المنتجات عادة /p[0-9]+ أو تنتهي بمعرّف رقمي طويل."""
+    """سلة: /p12345…، /ar|en/slug، معرّف رقمي طويل، أو مسارات /product(s)/."""
     path = urlparse(url).path or ""
     if re.search(r"/p\d{5,}$", path):
         return True
     if re.search(r"/\d{8,}$", path):
         return True
     if "/products/" in path.lower() or "/product/" in path.lower():
+        return True
+    if re.search(r"/(?:ar|en)/[^/]+/?$", path, re.I):
+        if _EXCLUDE_URL_RE.search(url):
+            return False
+        return True
+    segs = [s for s in path.split("/") if s]
+    if len(segs) == 1 and re.match(
+        r"^[a-z0-9\u0600-\u06ff][\w\u0600-\u06ff-]{2,}$",
+        segs[0],
+        re.I,
+    ):
+        if _EXCLUDE_URL_RE.search(url):
+            return False
         return True
     return False
 
@@ -439,6 +490,9 @@ def _filter_product_entries(entries: List[SitemapEntry], base: str) -> List[Site
         if salla:
             if _is_salla_product(e.url):
                 product_entries.append(e)
+        elif _is_salla_product(e.url):
+            # دومين مخصص على منصة سلة — نفس أنماط المسار دون الاعتماد على نطاق salla.*
+            product_entries.append(e)
         elif _is_product_url(e.url):
             # منع تكرار نفس المنتج بلغات مختلفة عبر فحص الـ slug الأخير
             slug = p.path.rstrip('/').split('/')[-1]
