@@ -321,8 +321,9 @@ def show() -> None:
         v.get("status") == "running" and _is_thread_alive(k)
         for k, v in state.items()
     )
-    # Also refresh when the real-time pipeline is active
-    _rt_is_active = _RT_PROGRESS.get("phase", "idle") in ("scraping", "matching")
+    # Also refresh when the real-time pipeline is active (same lock as writer thread)
+    with _RT_LOCK:
+        _rt_is_active = _RT_PROGRESS.get("phase", "idle") in ("scraping", "matching")
 
     if _any_running or _rt_is_active:
         try:
@@ -808,7 +809,7 @@ def show() -> None:
                                 concurrency=_snap_concurrency,
                                 max_products_per_store=_snap_max_prod,
                                 use_ai=_snap_use_ai,
-                                on_event=_rt_event_handler,
+                                result_callback=_rt_event_handler,
                             )
                         except Exception as _exc:
                             with _RT_LOCK:
