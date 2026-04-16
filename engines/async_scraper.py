@@ -1275,6 +1275,13 @@ async def run_scraper(
         progress.stores_done = completed_stores
         progress.stores_results[domain] = len(rows)
         progress.rows_in_csv = _merge_rows_to_csv(rows, domain)
+
+        try:
+            from utils.db_manager import upsert_competitor_products
+            upsert_competitor_products(domain, rows, name_key="name", price_key="price")
+        except Exception as e:
+            logger.warning(f"⚠️ فشل مزامنة قاعدة البيانات لـ {domain}: {e}")
+
         del rows  # Phase 4: free per-store memory between stores
         gc.collect()
         progress.save()
