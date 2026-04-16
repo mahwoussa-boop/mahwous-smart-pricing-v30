@@ -253,3 +253,11 @@ SECTIONS = [
 SIDEBAR_SECTIONS = SECTIONS
 PAGES_PER_TABLE  = 25
 DB_PATH          = get_data_db_path("perfume_pricing.db")
+
+# ===== إعدادات قاعدة بيانات Google Cloud SQL (MySQL) =====
+MYSQL_USER     = _s("MYSQL_USER", "mahwous_user")
+MYSQL_PASSWORD = _s("MYSQL_PASSWORD", "mahwous_pass_2026")
+MYSQL_DB       = _s("MYSQL_DB", "smart_pricing_db")
+MYSQL_HOST     = _s("MYSQL_HOST", "/cloudsql/mahwous-smart-pricing-v30:us-central1:smart-pricing-db")
+USE_MYSQL      = _s("USE_MYSQL", "True").lower() == "true"
+

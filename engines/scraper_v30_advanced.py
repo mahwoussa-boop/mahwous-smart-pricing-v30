@@ -451,12 +451,29 @@ async def run_advanced_price_scraping(
 
                 if products_to_save:
                     try:
+                        # 1. تحديث قاعدة البيانات المحلية/المؤقتة للتحليل الفوري
                         res = update_db_with_prices(
                             store,
                             products_to_save,
                             upsert_competitor_products,
                         )
                         updated_in_db += res.get("updated", 0) + res.get("inserted", 0)
+                        
+                        # 2. الحفظ في قاعدة البيانات الدائمة (MySQL في قوقل) لضمان عدم الفقدان
+                        try:
+                            from utils.db_adapter import save_products_to_db
+                            import pandas as pd
+                            df_save = pd.DataFrame(products_to_save)
+                            # توحيد أسماء الأعمدة لـ db_adapter
+                            df_save = df_save.rename(columns={
+                                "name": "product_name",
+                                "product_url": "url"
+                            })
+                            save_products_to_db(df_save, store)
+                            logger.info(f"💾 Permanent Save: {len(df_save)} products saved to Google Cloud SQL.")
+                        except Exception as perm_err:
+                            logger.error(f"⚠️ Permanent Save Failed: {perm_err}")
+                            
                     except Exception as db_err:
                         logger.error(f"DB error store={store} batch={batch_idx}: {db_err}")
                         logger.exception("Full traceback for DB update failure")

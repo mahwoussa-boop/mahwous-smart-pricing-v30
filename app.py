@@ -2407,6 +2407,21 @@ if page == "📊 لوحة التحكم":
             '<a href="#" style="color:#4fc3f7">اذهب لصفحة الكشط</a> لتشغيل المحرك</div>',
             unsafe_allow_html=True,
         )
+    
+    with st.expander("📁 رفع كتالوج منتجات اختياري (تحديث القاعدة)", expanded=False):
+        st.info("💡 يمكنك هنا رفع ملف Excel/CSV يحتوي على منتجات منافسين لإضافتها يدوياً لقاعدة البيانات الدائمة في قوقل.")
+        catalog_file = st.file_uploader("اختر ملف الكتالوج", type=["csv", "xlsx"], key="catalog_upload_manual")
+        catalog_store = st.text_input("اسم المتجر (اختياري)", placeholder="مثلاً: Dior")
+        if catalog_file and st.button("📥 حفظ في قاعدة البيانات الدائمة"):
+            with st.spinner("جاري الحفظ في قوقل..."):
+                from utils.db_adapter import save_products_to_db, read_file
+                cdf, ce = read_file(catalog_file)
+                if not ce and cdf is not None:
+                    save_products_to_db(cdf, catalog_store or "كتالوج يدوي")
+                    st.success("✅ تم الحفظ بنجاح في قاعدة البيانات الدائمة!")
+                    st.rerun()
+                else:
+                    st.error(f"❌ خطأ في قراءة الملف: {ce}")
 
     _use_auto = st.checkbox(
         "🤖 استخدام بيانات الكشط التلقائي من المنافسين",
