@@ -554,7 +554,13 @@ def show() -> None:
             with col_a:
                 start_now = st.checkbox("▶️ ابدأ الكشط فور الإضافة", value=True)
             with col_b:
-                max_p = st.number_input("حد المنتجات (0=كل)", min_value=0, step=100, value=0)
+                max_p = st.number_input(
+                    "الحد الأقصى للمنتجات (0 = بدون حد لشفط المتجر بالكامل)",
+                    min_value=0,
+                    step=100,
+                    value=0,
+                    help="الحد الأقصى للمنتجات (0 = بدون حد لشفط المتجر بالكامل)",
+                )
             submitted = st.form_submit_button("✅ إضافة", type="primary", use_container_width=True)
 
             if submitted and new_url:
@@ -730,9 +736,12 @@ def show() -> None:
                 )
             with _oc2:
                 st.number_input(
-                    "حد المنتجات per متجر (0 = كل)",
-                    min_value=0, step=50, value=0,
+                    "الحد الأقصى للمنتجات (0 = بدون حد لشفط المتجر بالكامل)",
+                    min_value=0,
+                    step=50,
+                    value=0,
                     key="rt_max_products",
+                    help="الحد الأقصى للمنتجات (0 = بدون حد لشفط المتجر بالكامل)",
                 )
             with _oc3:
                 st.checkbox(
