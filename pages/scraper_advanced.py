@@ -4,7 +4,7 @@ pages/scraper_advanced.py — لوحة كشط مهووس v4.0 (Real-Time Intelli
 ▸ عرض فوري للمنتجات أثناء الكشط (Real-time streaming إلى SQLite)
 ▸ بطاقات منافسين احترافية مع شريط تقدم حي
 ▸ إدارة كاملة: إضافة / حذف / إعادة ضبط / تخطي
-▸ جدول حي يتحدث كل 3 ثوانٍ أثناء الكشط
+▸ جدول حي يتحدث كل ~2 ثانية أثناء الكشط (st.fragment)
 ▸ زر "إرسال للتحليل" — يُغذّي بيانات المنافس مباشرةً لبطاقات المنتجات
 ▸ تحديث دوري تلقائي بدون توقف
 ▸ معالجة شاملة للأخطاء مع عرض واضح للمستخدم
@@ -41,6 +41,17 @@ _RESULT_LOCK   = threading.Lock()
 _RT_LOCK     = threading.Lock()
 _RT_PROGRESS: dict = {"phase": "idle"}   # idle | scraping | matching | complete | error
 _RT_RESULTS:  dict = {"df": None, "audit": None}
+
+
+@st.fragment(run_every=2)
+def _scraper_advanced_live_rerun_tick() -> None:
+    """تحديث الصفحة أثناء الكشط — بدون streamlit-autorefresh (مكوّن مخصص يفشل على السحابة)."""
+    k = "_sc_adv_live_tick_n"
+    st.session_state[k] = int(st.session_state.get(k, 0)) + 1
+    if st.session_state[k] <= 1:
+        return
+    st.rerun()
+
 
 # ── CSS ─────────────────────────────────────────────────────────────────────
 _CSS = """
@@ -326,13 +337,10 @@ def show() -> None:
         _rt_is_active = _RT_PROGRESS.get("phase", "idle") in ("scraping", "matching")
 
     if _any_running or _rt_is_active:
-        try:
-            from streamlit_autorefresh import st_autorefresh
-            # Use 2s interval when pipeline is active (more responsive), else 3s
-            _refresh_ms = 2000 if _rt_is_active else 3000
-            st_autorefresh(interval=_refresh_ms, key="sc_live_refresh")
-        except ImportError:
-            pass
+        st.session_state["_sc_adv_live_tick_n"] = 0
+        _scraper_advanced_live_rerun_tick()
+    else:
+        st.session_state.pop("_sc_adv_live_tick_n", None)
 
     st.markdown("## 🕷️ كاشط المنافسين — لوحة التحكم")
 
