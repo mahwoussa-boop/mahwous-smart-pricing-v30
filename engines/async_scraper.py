@@ -250,22 +250,17 @@ class Progress:
     stores_http_errors: Dict[str, dict] = field(default_factory=dict)
 
     def save(self, path: str = None) -> None:
-        """حفظ التقدم في ملف خاص بالمتجر لضمان التوازي وعدم التداخل."""
+        """حفظ التقدم العام دائماً، أو إلى مسار مخصص إذا طُلب ذلك صراحةً."""
         try:
-            # إذا لم يتم تحديد مسار، نستخدم المسار العام (للجدولة الكلية)
-            # أما في حالة الكشط الفردي/الجماعي المتوازي، نستخدم مساراً خاصاً بالمتجر
             target_path = path or PROGRESS_FILE
-            if self.current_store and target_path == PROGRESS_FILE:
-                # إنشاء مسار خاص بالمتجر: data/_sc_live_{domain}.json
-                target_path = os.path.join(_DATA_DIR, f"_sc_live_{self.current_store}.json")
-
             self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.pid = os.getpid()
+            payload = asdict(self)
             with _PROGRESS_WRITE_LOCK:
                 with open(target_path, "w", encoding="utf-8") as f:
-                    json.dump(asdict(self), f, ensure_ascii=False, indent=2)
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception:
-            logger.warning(f"تعذّر حفظ التقدم في {path}: {traceback.format_exc()}")
+            logger.warning(f"تعذّر حفظ التقدم في {target_path}: {traceback.format_exc()}")
 
     @classmethod
     def load(cls, path: str = PROGRESS_FILE) -> "Progress":
@@ -757,7 +752,11 @@ async def scrape_one_store(
     single_mode: bool = False,
 ) -> List[dict]:
     domain = _domain(store_url)
-    concurrency = max(1, min(int(concurrency or 1), 5))
+    try:
+        _max_url_concurrency = int(os.environ.get("SCRAPER_MAX_URL_CONCURRENCY", "8") or "8")
+    except Exception:
+        _max_url_concurrency = 8
+    concurrency = max(1, min(int(concurrency or 1), max(1, _max_url_concurrency)))
     cp     = state.get(domain, store_url)
 
     # Architectural Fix: NEVER skip if max_products is explicitly requested or in single UI mode
@@ -844,6 +843,12 @@ async def scrape_one_store(
         _chunk_idx        = 0         # Phase 4: flush chunk counter
         _total_flushed    = 0         # Phase 4: total rows written to disk
 
+        try:
+            _batch_size_env = int(os.environ.get("SCRAPER_URL_BATCH_SIZE", "0") or "0")
+        except Exception:
+            _batch_size_env = 0
+        _BATCH_SIZE = _batch_size_env if _batch_size_env > 0 else max(3, min(12, concurrency))
+
         _TASK_TIMEOUT = 60.0  # Phase 2: per-URL timeout (was 45)
 
         # ── Phase 3: Resilient Circuit Breaker with Exponential Backoff ─────
@@ -875,22 +880,6 @@ async def scrape_one_store(
                     )
                     if row:
                         rows.append(row)
-                        try:
-                            from utils.db_manager import upsert_competitor_products
-                            upsert_competitor_products(
-                                domain,
-                                [{
-                                    "المنتج": row.get("name", ""),
-                                    "السعر": row.get("price", 0),
-                                    "image_url": row.get("image", ""),
-                                    "product_url": row.get("url", ""),
-                                    "brand": row.get("brand", ""),
-                                    "size": "",
-                                    "gender": "للجنسين",
-                                }],
-                            )
-                        except Exception as _db_exc:
-                            logger.debug("SQLite immediate write error: %s", _db_exc)
                         _consecutive_failures = 0
                         # نجاح → خفّض مستوى التراجع تدريجياً
                         if _backoff_level > 0:
@@ -979,8 +968,7 @@ async def scrape_one_store(
 
         async def _run_batches():
             nonlocal _circuit_broken
-            BATCH = 5
-            for start in range(0, len(pending_urls), BATCH):
+            for start in range(0, len(pending_urls), _BATCH_SIZE):
                 if max_products > 0 and len(rows) >= max_products:
                     logger.info(f"🛑 {domain} — تم الوصول للحد الأقصى ({max_products}). جاري إيقاف السحب.")
                     rows[:] = rows[:max_products]
@@ -994,7 +982,7 @@ async def scrape_one_store(
                     )
                     break
 
-                batch = pending_urls[start: start + BATCH]
+                batch = pending_urls[start: start + _BATCH_SIZE]
                 _pre_count = len(rows)
 
                 await asyncio.gather(*[_fetch_one(u) for u in batch], return_exceptions=True)
@@ -1044,7 +1032,7 @@ async def scrape_one_store(
                 else:
                     adaptive_delay = 0.5
 
-                if start + BATCH < len(pending_urls) and (max_products == 0 or len(rows) < max_products):
+                if start + _BATCH_SIZE < len(pending_urls) and (max_products == 0 or len(rows) < max_products):
                     await asyncio.sleep(adaptive_delay)
 
         # Phase 2: wall-clock timeout wraps entire batch loop
@@ -1184,14 +1172,6 @@ def _merge_rows_to_csv(new_rows: List[dict], domain: str) -> int:
         combined = new_df[CSV_COLS]
 
     combined.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-    
-    # v26.0 — Persistent Store Sync
-    try:
-        from utils.db_manager import upsert_competitor_products
-        upsert_competitor_products(domain, new_rows, name_key="name", price_key="price")
-    except Exception as e:
-        logger.warning(f"⚠️ فشل مزامنة قاعدة البيانات لـ {domain}: {e}")
-        
     return len(combined)
 
 
@@ -1238,33 +1218,61 @@ async def run_scraper(
     )
     progress.save()
 
-    for i, store_url in enumerate(stores, 1):
+    try:
+        _store_concurrency_env = int(os.environ.get("SCRAPER_STORE_CONCURRENCY", "2") or "2")
+    except Exception:
+        _store_concurrency_env = 2
+    store_concurrency = max(1, min(_store_concurrency_env, len(stores), 4))
+
+    try:
+        _store_stagger_sec = float(os.environ.get("SCRAPER_STORE_START_STAGGER_SEC", "1.5") or "1.5")
+    except Exception:
+        _store_stagger_sec = 1.5
+
+    progress.phase = "parallel_scraping" if store_concurrency > 1 else "scraping"
+    progress.save()
+
+    store_semaphore = asyncio.Semaphore(store_concurrency)
+
+    async def _run_store_task(i: int, store_url: str):
         domain = _domain(store_url)
-        logger.info(f"\n{'═'*60}\n🏪 [{i}/{len(stores)}] {domain}\n{'═'*60}")
-        progress.stores_done   = i - 1
-        progress.current_store = domain
-        progress.phase         = "scraping"
-        progress.save()
+        async with store_semaphore:
+            if _store_stagger_sec > 0 and store_concurrency > 1:
+                await asyncio.sleep(((i - 1) % store_concurrency) * _store_stagger_sec)
 
-        # Phase 2: Store-level exception isolation — one store crashing
-        # must never kill the entire scraper run
-        try:
-            rows = await scrape_one_store(
-                store_url, progress, state,
-                concurrency=concurrency,
-                max_products=max_products,
-                resume=_effective_resume,
-            )
-        except Exception as _store_exc:
-            logger.error(
-                f"💥 {domain} — Unhandled exception (isolated): {_store_exc}\n"
-                f"{traceback.format_exc()[:300]}"
-            )
-            state.mark_error(domain, f"unhandled: {str(_store_exc)[:150]}")
-            progress.last_error = f"{domain}: {str(_store_exc)[:100]}"
-            rows = []
+            logger.info(f"\n{'═'*60}\n🏪 [{i}/{len(stores)}] {domain}\n{'═'*60}")
+            progress.current_store = domain
+            progress.phase = "parallel_scraping" if store_concurrency > 1 else "scraping"
+            progress.save()
 
-        progress.stores_done = i
+            try:
+                rows = await scrape_one_store(
+                    store_url, progress, state,
+                    concurrency=concurrency,
+                    max_products=max_products,
+                    resume=_effective_resume,
+                )
+            except Exception as _store_exc:
+                logger.error(
+                    f"💥 {domain} — Unhandled exception (isolated): {_store_exc}\n"
+                    f"{traceback.format_exc()[:300]}"
+                )
+                state.mark_error(domain, f"unhandled: {str(_store_exc)[:150]}")
+                progress.last_error = f"{domain}: {str(_store_exc)[:100]}"
+                rows = []
+
+            return domain, rows
+
+    completed_stores = 0
+    tasks = [
+        asyncio.create_task(_run_store_task(i, store_url))
+        for i, store_url in enumerate(stores, 1)
+    ]
+
+    for finished in asyncio.as_completed(tasks):
+        domain, rows = await finished
+        completed_stores += 1
+        progress.stores_done = completed_stores
         progress.stores_results[domain] = len(rows)
         progress.rows_in_csv = _merge_rows_to_csv(rows, domain)
         del rows  # Phase 4: free per-store memory between stores
