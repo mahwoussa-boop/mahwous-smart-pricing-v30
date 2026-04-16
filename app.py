@@ -18,7 +18,6 @@ app.py - نظام التسعير الذكي مهووس v26.0
 """
 import html
 import json
-import os
 import re
 from urllib.parse import urlparse
 import streamlit as st
@@ -129,12 +128,6 @@ try:
 except Exception as _mf_import_err:
     _magic_factory_mod = None
 
-# ── محرك التحليل — استيراد آمن ───────────────────────────────────────────
-try:
-    import pages.analysis_challenge as _analysis_challenge_mod
-except Exception as _ac_import_err:
-    _analysis_challenge_mod = None
-
 _scraper_advanced_mod = None
 _scraper_advanced_import_error = None
 
@@ -159,7 +152,7 @@ def _get_scraper_advanced_module():
         return None
 
 
-@st.cache_data(ttl=86400, show_spinner=False, max_entries=500)
+@st.cache_data(ttl=86400, show_spinner=False)
 def _cached_thumb_from_product_url(page_url: str) -> str:
     """صورة معاينة من صفحة المنتج عندما لا يوجد عمود صورة في الجدول المحفوظ."""
     u = (page_url or "").strip()
@@ -171,34 +164,10 @@ def _cached_thumb_from_product_url(page_url: str) -> str:
     return favicon_url_for_site(u)
 
 
-@st.cache_data(ttl=86400, show_spinner=False, max_entries=500)
+@st.cache_data(ttl=86400, show_spinner=False)
 def _cached_title_from_product_url(page_url: str) -> str:
     """عنوان المنتج من og:title / <title> عندما يكون الاسم مخزّناً كرابط."""
     return fetch_page_title_from_url(page_url) or ""
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Phase 4: Safe DataFrame Rendering — prevents UI OOM on massive datasets
-# ══════════════════════════════════════════════════════════════════════════════
-_UI_MAX_DISPLAY_ROWS = int(os.environ.get("UI_MAX_DISPLAY_ROWS", "1000"))
-
-
-def safe_dataframe(df: pd.DataFrame, **kwargs) -> None:
-    """
-    Wrapper آمن حول st.dataframe — يقصّ العرض على _UI_MAX_DISPLAY_ROWS صف
-    ويعرض تحذيراً عند القصّ. يمنع تجميد واجهة المتصفح بالكامل.
-    """
-    if df is None or df.empty:
-        st.info("لا توجد بيانات للعرض.")
-        return
-    if len(df) > _UI_MAX_DISPLAY_ROWS:
-        st.caption(
-            f"⚠️ يعرض النظام أول {_UI_MAX_DISPLAY_ROWS:,} منتج فقط "
-            f"لتسريع الواجهة. البيانات كاملة ({len(df):,} صف) محفوظة وجاهزة للتصدير."
-        )
-        st.dataframe(df.head(_UI_MAX_DISPLAY_ROWS), **kwargs)
-    else:
-        st.dataframe(df, **kwargs)
 
 
 def _norm_dup_text(s: str) -> str:
@@ -293,11 +262,8 @@ _defaults = {
     "hidden_products": set(),  # منتجات أُرسلت لـ Make أو أُزيلت
     "nav_flash": None,    # رسالة انتقال سريعة من أزرار لوحة التحكم
     "last_audit_stats": None,  # عدادات تدقيق من run_full_analysis
-    "omega_result": None,      # نتيجة Omega System (المحاسبة الصارمة)
     "reconciliation_report": None,
     "reconciliation_failed_csv": None,
-    "reconciliation_duplicates_csv": None,
-    "barrier_rejected_csv": None,
     "_action_toast": None, # رسالة نجاح/فشل Callback تُعرض كـ toast
 }
 for k, v in _defaults.items():
@@ -748,60 +714,6 @@ def _render_audit_bar(audit_stats: dict):
         )
 
 
-def _render_omega_accounting(omega_result=None):
-    """
-    Omega Strict Accounting Dashboard — proves mathematically that
-    Total_Input == Confirmed + Review + Samples + Missing + Damaged.
-    """
-    if omega_result is None:
-        omega_result = st.session_state.get("omega_result")
-    if omega_result is None:
-        return
-
-    try:
-        ab = omega_result.accounting_breakdown
-    except AttributeError:
-        # Not an OmegaResult object
-        return
-
-    total = ab["total_input"]
-    if total <= 0:
-        return
-
-    confirmed = ab["confirmed"]
-    review = ab["review"]
-    samples = ab["samples"]
-    missing = ab["missing"]
-    damaged = ab["damaged"]
-    routed_sum = confirmed + review + samples + missing + damaged
-    is_balanced = (routed_sum == total)
-
-    st.markdown("##### معادلة المحاسبة الصارمة (Strict Accounting Equation)")
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("📥 إجمالي المدخلات", f"{total:,}")
-    c2.metric("✅ مطابق", f"{confirmed:,}")
-    c3.metric("⚠️ للمراجعة", f"{review:,}")
-    c4.metric("🧪 عينات", f"{samples:,}")
-    c5.metric("🛒 مفقودة / فرص", f"{missing:,}")
-    c6.metric("🗑️ سجلات تالفة", f"{damaged:,}")
-
-    if is_balanced:
-        st.success(
-            f"✅ معادلة المحاسبة محققة: "
-            f"{total:,} = {confirmed:,} + {review:,} + {samples:,} + {missing:,} + {damaged:,} "
-            f"(Zero Data Loss)"
-        )
-    else:
-        gap = total - routed_sum
-        st.error(
-            f"🚨 **انتهاك معادلة المحاسبة** — "
-            f"المدخل ({total:,}) ≠ مجموع المخرجات ({routed_sum:,}) | "
-            f"فجوة = {gap:+d} صف\n\n"
-            f"مطابق={confirmed} + مراجعة={review} + عينات={samples} "
-            f"+ مفقودة={missing} + تالفة={damaged}"
-        )
-
-
 def _render_reconciliation_dashboard(audit_stats: dict):
     """لوحة محاسبة صفوف ملفات المنافسين (مدخلات = متطابق + جديد + تالف)."""
     if not audit_stats:
@@ -875,45 +787,6 @@ def _render_reconciliation_dashboard(audit_stats: dict):
             file_name="failed_rows.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_failed_rows_log",
-        )
-    # ═══ أزرار تحميل المنتجات المكررة والمستبعدة من الحاجز ═══
-    _dup_bytes = st.session_state.get("reconciliation_duplicates_csv")
-    if not _dup_bytes:
-        from pathlib import Path
-        _dp = audit_stats.get("reconciliation_duplicates_csv_path")
-        if _dp:
-            p = Path(str(_dp))
-            if p.is_file():
-                try:
-                    _dup_bytes = p.read_bytes()
-                except OSError:
-                    _dup_bytes = None
-    if _dup_bytes:
-        st.download_button(
-            label=f"🔄 تنزيل المنتجات المكررة ({int(audit_stats.get('duplicate_count', 0)):,})",
-            data=_dup_bytes,
-            file_name="duplicates.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_duplicates_log",
-        )
-    _rej_bytes = st.session_state.get("barrier_rejected_csv")
-    if not _rej_bytes:
-        from pathlib import Path
-        _rp = audit_stats.get("barrier_rejected_csv_path")
-        if _rp:
-            p = Path(str(_rp))
-            if p.is_file():
-                try:
-                    _rej_bytes = p.read_bytes()
-                except OSError:
-                    _rej_bytes = None
-    if _rej_bytes:
-        st.download_button(
-            label=f"🚫 تنزيل المستبعدة من النواقص ({int(audit_stats.get('barrier_rejected_count', 0)):,})",
-            data=_rej_bytes,
-            file_name="barrier_rejected.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_barrier_rejected_log",
         )
     st.caption(
         "الأرقام تعكس **صفوف ملفات المنافس** في آخر تشغيل؛ إن فعّلت الدمج التراكمي قد يزيد عدد "
@@ -1855,7 +1728,17 @@ def _auto_route_to_processed(our_name, our_id, comp_src, status, old_price=0, ne
     """نقل المنتج تلقائياً إلى 'تمت المعالجة' وحفظ حالته في DB."""
     try:
         # 1. حفظ في جدول المعالجة
-        save_processed(our_name, our_id, comp_src, status, old_price, new_price, notes)
+        # FIX: use keyword args to match save_processed() signature correctly
+        save_processed(
+            product_key=our_id or our_name,
+            product_name=our_name,
+            competitor=comp_src,
+            action=status,
+            old_price=old_price,
+            new_price=new_price,
+            product_id=our_id,
+            notes=notes,
+        )
         # 2. إخفاء من الواجهة (حفظ في جدول المنتجات المخفية)
         save_hidden_product(our_name, our_id, comp_src)
         return True
@@ -2155,13 +2038,6 @@ if page == "✨ مصنع المنتجات":
 if page == "📊 لوحة التحكم":
     st.header("📊 لوحة التحكم")
     db_log("dashboard", "view")
-    # ── Omega Accounting Dashboard (if available) ──────────────────────
-    if st.session_state.get("omega_result"):
-        try:
-            _render_omega_accounting()
-        except Exception as _omega_err:
-            st.error(f"⚠️ خطأ في عرض لوحة Omega: {_omega_err}")
-
     if st.session_state.get("last_audit_stats"):
         try:
             _render_audit_bar(st.session_state.last_audit_stats)
@@ -2293,37 +2169,6 @@ if page == "📊 لوحة التحكم":
         else:
             st.info("👈 ارفع الملفات في القسم أدناه ثم اضغط «بدء التحليل»")
 
-    # ── 🕷️ Quick Scraper Control (Parallel Multi-Store) ──────────────────
-    st.markdown("---")
-    st.subheader("🕷️ التحكم السريع في الكشط")
-
-    try:
-        _dash_stores_count = len(_load_stores())
-    except NameError:
-        try:
-            import json as _json_dash
-            _dash_stores_count = len(_json_dash.loads(open(_COMPETITORS_FILE, encoding="utf-8").read()))
-        except Exception:
-            _dash_stores_count = 0
-    sc_col1, sc_col2, sc_col3 = st.columns([3, 1.2, 1.2])
-    with sc_col1:
-        st.markdown(
-            f'<div style="background:#0d1b2a;border:1px solid #1e3a5f;border-radius:10px;padding:12px">'
-            f'<span style="color:#4fc3f7;font-weight:700">🚀 الكشط الجماعي:</span> '
-            f'عدد المتاجر الحالية: <b>{_dash_stores_count}</b>. عند الضغط سيتم فتح صفحة الكشط وبدء التشغيل مباشرة.'
-            f'</div>', unsafe_allow_html=True
-        )
-    with sc_col2:
-        if st.button("🚀 تشغيل جماعي", type="primary", use_container_width=True, disabled=(_dash_stores_count == 0), help="الانتقال لصفحة الكشط وبدء التشغيل تلقائياً"):
-            st.session_state["_scraper_autostart"] = True
-            st.session_state["_nav_pending"] = "🕷️ كشط المنافسين"
-            st.session_state["nav_flash"] = "🚀 تم تجهيز التشغيل الجماعي"
-            st.rerun()
-    with sc_col3:
-        if st.button("🕷️ فتح صفحة الكشط", use_container_width=True, help="الانتقال المباشر لصفحة الكشط"):
-            st.session_state["_nav_pending"] = "🕷️ كشط المنافسين"
-            st.rerun()
-
     # ── Phase 2: Auto-Analysis after scraper completion ─────────────────
     # Fires ONCE — locked by _sc_auto_analysis_pending (consumed here)
     # Requires our_df from a previous upload session (stored in session_state)
@@ -2331,14 +2176,31 @@ if page == "📊 لوحة التحكم":
         _prev_our_df = st.session_state.get("our_df")
         if _prev_our_df is not None and not getattr(_prev_our_df, "empty", True):
             st.info("🤖 **تحليل تلقائي بعد الكشط** — يستخدم منتجاتك المحفوظة + بيانات المنافسين الجديدة")
+            import os as _os_auto
+            _auto_csv_path = _os_auto.path.join(
+                _os_auto.environ.get("DATA_DIR", "data"), "competitors_latest.csv"
+            )
             _auto_comp_dfs = {}
-            # Source of truth: DB competitor store only
+            # First try: DB competitor store (Phase 1 cumulative)
             _db_stats = get_competitor_store_stats()
             if _db_stats.get("total_products", 0) > 0:
                 _db_df = get_competitor_products_df()
                 if not _db_df.empty and "competitor" in _db_df.columns:
                     for _cn, _cg in _db_df.groupby("competitor", sort=False):
                         _auto_comp_dfs[str(_cn)] = _cg.reset_index(drop=True)
+            # Fallback: CSV file
+            if not _auto_comp_dfs and _os_auto.path.exists(_auto_csv_path):
+                try:
+                    _csv_df = pd.read_csv(_auto_csv_path, encoding="utf-8-sig")
+                    _scol = next((c for c in _csv_df.columns if str(c).strip().lower() in ("store", "domain", "المتجر", "المنافس")), None)
+                    if _scol:
+                        for _sn, _sg in _csv_df.groupby(_scol, sort=False):
+                            _sk = str(_sn).replace("https://","").replace("http://","").strip("/").split("/")[0]
+                            _auto_comp_dfs[_sk or "auto"] = _sg.reset_index(drop=True)
+                    else:
+                        _auto_comp_dfs["competitors_latest.csv"] = _csv_df
+                except Exception:
+                    pass
             if _auto_comp_dfs:
                 with st.spinner(f"🤖 جاري التحليل التلقائي — {sum(len(v) for v in _auto_comp_dfs.values()):,} منتج منافس..."):
                     _auto_adf, _auto_audit = run_full_analysis(
@@ -2385,11 +2247,20 @@ if page == "📊 لوحة التحكم":
     )
 
     # ── جسر الكشط التلقائي (Auto-Scraper Bridge) ─────────────────────────
-    _db_auto_df = get_competitor_products_df()
-    _auto_available = not _db_auto_df.empty
-    _auto_rows = int(len(_db_auto_df)) if _auto_available else 0
+    import os as _os_dash
+    _AUTO_CSV = _os_dash.path.join(
+        _os_dash.environ.get("DATA_DIR", "data"), "competitors_latest.csv"
+    )
+    _auto_available = _os_dash.path.exists(_AUTO_CSV)
+    _auto_rows = 0   # ← يُهيَّأ دائماً لمنع NameError إذا تغيّرت حالة الملف بين reruns
 
     if _auto_available:
+        _auto_rows = 0
+        try:
+            with open(_AUTO_CSV, encoding="utf-8-sig") as _af:
+                _auto_rows = sum(1 for _ in _af) - 1
+        except Exception:
+            pass
         st.markdown(
             f'<div style="background:#0a2a0a;border:1px solid #00C853;border-radius:8px;'
             f'padding:10px 14px;margin:6px 0;font-size:.88rem">'
@@ -2407,21 +2278,6 @@ if page == "📊 لوحة التحكم":
             '<a href="#" style="color:#4fc3f7">اذهب لصفحة الكشط</a> لتشغيل المحرك</div>',
             unsafe_allow_html=True,
         )
-    
-    with st.expander("📁 رفع كتالوج منتجات اختياري (تحديث القاعدة)", expanded=False):
-        st.info("💡 يمكنك هنا رفع ملف Excel/CSV يحتوي على منتجات منافسين لإضافتها يدوياً لقاعدة البيانات الدائمة في قوقل.")
-        catalog_file = st.file_uploader("اختر ملف الكتالوج", type=["csv", "xlsx"], key="catalog_upload_manual")
-        catalog_store = st.text_input("اسم المتجر (اختياري)", placeholder="مثلاً: Dior")
-        if catalog_file and st.button("📥 حفظ في قاعدة البيانات الدائمة"):
-            with st.spinner("جاري الحفظ في قوقل..."):
-                from utils.db_adapter import save_products_to_db, read_file
-                cdf, ce = read_file(catalog_file)
-                if not ce and cdf is not None:
-                    save_products_to_db(cdf, catalog_store or "كتالوج يدوي")
-                    st.success("✅ تم الحفظ بنجاح في قاعدة البيانات الدائمة!")
-                    st.rerun()
-                else:
-                    st.error(f"❌ خطأ في قراءة الملف: {ce}")
 
     _use_auto = st.checkbox(
         "🤖 استخدام بيانات الكشط التلقائي من المنافسين",
@@ -2442,7 +2298,7 @@ if page == "📊 لوحة التحكم":
     else:
         comp_files = None  # غير مستخدم عند التحميل التلقائي
         st.success(
-            f"✅ سيُستخدم المخزن التراكمي بقاعدة البيانات ({_auto_rows:,} منتج)"
+            f"✅ سيُستخدم الملف الآلي: `{_AUTO_CSV}` ({_auto_rows:,} منتج)"
         )
 
     if our_file is not None:
@@ -2558,27 +2414,24 @@ if page == "📊 لوحة التحكم":
 
                     comp_dfs = {}
                     if _auto_mode:
-                        # ── وضع الكشط التلقائي: المصدر الأساسي DB (competitor_products_store) ────────
+                        # ── وضع الكشط التلقائي: تحميل CSV من القرص مع فصل كل متجر كمنافس مستقل ────────
                         try:
-                            _auto_df = get_competitor_products_df()
-                            if _auto_df is None or _auto_df.empty:
-                                raise ValueError("لا توجد بيانات منافسين في قاعدة البيانات")
+                            _auto_df = pd.read_csv(_AUTO_CSV, encoding="utf-8-sig")
                             _auto_store_col = next(
                                 (
                                     _c for _c in _auto_df.columns
-                                    if str(_c).strip().lower() in (
-                                        "competitor", "store", "domain", "المتجر", "المنافس"
-                                    )
+                                    if str(_c).strip().lower() in ("store", "domain", "المتجر", "المنافس")
                                 ),
                                 None,
                             )
+
                             if _auto_store_col:
                                 _auto_df[_auto_store_col] = _auto_df[_auto_store_col].fillna("").astype(str).str.strip()
                                 _grouped_auto = _auto_df[_auto_df[_auto_store_col] != ""].groupby(_auto_store_col, sort=False)
                                 for _store_name, _store_df in _grouped_auto:
                                     _store_key = str(_store_name).strip()
                                     _store_key = _store_key.replace("https://", "").replace("http://", "").strip("/")
-                                    _store_key = _store_key.split("/")[0] or "competitors_auto"
+                                    _store_key = _store_key.split("/")[0] or "competitors_latest.csv"
                                     if _store_key in comp_dfs:
                                         comp_dfs[_store_key] = pd.concat(
                                             [comp_dfs[_store_key], _store_df.copy()],
@@ -2586,15 +2439,23 @@ if page == "📊 لوحة التحكم":
                                         )
                                     else:
                                         comp_dfs[_store_key] = _store_df.reset_index(drop=True).copy()
-                            if comp_dfs:
-                                st.caption(
-                                    f"✅ تم تحميل البيانات الآلية: {len(_auto_df):,} صف من {len(comp_dfs):,} متجر منافس"
-                                )
+
+                                _unassigned_auto = _auto_df[_auto_df[_auto_store_col] == ""]
+                                if not _unassigned_auto.empty:
+                                    comp_dfs["competitors_latest.csv"] = _unassigned_auto.reset_index(drop=True).copy()
+
+                                if comp_dfs:
+                                    st.caption(
+                                        f"✅ تم تحميل البيانات الآلية: {len(_auto_df):,} صف من {len(comp_dfs):,} متجر منافس"
+                                    )
+                                else:
+                                    comp_dfs["competitors_latest.csv"] = _auto_df
+                                    st.caption(f"✅ تم تحميل البيانات الآلية: {len(_auto_df):,} منتج")
                             else:
-                                comp_dfs["competitors_auto"] = _auto_df
+                                comp_dfs["competitors_latest.csv"] = _auto_df
                                 st.caption(f"✅ تم تحميل البيانات الآلية: {len(_auto_df):,} منتج")
                         except Exception as _ae:
-                            st.error(f"❌ فشل تحميل البيانات الآلية من قاعدة البيانات: {_ae}")
+                            st.error(f"❌ فشل تحميل الملف الآلي: {_ae}")
                     else:
                         # ── وضع الرفع اليدوي (CSV سلة/كشط → تعريف تلقائي ثم read_file احتياطاً) ──
                         for _ci, cf in enumerate(comp_files):
@@ -2760,61 +2621,21 @@ if page == "📊 لوحة التحكم":
                             if _rec.failed_df is not None and not _rec.failed_df.empty
                             else None
                         )
-                        # حفظ المنتجات المكررة للتحميل
-                        st.session_state.reconciliation_duplicates_csv = (
-                            failed_rows_to_xlsx_bytes(_rec.duplicates_df)
-                            if _rec.duplicates_df is not None and not _rec.duplicates_df.empty
-                            else None
-                        )
-                        # حفظ المنتجات المستبعدة من الحاجز الذكي للتحميل
-                        st.session_state.barrier_rejected_csv = (
-                            failed_rows_to_xlsx_bytes(_rec.barrier_rejected_df)
-                            if _rec.barrier_rejected_df is not None and not _rec.barrier_rejected_df.empty
-                            else None
-                        )
-                        import os
-                        _dd = os.environ.get("DATA_DIR", "data")
-                        os.makedirs(_dd, exist_ok=True)
-                        _job_tag = st.session_state.get('job_id') or 'local'
                         if _rec.failed_df is not None and not _rec.failed_df.empty:
-                            _fj = os.path.join(_dd, f"failed_rows_{_job_tag}.xlsx")
+                            import os
+
+                            _dd = os.environ.get("DATA_DIR", "data")
+                            os.makedirs(_dd, exist_ok=True)
+                            _fj = os.path.join(
+                                _dd,
+                                f"failed_rows_{st.session_state.get('job_id') or 'local'}.xlsx",
+                            )
                             try:
                                 _rec.failed_df.to_excel(_fj, index=False, engine="openpyxl")
                                 audit_stats["reconciliation_failed_csv_path"] = _fj
                                 st.session_state.last_audit_stats = audit_stats
                             except OSError:
                                 pass
-                        if _rec.duplicates_df is not None and not _rec.duplicates_df.empty:
-                            _dj = os.path.join(_dd, f"duplicates_{_job_tag}.xlsx")
-                            try:
-                                _rec.duplicates_df.to_excel(_dj, index=False, engine="openpyxl")
-                                audit_stats["reconciliation_duplicates_csv_path"] = _dj
-                                audit_stats["duplicate_count"] = len(_rec.duplicates_df)
-                            except OSError:
-                                pass
-                        if _rec.barrier_rejected_df is not None and not _rec.barrier_rejected_df.empty:
-                            _rj = os.path.join(_dd, f"barrier_rejected_{_job_tag}.xlsx")
-                            try:
-                                _rec.barrier_rejected_df.to_excel(_rj, index=False, engine="openpyxl")
-                                audit_stats["barrier_rejected_csv_path"] = _rj
-                                audit_stats["barrier_rejected_count"] = len(_rec.barrier_rejected_df)
-                            except OSError:
-                                pass
-
-                        # ═══ Phase 5: Ironclad Guarantee — التحقق النهائي ═══
-                        _total_input = _rec.total_read
-                        _total_output = (
-                            _rec.matched + _rec.new_ready + _rec.corrupted + _rec.duplicate_count
-                        )
-                        if _total_input != _total_output:
-                            _gap = _total_input - _total_output
-                            st.warning(
-                                f"⚠️ تحذير المحاسبة: المدخل={_total_input} ≠ المخرج={_total_output} — فجوة={_gap} منتج"
-                            )
-                            audit_stats["ironclad_warning"] = (
-                                f"المدخل={_total_input} ≠ المخرج={_total_output} فجوة={_gap}"
-                            )
-                            st.session_state.last_audit_stats = audit_stats
                     except Exception as _rec_err:
                         st.warning(f"⚠️ محرك المحاسبة: {_rec_err} — يُستخدم مسار المفقودات السابق.")
                         raw_missing_df = find_missing_products(our_df, comp_dfs)
@@ -2862,19 +2683,6 @@ if page == "📊 لوحة التحكم":
                     prog.progress(1.0, "✅ اكتمل!")
                     st.balloons()
                     st.rerun()
-
-    # ── 🧬 محرك التحليل المتقدم (مدمج في لوحة التحكم) ──────────────────
-    st.markdown("---")
-    with st.expander("🧬 محرك التحليل المتقدم (Analysis Challenge Engine)", expanded=False):
-        try:
-            if _analysis_challenge_mod is not None and hasattr(_analysis_challenge_mod, "render"):
-                _analysis_challenge_mod.render()
-            else:
-                st.info("⚠️ محرك التحليل غير متوفر حالياً — تحقق من وجود ملف pages/analysis_challenge.py")
-        except Exception as _ace_err:
-            st.error(f"❌ خطأ في محرك التحليل: {_ace_err}")
-            import traceback as _tb_ace
-            st.code(_tb_ace.format_exc())
 
 
 # ════════════════════════════════════════════════
@@ -4243,7 +4051,6 @@ elif page == "⚡ أتمتة Make":
             with c2:
                 if st.button("🗑️ مسح القرارات"):
                     st.session_state.decisions_pending = {}
-                    import gc as _gc_clear; _gc_clear.collect()
                     st.rerun()
         else:
             st.info("لا توجد قرارات معلقة")
@@ -4506,22 +4313,6 @@ elif page == "🕷️ كشط المنافسين":
             if "store" not in _df_store.columns:
                 return {}
             _counts = _df_store["store"].astype(str).value_counts(dropna=False)
-            return {str(k): int(v) for k, v in _counts.to_dict().items()}
-        except Exception:
-            return {}
-
-    @st.cache_data(ttl=5, show_spinner=False)
-    def _load_db_rows_by_store() -> dict:
-        try:
-            _db_df = get_competitor_products_df()
-            if _db_df is None or _db_df.empty:
-                return {}
-            _key = "competitor" if "competitor" in _db_df.columns else (
-                "store" if "store" in _db_df.columns else None
-            )
-            if not _key:
-                return {}
-            _counts = _db_df[_key].astype(str).value_counts(dropna=False)
             return {str(k): int(v) for k, v in _counts.to_dict().items()}
         except Exception:
             return {}
@@ -4789,10 +4580,10 @@ elif page == "🕷️ كشط المنافسين":
         with _sc_c3:
             st.number_input(
                 "طلبات متزامنة",
-                1, 5, 5,
+                2, 30, 8,
                 step=1,
                 key="sc_concurrency",
-                help="زيادة الرقم = أسرع لكن احتمال حظر أكبر. الحد الآمن في v30 هو 5.",
+                help="زيادة الرقم = أسرع لكن احتمال حظر أكبر. موصى به: 6–10",
                 disabled=_is_alive,
             )
 
@@ -4891,12 +4682,6 @@ elif page == "🕷️ كشط المنافسين":
                 )
         else:
             st.caption("⚠️ وحدة الجدولة غير متاحة (scrapers/scheduler.py)")
-
-    # تشغيل تلقائي إذا جاء المستخدم من لوحة التحكم بزر التشغيل الجماعي
-    if st.session_state.pop("_scraper_autostart", False) and not _is_alive:
-        _start_scraper_bg()
-        st.session_state["_sc_msg"] = ("success", "✅ بدأ التشغيل الجماعي تلقائياً من لوحة التحكم")
-        st.rerun()
 
     # ════════════════════════════════════════════════════════════════════════
     #  القسم 3 — أزرار التشغيل الرئيسية + تقدير الحجم
@@ -5034,7 +4819,6 @@ elif page == "🕷️ كشط المنافسين":
         _all_stores_list = _load_stores()
         _state_map = _load_scraper_state_map()
         _csv_counts = _load_csv_rows_by_store(_OUTPUT_CSV)
-        _db_counts = _load_db_rows_by_store()
         if _all_stores_list:
             st.markdown("**📋 تفاصيل المتاجر:**")
             _html_items = []
@@ -5049,7 +4833,6 @@ elif page == "🕷️ كشط المنافسين":
                     _stores_res.get(_d),
                     _cp.get("rows_saved"),
                     _live.get("rows_saved"),
-                    _db_counts.get(_d),
                     _csv_counts.get(_d),
                 ]
                 _cnt = None
@@ -5166,18 +4949,7 @@ elif page == "🕷️ كشط المنافسين":
     _sp_c3.metric("🔍 بدون سعر", f"{_sp_no_price:,}")
     _sp_c4.metric("📊 تغطية", f"{_sp_with_price*100//max(_sp_total,1)}%")
 
-    def _display_product_cards(_df: pd.DataFrame) -> None:
-        _cols = st.columns(3)
-        for _idx, _row in _df.iterrows():
-            with _cols[_idx % 3]:
-                _img = str(_row.get("image_url", "") or "").strip()
-                if _img:
-                    st.image(_img, use_container_width=True)
-                st.markdown(f"**{str(_row.get('product_name', '') or '').strip()}**")
-                st.markdown(f"💰 {float(_row.get('price', 0) or 0):.2f} SAR")
-                st.caption(str(_row.get("competitor", "") or ""))
-
-    # ── Product Grid/Table ───────────────────────────────────────────────
+    # ── Product Table ────────────────────────────────────────────────────
     if _sp_total > 0:
         _sel_comp = st.selectbox(
             "المنافس",
@@ -5186,21 +4958,12 @@ elif page == "🕷️ كشط المنافسين":
         )
         _comp_filter = "" if _sel_comp == "الكل" else _sel_comp
         _local_prods_df = get_competitor_products_df(_comp_filter)
-        _view_mode = st.radio(
-            "طريقة العرض",
-            ["بطاقات", "جدول"],
-            horizontal=True,
-            key="spider_view_mode",
-        )
 
         if not _local_prods_df.empty:
-            if _view_mode == "بطاقات":
-                _display_product_cards(_local_prods_df.head(60))
-            else:
-                _display_cols = [c for c in ("product_name", "competitor", "price", "brand", "updated_at") if c in _local_prods_df.columns]
-                _col_rename = {"product_name": "المنتج", "competitor": "المنافس", "price": "السعر (ر.س)", "brand": "الماركة", "updated_at": "آخر تحديث"}
-                _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
-                safe_dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
+            _display_cols = [c for c in ("product_name", "competitor", "price", "brand", "updated_at") if c in _local_prods_df.columns]
+            _col_rename = {"product_name": "المنتج", "competitor": "المنافس", "price": "السعر (ر.س)", "brand": "الماركة", "updated_at": "آخر تحديث"}
+            _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
+            st.dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
         else:
             st.info("لا توجد منتجات لهذا المنافس.")
     else:
@@ -5246,24 +5009,24 @@ elif page == "🕷️ كشط المنافسين":
                 _adv_prog.progress(1.0, text="❌ خطأ")
                 st.error(f"❌ خطأ: {_adv_err}")
 
-    # ── Export & Analysis Trigger (DB source of truth) ───────────────────
-    if _sp_total > 0:
-        _export_df = get_competitor_products_df()
-        _export_rows = int(len(_export_df)) if _export_df is not None else 0
-        _export_bytes = (
-            _export_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-            if _export_rows > 0 else b""
-        )
-        _csv_size_kb = round(len(_export_bytes) / 1024, 1) if _export_bytes else 0.0
+    # ── Export & Analysis Trigger ────────────────────────────────────────
+    if _os_scraper.path.exists(_OUTPUT_CSV):
+        _csv_size_kb = round(_os_scraper.path.getsize(_OUTPUT_CSV) / 1024, 1)
+        _csv_rows = 0
+        try:
+            with open(_OUTPUT_CSV, encoding="utf-8-sig") as _f:
+                _csv_rows = sum(1 for _ in _f) - 1
+        except Exception:
+            pass
 
         _dl_col, _go_col = st.columns(2)
         with _dl_col:
-            st.download_button(
-                f"📥 CSV من DB ({_csv_size_kb} KB · {_export_rows:,} منتج)",
-                data=_export_bytes, file_name="competitors_store_export.csv",
-                mime="text/csv", key="sc_download_csv", use_container_width=True,
-                disabled=(_export_rows == 0),
-            )
+            with open(_OUTPUT_CSV, "rb") as _fout:
+                st.download_button(
+                    f"📥 CSV ({_csv_size_kb} KB · {_csv_rows:,} منتج)",
+                    data=_fout.read(), file_name="competitors_latest.csv",
+                    mime="text/csv", key="sc_download_csv", use_container_width=True,
+                )
         with _go_col:
             if st.button("🚀 تحليل شامل", key="sc_go_match", type="primary", use_container_width=True):
                 st.session_state._nav_pending = "📊 لوحة التحكم"
@@ -5272,7 +5035,6 @@ elif page == "🕷️ كشط المنافسين":
                 st.session_state.analysis_df = None
                 st.session_state.last_audit_stats = None
                 st.session_state.nav_flash = "🤖 تم تفعيل البيانات الآلية"
-                import gc as _gc_reset; _gc_reset.collect()
                 st.rerun()
 
     # ── Auto-Analysis Trigger (fires ONCE per completed scrape) ──────────
