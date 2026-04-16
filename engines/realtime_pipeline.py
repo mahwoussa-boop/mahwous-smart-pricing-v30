@@ -38,9 +38,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
-from datetime import datetime
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
+import aiohttp
 import pandas as pd
 
 logger = logging.getLogger("RealtimePipeline")
@@ -61,6 +61,7 @@ async def run_realtime_pipeline(
     max_products_per_store: int = 0,
     use_ai: bool = False,
     result_callback: Optional[Callable[[str, Any], None]] = None,
+    parallel_stores: int = 5,
 ) -> AsyncGenerator[Tuple[str, Any], None]:
     """
     Async generator that drives the full scrape-then-match pipeline and
@@ -77,9 +78,13 @@ async def run_realtime_pipeline(
         result_callback       : optional sync callable(event_type, data) on each event
                                 (same tuples as yielded); must be thread-safe if used
                                 from mixed contexts.
+        parallel_stores       : exposed for UI/settings parity; all stores are always
+                                scheduled in the same event-loop tick (no semaphore
+                                that caps concurrent stores at 1). Per-URL concurrency
+                                remains `concurrency` inside each store task.
 
     Yields:
-        ("scraping_progress", {"store": str, "count": int})
+        ("scraping_progress", {"store": str, "count": int, "row": dict})
         ("scraping_done",     {"store": str, "total": int})
         ("matching_start",    {"total_rows": int, "stores": list})
         ("complete",          {"df": pd.DataFrame, "audit": dict})
@@ -113,15 +118,26 @@ async def run_realtime_pipeline(
     # Lazy import — avoids circular imports at module load time
     from engines.async_scraper import scrape_one_store_streaming, _domain
 
+    _ = max(1, int(parallel_stores))  # validated for callers / logging; no store cap
+
     # ── Phase 1: Producer / raw-queue / Consumer ─────────────────────────────
-    # Producers: one task per store → raw_queue (domain, row|None sentinel).
-    # Consumer: drains raw_queue, appends rows with per-row try/except, forwards
-    #            structured events to event_queue. One bad row never kills the pipe.
+    # Producers: one asyncio.Task per store, all scheduled together (no store-level
+    # semaphore).  raw_queue merges interleaved rows; consumer forwards events.
 
     raw_queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue(maxsize=500)
     event_queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue(maxsize=500)
 
     store_rows: Dict[str, List[dict]] = {_domain(u): [] for u in store_urls}
+
+    shared_session: Optional[aiohttp.ClientSession] = None
+    shared_connector: Optional[aiohttp.TCPConnector] = None
+    if len(store_urls) > 1:
+        shared_connector = aiohttp.TCPConnector(ssl=False, limit=100)
+        shared_session = aiohttp.ClientSession(
+            connector=shared_connector,
+            connector_owner=True,
+            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=15),
+        )
 
     async def _producer(url: str) -> None:
         """Scrape one store; push (domain, row) or (domain, None) when finished."""
@@ -131,6 +147,7 @@ async def run_realtime_pipeline(
                 url,
                 concurrency=concurrency,
                 max_products=max_products_per_store,
+                client_session=shared_session,
             ):
                 await raw_queue.put((domain, row))
         except Exception:
@@ -172,6 +189,7 @@ async def run_realtime_pipeline(
                         {
                             "store": domain,
                             "count": len(store_rows[domain]),
+                            "row": dict(payload),
                         },
                     )
                 )
@@ -183,9 +201,8 @@ async def run_realtime_pipeline(
                 )
 
     consumer_task = asyncio.create_task(_consumer())
-    producer_tasks = [
-        asyncio.create_task(_producer(url)) for url in store_urls
-    ]
+    # All store producers start in the same tick — asyncio.gather only after shutdown.
+    producer_tasks = [asyncio.create_task(_producer(url)) for url in store_urls]
 
     stores_finished = 0
     total_stores = len(store_urls)
@@ -218,6 +235,8 @@ async def run_realtime_pipeline(
         if not consumer_task.done():
             consumer_task.cancel()
         await asyncio.gather(*producer_tasks, consumer_task, return_exceptions=True)
+        if shared_session is not None and not shared_session.closed:
+            await shared_session.close()
 
     # ── Phase 2: Build competitor DataFrames from accumulated rows ────────────
     comp_dfs: Dict[str, pd.DataFrame] = {}
@@ -280,6 +299,7 @@ def run_realtime_pipeline_sync(
     use_ai: bool = False,
     on_event: Optional[Any] = None,
     result_callback: Optional[Callable[[str, Any], None]] = None,
+    parallel_stores: int = 5,
 ) -> pd.DataFrame:
     """
     Synchronous wrapper around run_realtime_pipeline().
@@ -306,6 +326,7 @@ def run_realtime_pipeline_sync(
             max_products_per_store=max_products_per_store,
             use_ai=use_ai,
             result_callback=_cb,
+            parallel_stores=parallel_stores,
         ):
             if event_type == "complete":
                 result_df = data.get("df", pd.DataFrame())

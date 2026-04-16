@@ -647,6 +647,7 @@ async def scrape_one_store(
     resume: bool = True,
     single_mode: bool = False,
     output_queue: "Optional[asyncio.Queue[Any]]" = None,
+    external_session: Optional[aiohttp.ClientSession] = None,
 ) -> List[dict]:
     # output_queue: when provided, each scraped row is also forwarded to the queue
     # immediately (streaming mode). The batch list (rows) is still built for
@@ -676,18 +677,23 @@ async def scrape_one_store(
         state.mark_error(domain, "import_error")
         return []
 
-    connector = aiohttp.TCPConnector(ssl=False, limit=max(100, concurrency * 5))
+    own_session = external_session is None
+    connector: aiohttp.TCPConnector | None = None
     session: aiohttp.ClientSession | None = None
     # Always defined — code after `finally` and error paths must never hit NameError
     rows: List[dict] = []
     store_http_status: Dict[str, int] = {"403": 0, "429": 0}
 
     try:
-        session = aiohttp.ClientSession(
-            connector=connector,
-            connector_owner=True,
-            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=15),
-        )
+        if external_session is not None:
+            session = external_session
+        else:
+            connector = aiohttp.TCPConnector(ssl=False, limit=max(100, concurrency * 5))
+            session = aiohttp.ClientSession(
+                connector=connector,
+                connector_owner=True,
+                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=15),
+            )
 
         progress.current_store    = domain
         progress.store_urls_done  = 0
@@ -879,8 +885,9 @@ async def scrape_one_store(
             # Partial results in `rows` are preserved — fall through to save
 
     finally:
-        if session is not None and not session.closed:
-            await session.close()
+        if own_session and session is not None and isinstance(session, aiohttp.ClientSession):
+            if not session.closed:
+                await session.close()
         await asyncio.sleep(0.25)
 
     if not _force_run:
@@ -903,6 +910,7 @@ async def scrape_one_store_streaming(
     store_url: str,
     concurrency: int = 10,
     max_products: int = 0,
+    client_session: Optional[aiohttp.ClientSession] = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Async generator: yields each scraped product dict immediately upon discovery.
@@ -911,6 +919,8 @@ async def scrape_one_store_streaming(
     (maxsize=200 rows for backpressure).  The batch system is preserved —
     scrape_one_store() still builds its internal rows[] for checkpointing;
     this generator simply also forwards each row to the caller in real-time.
+    Optional ``client_session`` reuses a shared aiohttp session (multi-store
+    realtime pipeline) to avoid per-store TCP/TLS setup overhead.
 
     Usage:
         async for row in scrape_one_store_streaming(url):
@@ -947,6 +957,7 @@ async def scrape_one_store_streaming(
                 resume=False,        # streaming = always fresh
                 single_mode=True,
                 output_queue=queue,
+                external_session=client_session,
             )
         except Exception:
             logger.error(
@@ -1091,7 +1102,7 @@ async def run_scraper(
     concurrency: int = 10,
     max_products: int = 0,
     resume: bool = True,
-    parallel_stores: int = 1,
+    parallel_stores: int = 5,
 ) -> None:
     """
     Main scraper loop.
@@ -1100,12 +1111,10 @@ async def run_scraper(
         concurrency:     max simultaneous URL fetches *per store*.
         max_products:    cap per store (0 = unlimited).
         resume:          honour checkpoints from previous runs.
-        parallel_stores: how many stores to scrape concurrently.
-                         1  = original sequential behaviour (safe default).
-                         2-4 = parallel mode; each store still uses its own
-                               per-URL Semaphore(concurrency) internally.
-                         Kept moderate (recommend ≤ 3) because each store
-                         already opens many connections.
+        parallel_stores: 1 = sequential (one store after another).  Values > 1
+                         enable War Machine mode: every store runs at once on a
+                         single shared aiohttp.ClientSession (TCPConnector limit 100).
+                         CLI default is 5 so full runs start parallel unless set to 1.
     """
     try:
         with open(COMPETITORS_FILE, encoding="utf-8") as f:
@@ -1169,62 +1178,59 @@ async def run_scraper(
 
     # ── Parallel mode (parallel_stores > 1) ─────────────────────────────────
     else:
-        # Semaphore limits how many stores run at the same time.
-        # Each store internally uses Semaphore(concurrency) for its URLs,
-        # so the total open connections ≈ parallel_stores × concurrency.
-        # Example: 3 stores × 8 URL slots = 24 max simultaneous connections.
-        _store_sem = asyncio.Semaphore(parallel_stores)
         _stores_done_count = 0
+        _parallel_connector = aiohttp.TCPConnector(ssl=False, limit=100)
+        _parallel_session = aiohttp.ClientSession(
+            connector=_parallel_connector,
+            connector_owner=True,
+            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=15),
+        )
 
         async def _scrape_store_guarded(idx: int, store_url: str) -> None:
             nonlocal _stores_done_count
             domain = _domain(store_url)
 
-            # Stagger store launches: wait (idx * 2s) before acquiring the slot
-            # so all stores don't hammer DNS/TCP at the exact same millisecond.
-            if idx > 0:
-                await asyncio.sleep(idx * 2.0)
+            logger.info(
+                f"\n{'═'*60}\n"
+                f"🏪 [{idx+1}/{len(stores)}] {domain} [parallel / shared session]\n"
+                f"{'═'*60}"
+            )
+            progress.current_store = domain
+            progress.phase = "scraping"
+            progress.save()
 
-            async with _store_sem:
-                logger.info(
-                    f"\n{'═'*60}\n"
-                    f"🏪 [{idx+1}/{len(stores)}] {domain} [parallel slot acquired]\n"
-                    f"{'═'*60}"
+            try:
+                rows = await scrape_one_store(
+                    store_url, progress, state,
+                    concurrency=concurrency,
+                    max_products=max_products,
+                    resume=_effective_resume,
+                    external_session=_parallel_session,
                 )
-                progress.current_store = domain
-                progress.phase = "scraping"
-                progress.save()
+            except Exception as _store_exc:
+                logger.error(
+                    f"💥 {domain} — Unhandled exception (isolated, parallel): "
+                    f"{_store_exc}\n{traceback.format_exc()[:300]}"
+                )
+                state.mark_error(domain, f"unhandled: {str(_store_exc)[:150]}")
+                progress.last_error = f"{domain}: {str(_store_exc)[:100]}"
+                rows = []
 
-                try:
-                    rows = await scrape_one_store(
-                        store_url, progress, state,
-                        concurrency=concurrency,
-                        max_products=max_products,
-                        resume=_effective_resume,
-                    )
-                except Exception as _store_exc:
-                    logger.error(
-                        f"💥 {domain} — Unhandled exception (isolated, parallel): "
-                        f"{_store_exc}\n{traceback.format_exc()[:300]}"
-                    )
-                    state.mark_error(domain, f"unhandled: {str(_store_exc)[:150]}")
-                    progress.last_error = f"{domain}: {str(_store_exc)[:100]}"
-                    rows = []
+            _stores_done_count += 1
+            progress.stores_done = _stores_done_count
+            progress.stores_results[domain] = len(rows)
+            progress.rows_in_csv = _merge_rows_to_csv(rows, domain)
+            progress.save()
 
-                # Update shared progress — safe because asyncio is single-threaded
-                _stores_done_count += 1
-                progress.stores_done = _stores_done_count
-                progress.stores_results[domain] = len(rows)
-                progress.rows_in_csv = _merge_rows_to_csv(rows, domain)
-                progress.save()
-
-        # Launch all store tasks; return_exceptions=True prevents one failure
-        # from cancelling siblings that are still running.
-        store_tasks = [
-            _scrape_store_guarded(i, s_url)
-            for i, s_url in enumerate(stores)
-        ]
-        await asyncio.gather(*store_tasks, return_exceptions=True)
+        try:
+            store_tasks = [
+                _scrape_store_guarded(i, s_url)
+                for i, s_url in enumerate(stores)
+            ]
+            await asyncio.gather(*store_tasks, return_exceptions=True)
+        finally:
+            if not _parallel_session.closed:
+                await _parallel_session.close()
 
     # ── Finalise ─────────────────────────────────────────────────────────────
     progress.running     = False
@@ -1257,8 +1263,8 @@ def main():
     parser.add_argument("--reset-state", action="store_true",
                         help="مسح كل نقاط الاستئناف قبل البدء")
     # New: parallel store mode (1 = original sequential, 2-3 = parallel)
-    parser.add_argument("--parallel-stores", type=int, default=1,
-                        help="عدد المتاجر المتزامنة (1=تسلسلي، 2-3=متوازي)")
+    parser.add_argument("--parallel-stores", type=int, default=5,
+                        help="عتبة الوضع المتوازي (1=تسلسلي، >1=كل المتاجر دفعة واحدة مع جلسة مشتركة)")
     args = parser.parse_args()
 
     resume = not args.no_resume
