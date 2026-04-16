@@ -1,0 +1,20 @@
+{
+  "running": true,
+  "phase": "discovering",
+  "pid": 9868,
+  "started_at": "2026-04-16 23:44:14",
+  "last_updated": "2026-04-16 23:44:14",
+  "stores_total": 18,
+  "stores_done": 0,
+  "urls_total": 0,
+  "urls_processed": 0,
+  "rows_in_csv": 0,
+  "fetch_exceptions": 0,
+  "success_rate_pct": 0.0,
+  "current_store": "",
+  "store_urls_done": 0,
+  "store_urls_total": 0,
+  "stores_results": {},
+  "last_error": "",
+  "finished_at": ""
+}

@@ -1,0 +1,25 @@
+Traceback (most recent call last):
+  File "C:\Users\Hp\OneDrive\«·’Ê—\‰”Œ… «· ÿ»Ìﬁ  50œÊ·«—\vision2030-v2\scrapers\async_scraper.py", line 26, in <module>
+    from engines.async_scraper import *  # noqa: F401,F403
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\OneDrive\«·’Ê—\‰”Œ… «· ÿ»Ìﬁ  50œÊ·«—\vision2030-v2\engines\async_scraper.py", line 26, in <module>
+    import aiohttp
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\__init__.py", line 6, in <module>
+    from .client import (
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 38, in <module>
+    from yarl import URL
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\yarl\__init__.py", line 2, in <module>
+    from ._url import URL, cache_clear, cache_configure, cache_info
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\yarl\_url.py", line 20, in <module>
+    import idna
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\idna\__init__.py", line 1, in <module>
+    from .core import (
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\idna\core.py", line 7, in <module>
+    from .intranges import intranges_contain
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 936, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1032, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1130, in get_data
+KeyboardInterrupt
