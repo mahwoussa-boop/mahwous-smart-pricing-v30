@@ -20,10 +20,8 @@ import random
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
-from urllib.parse import unquote, urlparse
-
-import gc
+from typing import Any, AsyncGenerator, Dict, List, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 import pandas as pd
@@ -57,23 +55,6 @@ _RE_OG_URL      = _re.compile(r'<meta[^>]+property=["\']og:url["\'][^>]+content=
 _RE_OG_PRICE    = _re.compile(r'<meta[^>]+property=["\']product:price:amount["\'][^>]+content=["\']([^"\']+)["\']', _re.I)
 _RE_PRICE_SPAN  = _re.compile(r'class="[^"]*price[^"]*"[^>]*>\s*(?:<[^>]+>)?([\d,. ]+)', _re.I)
 _RE_H1_PRODUCT  = _re.compile(r'<h1[^>]*>\s*([^<]{3,120}?)\s*</h1>', _re.S | _re.I)
-_RE_SMART_PRICE_PATTERNS = [
-    _re.compile(r'(\d+(?:[\.,]\d+)?)\s*(?:ر\.س|SAR|SR)', _re.I),
-    _re.compile(r'(?:ر\.س|SAR|SR)\s*(\d+(?:[\.,]\d+)?)', _re.I),
-]
-
-# ─── Currency conversion for USD stores (e.g. alkhabeershop.com) ─────────
-_USD_TO_SAR = float(os.environ.get("USD_TO_SAR_RATE", "3.75"))
-_USD_STORES = {"alkhabeershop.com", "alkhabeer.com"}
-
-def _is_usd_store(store_url: str) -> bool:
-    """يتحقق إذا كان المتجر يسعّر بالدولار (مثل الخبير للعطور)."""
-    domain = _domain(store_url).lower()
-    return any(usd in domain for usd in _USD_STORES)
-
-def _convert_usd_to_sar(price: float) -> float:
-    """يحوّل السعر من USD إلى SAR."""
-    return round(price * _USD_TO_SAR, 2) if price > 0 else 0.0
 
 # ─── Anti-ban imports مُسبقة على مستوى الـ Module ─────────────────────────
 try:
@@ -100,61 +81,6 @@ CSV_COLS = [
     "availability", "scraped_at",
 ]
 
-# ─── Phase 4: Memory-Safe Streaming Constants ────────────────────────────────
-_FLUSH_THRESHOLD = int(os.environ.get("SCRAPER_FLUSH_THRESHOLD", "500"))
-_CHUNK_DIR = os.path.join(_DATA_DIR, "_scraper_chunks")
-
-
-def _flush_rows_to_disk(rows: List[dict], domain: str, chunk_idx: int) -> str:
-    """تفريغ المنتجات المؤقتة إلى ملف JSONL على القرص وتحرير الذاكرة."""
-    os.makedirs(_CHUNK_DIR, exist_ok=True)
-    safe_domain = _re.sub(r'[^\w.-]', '_', domain)
-    chunk_path = os.path.join(_CHUNK_DIR, f"{safe_domain}_chunk_{chunk_idx:04d}.jsonl")
-    with open(chunk_path, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-    logger.info(
-        f"💾 [Memory] {domain} — flushed {len(rows)} rows to chunk {chunk_idx} "
-        f"({os.path.getsize(chunk_path) / 1024:.0f} KB)"
-    )
-    return chunk_path
-
-
-def _load_chunks_for_domain(domain: str) -> List[dict]:
-    """إعادة تحميل كل الـ chunks من القرص لنطاق معين."""
-    safe_domain = _re.sub(r'[^\w.-]', '_', domain)
-    all_rows: List[dict] = []
-    if not os.path.isdir(_CHUNK_DIR):
-        return all_rows
-    chunk_files = sorted(
-        f for f in os.listdir(_CHUNK_DIR)
-        if f.startswith(f"{safe_domain}_chunk_") and f.endswith(".jsonl")
-    )
-    for fname in chunk_files:
-        fpath = os.path.join(_CHUNK_DIR, fname)
-        try:
-            with open(fpath, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        all_rows.append(json.loads(line))
-        except Exception as exc:
-            logger.warning(f"[Memory] Failed to read chunk {fname}: {exc}")
-    return all_rows
-
-
-def _cleanup_chunks_for_domain(domain: str) -> None:
-    """حذف ملفات الـ chunks المؤقتة بعد الدمج النهائي."""
-    safe_domain = _re.sub(r'[^\w.-]', '_', domain)
-    if not os.path.isdir(_CHUNK_DIR):
-        return
-    for fname in os.listdir(_CHUNK_DIR):
-        if fname.startswith(f"{safe_domain}_chunk_") and fname.endswith(".jsonl"):
-            try:
-                os.remove(os.path.join(_CHUNK_DIR, fname))
-            except Exception:
-                pass
-
 
 def _has_valid_price(row: dict | None) -> bool:
     if not row:
@@ -168,21 +94,6 @@ def _has_valid_price(row: dict | None) -> bool:
 def _proxy_pool_from_env() -> List[str]:
     raw = os.environ.get("SCRAPER_PROXIES", "")
     return [p.strip() for p in raw.split(",") if p.strip()]
-
-
-def extract_price_smartly(html_content: str) -> float:
-    if not html_content:
-        return 0.0
-    for pattern in _RE_SMART_PRICE_PATTERNS:
-        match = pattern.search(html_content)
-        if not match:
-            continue
-        raw = (match.group(1) or "").strip().replace(",", "")
-        try:
-            return float(raw)
-        except Exception:
-            continue
-    return 0.0
 
 
 def _v30_row_from_result(result: dict | None, store_url: str) -> dict | None:
@@ -249,18 +160,15 @@ class Progress:
     stores_results: Dict[str, int] = field(default_factory=dict)
     stores_http_errors: Dict[str, dict] = field(default_factory=dict)
 
-    def save(self, path: str = None) -> None:
-        """حفظ التقدم العام دائماً، أو إلى مسار مخصص إذا طُلب ذلك صراحةً."""
+    def save(self, path: str = PROGRESS_FILE) -> None:
         try:
-            target_path = path or PROGRESS_FILE
             self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.pid = os.getpid()
-            payload = asdict(self)
             with _PROGRESS_WRITE_LOCK:
-                with open(target_path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(asdict(self), f, ensure_ascii=False, indent=2)
         except Exception:
-            logger.warning(f"تعذّر حفظ التقدم في {target_path}: {traceback.format_exc()}")
+            logger.warning(f"تعذّر حفظ التقدم: {traceback.format_exc()}")
 
     @classmethod
     def load(cls, path: str = PROGRESS_FILE) -> "Progress":
@@ -438,11 +346,6 @@ def extract_product(data: dict, store_url: str) -> dict | None:
     if url and not url.startswith("http"):
         base = store_url.rstrip("/")
         url  = f"{base}/{url.lstrip('/')}"
-    if url:
-        try:
-            url = unquote(url)
-        except Exception:
-            pass
     image = (
         data.get("image") or data.get("featured_image") or
         data.get("thumbnail") or ""
@@ -452,11 +355,6 @@ def extract_product(data: dict, store_url: str) -> dict | None:
     brand = str(data.get("vendor") or data.get("brand") or data.get("الماركة") or "")
     cat   = str(data.get("product_type") or data.get("category") or "")
     avail = str(data.get("available") or data.get("in_stock") or "true")
-
-    # ── تحويل العملة للمتاجر التي تسعّر بالدولار (مثل alkhabeershop.com) ──
-    if _is_usd_store(store_url):
-        price = _convert_usd_to_sar(price)
-        orig  = _convert_usd_to_sar(orig)
 
     return {
         "store":          _domain(store_url),
@@ -690,15 +588,13 @@ async def fetch_product(
                     pprice = float(price_match.group(1).replace(",", "").replace(" ", ""))
                 except Exception:
                     pprice = 0.0
-        if pprice == 0.0:
-            pprice = extract_price_smartly(html)
 
         if not pname:
             h1_match = _RE_H1_PRODUCT.search(html)
             if h1_match:
                 pname = h1_match.group(1).strip()
 
-        if pname:
+        if pname and _url_looks_like_product_page(url):
             row = extract_product(
                 {"name": pname, "image": pimg, "url": purl, "price": pprice},
                 store_url,
@@ -706,7 +602,7 @@ async def fetch_product(
             if _has_valid_price(row):
                 return row
 
-        # Gemini (عبر ai_engine): بعد فشل الاستخراج التقليدي مع وجود HTML
+        # AI fallback: محاولة استخراج ذكي عندما تفشل كل الطرق التقليدية
         try:
             from engines.ai_engine import ai_fallback_scrape
             ai_data = ai_fallback_scrape(html, url) if html else {}
@@ -746,17 +642,17 @@ async def scrape_one_store(
     store_url: str,
     progress: Progress,
     state: ScraperState,
-    concurrency: int = 5,
+    concurrency: int = 10,
     max_products: int = 0,
     resume: bool = True,
     single_mode: bool = False,
+    output_queue: "Optional[asyncio.Queue[Any]]" = None,
 ) -> List[dict]:
+    # output_queue: when provided, each scraped row is also forwarded to the queue
+    # immediately (streaming mode). The batch list (rows) is still built for
+    # internal checkpointing and the return value — callers in streaming mode
+    # can safely ignore the return value.
     domain = _domain(store_url)
-    try:
-        _max_url_concurrency = int(os.environ.get("SCRAPER_MAX_URL_CONCURRENCY", "8") or "8")
-    except Exception:
-        _max_url_concurrency = 8
-    concurrency = max(1, min(int(concurrency or 1), max(1, _max_url_concurrency)))
     cp     = state.get(domain, store_url)
 
     # Architectural Fix: NEVER skip if max_products is explicitly requested or in single UI mode
@@ -771,9 +667,9 @@ async def scrape_one_store(
     state.save()
 
     try:
-        from engines.sitemap_resolve import resolve_product_urls
+        from scrapers.sitemap_resolve import sitemap_resolver
     except ImportError:
-        logger.error("تعذّر تحميل engines.sitemap_resolve")
+        logger.error("تعذّر تحميل sitemap_resolve")
         state.mark_error(domain, "import_error")
         return []
 
@@ -794,14 +690,8 @@ async def scrape_one_store(
 
         logger.info(f"🗺️ {domain} — يحلل Sitemap بالتخفي العميق…")
         try:
-            _disc_timeout = float(os.environ.get("SCRAPER_SITEMAP_DISCOVERY_TIMEOUT", "1800"))
             all_urls = await asyncio.wait_for(
-                resolve_product_urls(
-                    store_url,
-                    session,
-                    max_products=max_products if max_products > 0 else 0,
-                ),
-                timeout=_disc_timeout,
+                sitemap_resolver.resolve(store_url), timeout=400
             )
         except asyncio.TimeoutError:
             state.mark_error(domain, "sitemap_timeout")
@@ -822,14 +712,7 @@ async def scrape_one_store(
         
         if resume_idx > 0:
             logger.info(f"🔄 {domain} — استئناف من الرابط {resume_idx}/{total}")
-        pending_urls = []
-        for _raw_url in all_urls[resume_idx:]:
-            try:
-                _clean_url = unquote(str(_raw_url).strip())
-            except Exception:
-                _clean_url = str(_raw_url).strip()
-            if _clean_url:
-                pending_urls.append(_clean_url)
+        pending_urls = all_urls[resume_idx:]
 
         state.update(domain, urls_total=total, urls_done=resume_idx)
         progress.urls_total        += total
@@ -840,135 +723,86 @@ async def scrape_one_store(
         done_count        = resume_idx
         checkpoint_every  = max(50, min(200, total // 10 + 1))
         store_http_status = {"403": 0, "429": 0}
-        _chunk_idx        = 0         # Phase 4: flush chunk counter
-        _total_flushed    = 0         # Phase 4: total rows written to disk
-
-        try:
-            _batch_size_env = int(os.environ.get("SCRAPER_URL_BATCH_SIZE", "0") or "0")
-        except Exception:
-            _batch_size_env = 0
-        _BATCH_SIZE = _batch_size_env if _batch_size_env > 0 else max(3, min(12, concurrency))
 
         _TASK_TIMEOUT = 60.0  # Phase 2: per-URL timeout (was 45)
 
-        # ── Phase 3: Resilient Circuit Breaker with Exponential Backoff ─────
+        # ── Phase 2: Circuit Breaker state ─────────────────────────
         _consecutive_failures = 0
-        _CIRCUIT_BREAKER_LIMIT = int(os.environ.get("SCRAPER_CIRCUIT_BREAKER_LIMIT", "500"))  # رُفع من 200 → 500
+        _CIRCUIT_BREAKER_LIMIT = 20  # break after 20 consecutive failed URLs
         _circuit_broken = False
-        _backoff_level = 0          # مستوى التراجع الأسي الحالي (0-5)
-        _MAX_BACKOFF_LEVEL = 5
-        _total_rate_limit_hits = 0  # إجمالي 429/403 لهذا المتجر
 
         async def _fetch_one(url: str) -> None:
             nonlocal done_count, _consecutive_failures, _circuit_broken
-            nonlocal _backoff_level, _total_rate_limit_hits
+            try:
+                row = await asyncio.wait_for(
+                    fetch_product(
+                        session,
+                        url,
+                        store_url,
+                        semaphore,
+                        http_status_counters=store_http_status,
+                    ),
+                    timeout=_TASK_TIMEOUT,
+                )
+                if row:
+                    rows.append(row)
+                    if output_queue is not None:
+                        # Streaming mode: forward immediately to caller.
+                        # asyncio.Queue(maxsize=200) provides natural backpressure —
+                        # if the consumer is slow we slow down gracefully.
+                        await output_queue.put(row)
+                    _consecutive_failures = 0  # Phase 2: reset on success
+                else:
+                    _consecutive_failures += 1
+            except asyncio.TimeoutError:
+                logger.debug("URL timeout (%ss): %s", _TASK_TIMEOUT, url)
+                progress.fetch_exceptions += 1
+                _consecutive_failures += 1
+            except Exception:
+                progress.fetch_exceptions += 1
+                progress.last_error = traceback.format_exc()[:100]
+                _consecutive_failures += 1
+            finally:
+                done_count += 1
+                progress.urls_processed  += 1
+                progress.store_urls_done  = done_count
 
-            _retries = 0
-            _max_retries = 3  # محاولات إعادة لكل URL مع تراجع أسي
-
-            while _retries <= _max_retries:
-                try:
-                    row = await asyncio.wait_for(
-                        fetch_product(
-                            session,
-                            url,
-                            store_url,
-                            semaphore,
-                            http_status_counters=store_http_status,
-                        ),
-                        timeout=_TASK_TIMEOUT,
+                if done_count % 10 == 0 or done_count >= total:
+                    safe = progress.urls_processed
+                    progress.success_rate_pct = (
+                        (safe - progress.fetch_exceptions) / safe * 100 if safe else 0
                     )
-                    if row:
-                        rows.append(row)
-                        _consecutive_failures = 0
-                        # نجاح → خفّض مستوى التراجع تدريجياً
-                        if _backoff_level > 0:
-                            _backoff_level = max(0, _backoff_level - 1)
-                        break  # نجاح، لا حاجة لإعادة المحاولة
-                    else:
-                        # None result — ليس خطأ شبكة، لا نعيد المحاولة
-                        _consecutive_failures += 1
-                        break
+                    progress.save()
+                    _write_live_progress(domain, {
+                        "urls_done":  done_count,
+                        "urls_total": total,
+                        "rows_saved": len(rows),
+                        "pct":        min(100, int(done_count / max(total, 1) * 100)),
+                        "updated_at": datetime.now().isoformat()[:19],
+                    })
 
-                except asyncio.TimeoutError:
-                    logger.debug("URL timeout (%ss, retry %d): %s", _TASK_TIMEOUT, _retries, url)
-                    progress.fetch_exceptions += 1
-                    _retries += 1
-                    if _retries <= _max_retries:
-                        _wait = min(2 ** _retries, 16)  # 2, 4, 8, max 16 ثانية
-                        await asyncio.sleep(_wait)
-                        continue
-                    _consecutive_failures += 1
-                    break
+                if done_count % checkpoint_every == 0 and not _force_run:
+                    state.update(
+                        domain,
+                        last_url_index=done_count,
+                        urls_done=done_count,
+                    )
+                    logger.info(
+                        f"💾 {domain} — نقطة @ {done_count}/{total} | {len(rows)} منتج"
+                    )
 
-                except Exception:
-                    progress.fetch_exceptions += 1
-                    progress.last_error = traceback.format_exc()[:100]
-                    _retries += 1
-
-                    # ─── كشف خطأ Rate Limit (429/403) وتطبيق تراجع أسي ───
-                    _err_str = traceback.format_exc()[:200]
-                    _is_rate_limit = any(code in _err_str for code in ("429", "403", "503"))
-                    if _is_rate_limit:
-                        _total_rate_limit_hits += 1
-                        _backoff_level = min(_backoff_level + 1, _MAX_BACKOFF_LEVEL)
-                        _exp_wait = min(2 ** (_backoff_level + 1), 60)  # 4, 8, 16, 32, 64 → max 60s
-                        logger.warning(
-                            f"[Backoff] Rate limit on {url} — "
-                            f"level {_backoff_level}, waiting {_exp_wait}s "
-                            f"(total hits: {_total_rate_limit_hits})"
-                        )
-                        await asyncio.sleep(_exp_wait)
-                        if _retries <= _max_retries:
-                            continue
-
-                    _consecutive_failures += 1
-                    break
-
-            # ─── تحديث التقدم (في كل الحالات) ───
-            done_count += 1
-            progress.urls_processed  += 1
-            progress.store_urls_done  = done_count
-
-            if done_count % 10 == 0 or done_count >= total:
-                safe = progress.urls_processed
-                progress.success_rate_pct = (
-                    (safe - progress.fetch_exceptions) / safe * 100 if safe else 0
-                )
-                progress.save()
-                _write_live_progress(domain, {
-                    "urls_done":  done_count,
-                    "urls_total": total,
-                    "rows_saved": len(rows),
-                    "pct":        min(100, int(done_count / max(total, 1) * 100)),
-                    "updated_at": datetime.now().isoformat()[:19],
-                })
-
-            if done_count % checkpoint_every == 0 and not _force_run:
-                state.update(
-                    domain,
-                    last_url_index=done_count,
-                    urls_done=done_count,
-                )
-                logger.info(
-                    f"💾 {domain} — نقطة @ {done_count}/{total} | {len(rows)} منتج"
-                )
-
-            # Phase 3: circuit breaker — أذكى: يتجاهل فشل Rate Limit إذا كان الـ backoff يعمل
-            if _consecutive_failures >= _CIRCUIT_BREAKER_LIMIT and _backoff_level >= _MAX_BACKOFF_LEVEL:
-                _circuit_broken = True
+                # Phase 2: trip circuit breaker (checked after batch)
+                if _consecutive_failures >= _CIRCUIT_BREAKER_LIMIT:
+                    _circuit_broken = True
 
         # ── Phase 2: per-store wall-clock timeout ─────────────────
-        # متاجر كبيرة (35k+ رابط): افتراضي حتى ~12 ساعة أو SCRAPER_STORE_WALL_TIMEOUT_SEC
-        _env_wall = int(os.environ.get("SCRAPER_STORE_WALL_TIMEOUT_SEC", "0") or "0")
-        if _env_wall > 0:
-            _STORE_WALL_TIMEOUT = float(_env_wall)
-        else:
-            _STORE_WALL_TIMEOUT = max(3600.0, min(43200.0, len(pending_urls) * 4.0))
+        # Scales with store size: min 10min, ~3s/URL, max 45min
+        _STORE_WALL_TIMEOUT = max(600, min(2700, len(pending_urls) * 3))
 
         async def _run_batches():
             nonlocal _circuit_broken
-            for start in range(0, len(pending_urls), _BATCH_SIZE):
+            BATCH = 50
+            for start in range(0, len(pending_urls), BATCH):
                 if max_products > 0 and len(rows) >= max_products:
                     logger.info(f"🛑 {domain} — تم الوصول للحد الأقصى ({max_products}). جاري إيقاف السحب.")
                     rows[:] = rows[:max_products]
@@ -982,7 +816,7 @@ async def scrape_one_store(
                     )
                     break
 
-                batch = pending_urls[start: start + _BATCH_SIZE]
+                batch = pending_urls[start: start + BATCH]
                 _pre_count = len(rows)
 
                 await asyncio.gather(*[_fetch_one(u) for u in batch], return_exceptions=True)
@@ -1005,34 +839,19 @@ async def scrape_one_store(
                     except Exception as _db_exc:
                         logger.debug("SQLite real-time write error: %s", _db_exc)
 
-                # ─── Phase 4: Memory-safe flush to disk ───
-                if len(rows) >= _FLUSH_THRESHOLD:
-                    _flush_rows_to_disk(rows, domain, _chunk_idx)
-                    _total_flushed += len(rows)
-                    _chunk_idx += 1
-                    rows.clear()
-                    gc.collect()
-
                 recent_blocks = int(store_http_status.get("403", 0)) + int(store_http_status.get("429", 0))
                 recent_processed = start + len(batch)
                 block_rate = recent_blocks / max(recent_processed, 1)
 
-                # ─── Phase 3: Exponential batch-level backoff ───
-                if block_rate > 0.5:
-                    adaptive_delay = min(30.0, 5.0 * (2 ** min(_backoff_level, 3)))
-                    logger.warning(
-                        f"[Anti-Ban] حظر خطير ({block_rate:.0%}). "
-                        f"تبريد {adaptive_delay:.0f}s (backoff L{_backoff_level})"
-                    )
-                elif block_rate > 0.3:
-                    adaptive_delay = 8.0
-                    logger.warning(f"[Anti-Ban] حظر عالي ({block_rate:.0%}). تبريد {adaptive_delay}s")
+                if block_rate > 0.3:
+                    adaptive_delay = 5.0
+                    logger.warning(f"[Anti-Ban] حظر عالي ({block_rate:.2f}). تبريد {adaptive_delay} ثوانِ")
                 elif block_rate > 0.1:
-                    adaptive_delay = 3.0
+                    adaptive_delay = 2.0
                 else:
                     adaptive_delay = 0.5
 
-                if start + _BATCH_SIZE < len(pending_urls) and (max_products == 0 or len(rows) < max_products):
+                if start + BATCH < len(pending_urls) and (max_products == 0 or len(rows) < max_products):
                     await asyncio.sleep(adaptive_delay)
 
         # Phase 2: wall-clock timeout wraps entire batch loop
@@ -1050,21 +869,6 @@ async def scrape_one_store(
             await session.close()
         await asyncio.sleep(0.25)
 
-    # ─── Phase 4: Reassemble all chunks + remaining in-memory rows ───
-    if _total_flushed > 0:
-        # Flush any remaining rows still in memory
-        if rows:
-            _flush_rows_to_disk(rows, domain, _chunk_idx)
-            _total_flushed += len(rows)
-            rows.clear()
-        # Reload all chunks into final result
-        rows = _load_chunks_for_domain(domain)
-        _cleanup_chunks_for_domain(domain)
-        gc.collect()
-        logger.info(
-            f"🧩 {domain} — reassembled {len(rows)} rows from {_chunk_idx + 1} chunks"
-        )
-
     if not _force_run:
         state.mark_done(domain, len(rows))
 
@@ -1078,12 +882,95 @@ async def scrape_one_store(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Real-Time Streaming Generator (Phase 2 — Task 2.3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def scrape_one_store_streaming(
+    store_url: str,
+    concurrency: int = 10,
+    max_products: int = 0,
+) -> AsyncGenerator[dict, None]:
+    """
+    Async generator: yields each scraped product dict immediately upon discovery.
+
+    Zero duplication: wraps scrape_one_store() with an asyncio.Queue bridge
+    (maxsize=200 rows for backpressure).  The batch system is preserved —
+    scrape_one_store() still builds its internal rows[] for checkpointing;
+    this generator simply also forwards each row to the caller in real-time.
+
+    Usage:
+        async for row in scrape_one_store_streaming(url):
+            process(row)          # row arrives within seconds of being scraped
+
+    The generator completes when scrape_one_store() finishes (all URLs done,
+    circuit-breaker tripped, wall-clock timeout, or an unhandled error).
+    """
+    _SENTINEL = object()  # signals producer completion — never yielded to caller
+    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+
+    # Fresh Progress + ScraperState for this streaming session
+    domain   = _domain(store_url)
+    state    = ScraperState()
+    state.reset(domain)
+    progress = Progress(
+        running=True,
+        started_at=datetime.now().isoformat(),
+        stores_total=1,
+        current_store=domain,
+        phase="streaming",
+    )
+    progress.save()
+
+    async def _producer() -> None:
+        """Runs scrape_one_store() and always puts the sentinel when done."""
+        try:
+            await scrape_one_store(
+                store_url,
+                progress,
+                state,
+                concurrency=concurrency,
+                max_products=max_products,
+                resume=False,        # streaming = always fresh
+                single_mode=True,
+                output_queue=queue,
+            )
+        except Exception:
+            logger.error(
+                "scrape_one_store_streaming producer error for %s: %s",
+                domain, traceback.format_exc()[:200],
+            )
+        finally:
+            await queue.put(_SENTINEL)  # always signal completion
+
+    producer_task = asyncio.create_task(_producer())
+
+    try:
+        while True:
+            item = await queue.get()
+            if item is _SENTINEL:
+                break
+            yield item  # deliver row to caller immediately
+    finally:
+        # Cleanup: cancel producer if consumer exits early (e.g., max reached)
+        if not producer_task.done():
+            producer_task.cancel()
+            try:
+                await producer_task
+            except asyncio.CancelledError:
+                pass
+        progress.running     = False
+        progress.phase       = "completed"
+        progress.finished_at = datetime.now().isoformat()
+        progress.save()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  كشط متجر مفرد (تُستدعى من زر الواجهة)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_single_store(
     store_url: str,
-    concurrency: int = 5,
+    concurrency: int = 10,
     max_products: int = 0,
     force: bool = False,
 ) -> dict:
@@ -1105,19 +992,14 @@ def run_single_store(
     try:
         progress.phase = "scraping"
         progress.save()
-        # تعديل لتمكين تشغيل عدة خيوط (Threads) متوازية لكل متجر بشكل مستقل
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         rows = loop.run_until_complete(
             scrape_one_store(
                 store_url, progress, state,
                 concurrency=concurrency,
                 max_products=max_products,
-                resume=False,
+                resume=False, # Architectural Fix: Force fetch for UI requests
                 single_mode=True,
             )
         )
@@ -1135,22 +1017,19 @@ def run_single_store(
         except Exception:
             pass
 
-    _rows_count = len(rows)
     n = _merge_rows_to_csv(rows, domain)
-    del rows  # Phase 4: free large list immediately
-    gc.collect()
     progress.running      = False
     progress.phase        = "completed"
     progress.finished_at  = datetime.now().isoformat()
     progress.stores_done  = 1
-    progress.stores_results[domain] = _rows_count
+    progress.stores_results[domain] = len(rows)
     progress.rows_in_csv  = n
     progress.save()
 
     return {
         "success": True,
-        "rows":    _rows_count,
-        "message": f"✅ {_rows_count} منتج من {domain}",
+        "rows":    len(rows),
+        "message": f"✅ {len(rows)} منتج من {domain}",
         "domain":  domain,
     }
 
@@ -1172,6 +1051,14 @@ def _merge_rows_to_csv(new_rows: List[dict], domain: str) -> int:
         combined = new_df[CSV_COLS]
 
     combined.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    
+    # v26.0 — Persistent Store Sync
+    try:
+        from utils.db_manager import upsert_competitor_products
+        upsert_competitor_products(domain, new_rows, name_key="name", price_key="price")
+    except Exception as e:
+        logger.warning(f"⚠️ فشل مزامنة قاعدة البيانات لـ {domain}: {e}")
+        
     return len(combined)
 
 
@@ -1187,10 +1074,25 @@ def _count_csv_rows() -> int:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def run_scraper(
-    concurrency: int = 5,
+    concurrency: int = 10,
     max_products: int = 0,
     resume: bool = True,
+    parallel_stores: int = 1,
 ) -> None:
+    """
+    Main scraper loop.
+
+    Args:
+        concurrency:     max simultaneous URL fetches *per store*.
+        max_products:    cap per store (0 = unlimited).
+        resume:          honour checkpoints from previous runs.
+        parallel_stores: how many stores to scrape concurrently.
+                         1  = original sequential behaviour (safe default).
+                         2-4 = parallel mode; each store still uses its own
+                               per-URL Semaphore(concurrency) internally.
+                         Kept moderate (recommend ≤ 3) because each store
+                         already opens many connections.
+    """
     try:
         with open(COMPETITORS_FILE, encoding="utf-8") as f:
             stores: List[str] = json.load(f)
@@ -1201,11 +1103,11 @@ async def run_scraper(
         logger.error("لا توجد متاجر في competitors_list.json")
         return
 
-    state    = ScraperState()
-    
+    state = ScraperState()
+
     # Architectural Fix: If max_products is set, we must force a fresh scrape
     _effective_resume = resume and (max_products == 0)
-    
+
     if not _effective_resume:
         logger.info("🗑️ تم تعطيل الاستئناف لإجبار جلب البيانات الجديدة (تحديث محدود/مُجبر)")
         state.reset()
@@ -1218,33 +1120,18 @@ async def run_scraper(
     )
     progress.save()
 
-    try:
-        _store_concurrency_env = int(os.environ.get("SCRAPER_STORE_CONCURRENCY", "2") or "2")
-    except Exception:
-        _store_concurrency_env = 2
-    store_concurrency = max(1, min(_store_concurrency_env, len(stores), 4))
-
-    try:
-        _store_stagger_sec = float(os.environ.get("SCRAPER_STORE_START_STAGGER_SEC", "1.5") or "1.5")
-    except Exception:
-        _store_stagger_sec = 1.5
-
-    progress.phase = "parallel_scraping" if store_concurrency > 1 else "scraping"
-    progress.save()
-
-    store_semaphore = asyncio.Semaphore(store_concurrency)
-
-    async def _run_store_task(i: int, store_url: str):
-        domain = _domain(store_url)
-        async with store_semaphore:
-            if _store_stagger_sec > 0 and store_concurrency > 1:
-                await asyncio.sleep(((i - 1) % store_concurrency) * _store_stagger_sec)
-
+    # ── Sequential mode (original behaviour, parallel_stores == 1) ──────────
+    if parallel_stores <= 1:
+        for i, store_url in enumerate(stores, 1):
+            domain = _domain(store_url)
             logger.info(f"\n{'═'*60}\n🏪 [{i}/{len(stores)}] {domain}\n{'═'*60}")
+            progress.stores_done   = i - 1
             progress.current_store = domain
-            progress.phase = "parallel_scraping" if store_concurrency > 1 else "scraping"
+            progress.phase         = "scraping"
             progress.save()
 
+            # Store-level exception isolation — one store crashing
+            # must never kill the entire scraper run
             try:
                 rows = await scrape_one_store(
                     store_url, progress, state,
@@ -1261,31 +1148,71 @@ async def run_scraper(
                 progress.last_error = f"{domain}: {str(_store_exc)[:100]}"
                 rows = []
 
-            return domain, rows
+            progress.stores_done = i
+            progress.stores_results[domain] = len(rows)
+            progress.rows_in_csv = _merge_rows_to_csv(rows, domain)
+            progress.save()
 
-    completed_stores = 0
-    tasks = [
-        asyncio.create_task(_run_store_task(i, store_url))
-        for i, store_url in enumerate(stores, 1)
-    ]
+    # ── Parallel mode (parallel_stores > 1) ─────────────────────────────────
+    else:
+        # Semaphore limits how many stores run at the same time.
+        # Each store internally uses Semaphore(concurrency) for its URLs,
+        # so the total open connections ≈ parallel_stores × concurrency.
+        # Example: 3 stores × 8 URL slots = 24 max simultaneous connections.
+        _store_sem = asyncio.Semaphore(parallel_stores)
+        _stores_done_count = 0
 
-    for finished in asyncio.as_completed(tasks):
-        domain, rows = await finished
-        completed_stores += 1
-        progress.stores_done = completed_stores
-        progress.stores_results[domain] = len(rows)
-        progress.rows_in_csv = _merge_rows_to_csv(rows, domain)
+        async def _scrape_store_guarded(idx: int, store_url: str) -> None:
+            nonlocal _stores_done_count
+            domain = _domain(store_url)
 
-        try:
-            from utils.db_manager import upsert_competitor_products
-            upsert_competitor_products(domain, rows, name_key="name", price_key="price")
-        except Exception as e:
-            logger.warning(f"⚠️ فشل مزامنة قاعدة البيانات لـ {domain}: {e}")
+            # Stagger store launches: wait (idx * 2s) before acquiring the slot
+            # so all stores don't hammer DNS/TCP at the exact same millisecond.
+            if idx > 0:
+                await asyncio.sleep(idx * 2.0)
 
-        del rows  # Phase 4: free per-store memory between stores
-        gc.collect()
-        progress.save()
+            async with _store_sem:
+                logger.info(
+                    f"\n{'═'*60}\n"
+                    f"🏪 [{idx+1}/{len(stores)}] {domain} [parallel slot acquired]\n"
+                    f"{'═'*60}"
+                )
+                progress.current_store = domain
+                progress.phase = "scraping"
+                progress.save()
 
+                try:
+                    rows = await scrape_one_store(
+                        store_url, progress, state,
+                        concurrency=concurrency,
+                        max_products=max_products,
+                        resume=_effective_resume,
+                    )
+                except Exception as _store_exc:
+                    logger.error(
+                        f"💥 {domain} — Unhandled exception (isolated, parallel): "
+                        f"{_store_exc}\n{traceback.format_exc()[:300]}"
+                    )
+                    state.mark_error(domain, f"unhandled: {str(_store_exc)[:150]}")
+                    progress.last_error = f"{domain}: {str(_store_exc)[:100]}"
+                    rows = []
+
+                # Update shared progress — safe because asyncio is single-threaded
+                _stores_done_count += 1
+                progress.stores_done = _stores_done_count
+                progress.stores_results[domain] = len(rows)
+                progress.rows_in_csv = _merge_rows_to_csv(rows, domain)
+                progress.save()
+
+        # Launch all store tasks; return_exceptions=True prevents one failure
+        # from cancelling siblings that are still running.
+        store_tasks = [
+            _scrape_store_guarded(i, s_url)
+            for i, s_url in enumerate(stores)
+        ]
+        await asyncio.gather(*store_tasks, return_exceptions=True)
+
+    # ── Finalise ─────────────────────────────────────────────────────────────
     progress.running     = False
     progress.phase       = "completed"
     progress.finished_at = datetime.now().isoformat()
@@ -1309,12 +1236,15 @@ def main():
                         help="رابط متجر واحد (فارغ = كل المتاجر)")
     parser.add_argument("--max-products", type=int, default=0,
                         help="أقصى عدد منتجات لكل متجر (0 = بلا حد)")
-    parser.add_argument("--concurrency", type=int, default=5,
+    parser.add_argument("--concurrency", type=int, default=8,
                         help="عدد الطلبات المتزامنة")
     parser.add_argument("--no-resume", action="store_true",
                         help="إعادة الكشط من الصفر (تجاهل نقاط الاستئناف)")
     parser.add_argument("--reset-state", action="store_true",
                         help="مسح كل نقاط الاستئناف قبل البدء")
+    # New: parallel store mode (1 = original sequential, 2-3 = parallel)
+    parser.add_argument("--parallel-stores", type=int, default=1,
+                        help="عدد المتاجر المتزامنة (1=تسلسلي، 2-3=متوازي)")
     args = parser.parse_args()
 
     resume = not args.no_resume
@@ -1341,6 +1271,7 @@ def main():
                     concurrency=args.concurrency,
                     max_products=args.max_products,
                     resume=resume,
+                    parallel_stores=args.parallel_stores,
                 )
             )
     except Exception:

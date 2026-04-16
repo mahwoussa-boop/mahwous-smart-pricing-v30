@@ -589,17 +589,11 @@ def read_file(f):
         df.columns = df.columns.map(lambda x: str(x).strip().replace('\ufeff', ''))
         df = df.dropna(how='all').reset_index(drop=True)
         df = _normalize_header_typos(df)
+        # إعادة تسمية أعمدة الكشط/سلة *قبل* حذف الأعمدة المشبوهة — وإلا تُفقد الحقول الأساسية
         df = _detect_double_header(df)
         df = _smart_rename_columns(df)
         df = _drop_scraper_columns(df)
         df = _infer_column_roles(df)
-        # Phase 4: downcast large DataFrames
-        if len(df) > 500:
-            try:
-                from utils.data_helpers import optimize_dataframe_memory
-                df = optimize_dataframe_memory(df)
-            except ImportError:
-                pass
         return df, None
     except Exception as e:
         return None, str(e)
@@ -1978,6 +1972,129 @@ def _row(product, our_price, our_id, brand, size, ptype, gender,
 
 
 # ═══════════════════════════════════════════════════════
+#  مطابقة منتج واحد — مساعد للـ Real-Time Pipeline (Task 2.3)
+# ═══════════════════════════════════════════════════════
+
+def match_single_product(
+    product: str,
+    our_price: float,
+    our_id: str,
+    brand: str,
+    display_brand: str,
+    size: float,
+    ptype: str,
+    gender: str,
+    our_img: str,
+    our_url: str,
+    indices: dict,
+    use_ai: bool = False,
+) -> dict:
+    """
+    Match one of our products against pre-built CompIndex objects.
+
+    Extracted from run_full_analysis() so the real-time pipeline can call it
+    per-row without re-building the indices on every call.
+
+    Args:
+        product      : normalised product name (str)
+        our_price    : our selling price (float)
+        our_id       : our product id / SKU (str)
+        brand        : brand extracted from product name
+        display_brand: brand from row data (preferred) or extracted brand
+        size         : size in ml (float, 0 if unknown)
+        ptype        : product type string (EDP / EDT / …)
+        gender       : gender label (رجالي / نسائي / للجنسين)
+        our_img      : our product image URL
+        our_url      : our product page URL
+        indices      : dict {competitor_name: CompIndex} — pre-built
+        use_ai       : if True and score in 60-96 range, calls _ai_batch inline
+
+    Returns:
+        A result dict with the same schema as _row() / _excluded_match_row().
+        Never returns None — always returns a complete result row.
+    """
+    our_n  = normalize(product)
+    our_pl = extract_product_line(product, brand)
+
+    # Gather candidates from all competitor indices
+    all_cands: list = []
+    for idx_obj in indices.values():
+        all_cands.extend(
+            idx_obj.search(our_n, brand, size, ptype, gender,
+                           our_pline=our_pl, top_n=6)
+        )
+
+    if not all_cands:
+        return _excluded_match_row(
+            product, our_price, our_id, display_brand, size, ptype, gender,
+            our_img=our_img, our_url=our_url,
+            score=0.0,
+            مصدر_المطابقة="no_candidates",
+        )
+
+    all_cands.sort(key=lambda x: x["score"], reverse=True)
+    top5  = all_cands[:5]
+    best0 = top5[0]
+
+    if best0["score"] < 60:
+        return _excluded_match_row(
+            product, our_price, our_id, display_brand, size, ptype, gender,
+            our_img=our_img, our_url=our_url,
+            score=float(best0.get("score") or 0),
+            مصدر_المطابقة="below_match_threshold",
+        )
+
+    # High-confidence auto match — no AI needed
+    if best0["score"] >= 97 or not use_ai:
+        result = _row(
+            product, our_price, our_id, brand, size, ptype, gender,
+            best0, src="auto", all_cands=all_cands,
+            our_img=our_img, our_url=our_url,
+        )
+        return result if result is not None else _excluded_match_row(
+            product, our_price, our_id, display_brand, size, ptype, gender,
+            our_img=our_img, our_url=our_url,
+            score=float(best0.get("score") or 0),
+            مصدر_المطابقة="auto_none",
+        )
+
+    # Mid-confidence — call AI inline (single-item batch)
+    pending_item = dict(
+        product=product, our_price=our_price, our_id=our_id,
+        brand=brand, size=size, ptype=ptype, gender=gender,
+        candidates=top5, all_cands=all_cands,
+        our=product, price=our_price,
+        our_img=our_img, our_url=our_url,
+    )
+    try:
+        idxs = _ai_batch([pending_item])
+        ci   = idxs[0] if idxs else -1
+    except Exception:
+        ci = -1  # AI failed — fall back to best fuzzy
+
+    if ci < 0:
+        best_fb = top5[0]
+        result  = _row(
+            product, our_price, our_id, brand, size, ptype, gender,
+            best_fb, src="ai_uncertain", all_cands=all_cands,
+            our_img=our_img, our_url=our_url,
+        )
+    else:
+        result = _row(
+            product, our_price, our_id, brand, size, ptype, gender,
+            top5[ci], src="gemini", all_cands=all_cands,
+            our_img=our_img, our_url=our_url,
+        )
+
+    return result if result is not None else _excluded_match_row(
+        product, our_price, our_id, display_brand, size, ptype, gender,
+        our_img=our_img, our_url=our_url,
+        score=float(best0.get("score") or 0),
+        مصدر_المطابقة="ai_result_none",
+    )
+
+
+# ═══════════════════════════════════════════════════════
 #  التحليل الكامل — v21 الهجين الفائق السرعة
 # ═══════════════════════════════════════════════════════
 def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True):
@@ -2069,22 +2186,9 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True):
                               our_img=it.get("our_img", ""), our_url=it.get("our_url", ""))
                 if rr is not None:
                     results.append(rr)
-                else:
-                    # _row returned None unexpectedly — create error fallback row
-                    results.append(_excluded_match_row(
-                        it["product"], it.get("our_price", 0), it.get("our_id", ""),
-                        it.get("brand", ""), it.get("size", ""), it.get("ptype", ""), it.get("gender", ""),
-                        our_img=it.get("our_img", ""), our_url=it.get("our_url", ""),
-                        score=0.0, مصدر_المطابقة="خطأ_في_المعالجة_null_row",
-                    ))
-            except Exception as _flush_err:
-                # خطأ في منتج واحد → إنشاء صف خطأ بدلاً من الحذف الصامت
-                results.append(_excluded_match_row(
-                    it.get("product", "غير_معروف"), it.get("our_price", 0), it.get("our_id", ""),
-                    it.get("brand", ""), it.get("size", ""), it.get("ptype", ""), it.get("gender", ""),
-                    our_img=it.get("our_img", ""), our_url=it.get("our_url", ""),
-                    score=0.0, مصدر_المطابقة=f"خطأ_في_المعالجة: {str(_flush_err)[:80]}",
-                ))
+            except Exception:
+                # خطأ في منتج واحد → تخطيه وأكمل
+                continue
         pending.clear()
         # ✅ إصلاح #2: حذف time.sleep(0.5) — مخالف لقواعد Streamlit Main Thread
 
@@ -2182,15 +2286,8 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True):
             row_result = _row(product, our_price, our_id, brand, size, ptype, gender,
                               best0, src="auto", all_cands=all_cands,
                               our_img=our_img, our_url=our_url)
-            if row_result is not None:
+            if row_result is not None:   # ← فلتر None
                 results.append(row_result)
-            else:
-                results.append(_excluded_match_row(
-                    product, our_price, our_id, brand, size, ptype, gender,
-                    our_img=our_img, our_url=our_url,
-                    score=float(best0.get("score", 0)),
-                    مصدر_المطابقة="خطأ_في_المعالجة_null_auto_row",
-                ))
         else:
             pending.append(dict(
                 product=product, our_price=our_price, our_id=our_id,
@@ -2598,77 +2695,40 @@ def smart_missing_barrier(missing_df: pd.DataFrame, our_df: pd.DataFrame, thresh
     """
     محرك الحاجز الذكي: الفلتر النهائي قبل دخول المنتجات لقسم المفقودات.
     يضمن عدم تكرار عبر مطابقة الـ SKU والـ Fuzzy Matching الصارم مع كتالوجنا.
-
-    Returns:
-        kept_df — المنتجات التي تجاوزت الحاجز (نواقص حقيقية).
-        يتم تخزين المنتجات المستبعدة في kept_df.attrs["rejected_df"].
     """
-    _empty = pd.DataFrame()
-
     if missing_df.empty:
-        _empty.attrs["rejected_df"] = pd.DataFrame()
-        return _empty
+        return missing_df
 
-    filtered_df, filter_stats = apply_strict_pipeline_filters(missing_df, name_col="منتج_المنافس")
-
-    # --- المنتجات التي أسقطها فلتر الأنابيب (عينات، أسماء فارغة، أحجام صغيرة) ---
-    pipeline_rejected_idx = missing_df.index.difference(filtered_df.index)
-    pipeline_rejected_df = pd.DataFrame()
-    if len(pipeline_rejected_idx) > 0:
-        pipeline_rejected_df = missing_df.loc[pipeline_rejected_idx].copy()
-        pipeline_rejected_df["سبب_الاستبعاد"] = "فلتر_الأنابيب (عينة/اسم_فارغ/حجم_صغير)"
+    filtered_df, _ = apply_strict_pipeline_filters(missing_df, name_col="منتج_المنافس")
 
     if filtered_df.empty:
-        _empty.attrs["rejected_df"] = pipeline_rejected_df if not pipeline_rejected_df.empty else pd.DataFrame()
-        return _empty
+        return filtered_df
 
     if our_df is None or our_df.empty:
-        result = filtered_df.reset_index(drop=True)
-        result.attrs["rejected_df"] = pipeline_rejected_df if not pipeline_rejected_df.empty else pd.DataFrame()
-        return result
+        return filtered_df.reset_index(drop=True)
 
     our_names = _our_product_names_series(our_df)
     if not our_names:
-        result = filtered_df.reset_index(drop=True)
-        result.attrs["rejected_df"] = pipeline_rejected_df if not pipeline_rejected_df.empty else pd.DataFrame()
-        return result
+        return filtered_df.reset_index(drop=True)
 
     our_skus = _our_sku_set(our_df)
 
     keep_idx = []
-    barrier_rejected_rows = []
     for idx, row in filtered_df.iterrows():
         comp_sku = _norm_sku_barrier(row.get("معرف_المنافس", ""))
         raw_sku = str(row.get("معرف_المنافس", "")).strip()
         comp_name = str(row.get("منتج_المنافس", "")).strip()
 
         if comp_sku and (comp_sku in our_skus or raw_sku in our_skus):
-            rd = row.to_dict()
-            rd["سبب_الاستبعاد"] = f"SKU_موجود_في_كتالوجنا ({comp_sku})"
-            barrier_rejected_rows.append(rd)
             continue
 
         match = rf_process.extractOne(comp_name, our_names, scorer=fuzz.token_set_ratio)
         if match and match[1] >= threshold:
-            rd = row.to_dict()
-            rd["سبب_الاستبعاد"] = f"تطابق_ضبابي_≥{threshold}% مع: {match[0]} ({match[1]}%)"
-            barrier_rejected_rows.append(rd)
             continue
 
         keep_idx.append(idx)
 
-    # --- تجميع كل المستبعدين ---
-    all_rejected_parts = []
-    if not pipeline_rejected_df.empty:
-        all_rejected_parts.append(pipeline_rejected_df)
-    if barrier_rejected_rows:
-        all_rejected_parts.append(pd.DataFrame(barrier_rejected_rows))
-    rejected_df = pd.concat(all_rejected_parts, ignore_index=True) if all_rejected_parts else pd.DataFrame()
-
     if not keep_idx:
-        _empty.attrs["rejected_df"] = rejected_df
-        return _empty
+        return pd.DataFrame()
 
-    result = filtered_df.loc[keep_idx].reset_index(drop=True)
-    result.attrs["rejected_df"] = rejected_df
-    return result
+    return filtered_df.loc[keep_idx].reset_index(drop=True)
