@@ -33,7 +33,7 @@ steps:
       - 'USE_MYSQL=True,MYSQL_USER=mahwous_user,MYSQL_PASSWORD=mahwous_pass_2026,MYSQL_DB=smart_pricing_db,MYSQL_HOST=/cloudsql/mahwous-smart-pricing-v30:us-central1:smart-pricing-db,GEMINI_KEY_1=AIzaSyD3BaXoNcmjweRuRZGhfYgUxr_YHAH8bZk,GEMINI_KEY_2=AIzaSyDtJgPxv3hXruK8tfFr8mWSC7ano40uAT0,OPENROUTER_API_KEY=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,WEBHOOK_NEW_PRODUCTS=https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm,WEBHOOK_UPDATE_PRICES=https://hook.eu2.make.com/8jia6gc7s1cpkeg6catlrvwck768sbfk'
       - '--allow-unauthenticated'
       - '--memory'
-      - '2Gi'
+      - '4Gi'
       - '--cpu'
       - '2'
       - '--timeout'
