@@ -22,7 +22,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium_stealth import stealth
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -104,23 +103,7 @@ def _pick_user_agent() -> str:
 
 
 def _find_chromium_binary() -> str:
-    candidates = [
-        os.environ.get("CHROMIUM_BINARY"),
-        shutil.which("chromium"),
-        shutil.which("chromium-browser"),
-    ]
-    if os.name == "nt":
-        candidates.extend(
-            [
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe"),
-            ]
-        )
-    for candidate in candidates:
-        if candidate and os.path.exists(candidate):
-            return candidate
-    for candidate in candidates:
+    for candidate in (os.environ.get("CHROMIUM_BINARY"), shutil.which("chromium"), shutil.which("chromium-browser")):
         if candidate:
             return candidate
     return "chromium"
@@ -164,35 +147,29 @@ def _build_options(user_agent: str, proxy: str = "") -> Options:
 
 
 def _create_driver(user_agent: str, proxy: str = "") -> webdriver.Chrome:
-    driver: Optional[webdriver.Chrome] = None
+    driver_path = _resolve_driver_path()
+    options = _build_options(user_agent=user_agent, proxy=proxy)
+    if driver_path:
+        service = Service(driver_path)
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(35)
+    driver.set_script_timeout(25)
     try:
-        driver_path = _resolve_driver_path()
-        options = _build_options(user_agent=user_agent, proxy=proxy)
-        if driver_path:
-            service = Service(driver_path)
-            driver = webdriver.Chrome(service=service, options=options)
-        else:
-            driver = webdriver.Chrome(options=options)
-        stealth(driver,
-            languages=["ar-SA", "ar", "en-US", "en"],
-            vendor="Google Inc.",
-            platform="Win32",
-            webgl_vendor="Intel Inc.",
-            renderer="Intel Iris OpenGL Engine",
-            fix_hairline=True,
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    Object.defineProperty(navigator, 'platform', {get: () => 'Linux x86_64'});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['ar-SA', 'ar', 'en-US', 'en']});
+                """,
+            },
         )
-
-        driver.set_page_load_timeout(35)
-        driver.set_script_timeout(25)
-
-        return driver
     except Exception:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        raise
+        pass
+    return driver
 
 
 def _wait_for_product_signals(driver: webdriver.Chrome, timeout: int = 20) -> None:
@@ -216,11 +193,8 @@ def render_page(url: str, timeout: int = 25, proxy: str = "", user_agent: str = 
     try:
         driver = _create_driver(user_agent=ua, proxy=proxy)
         driver.get(url)
-        # Simulate human reading/clicking delay
-        # تقليل أزمنة الانتظار لتسريع الكشط (من 2.5-5.5 إلى 1.0-2.5 ثانية)
-        time.sleep(random.uniform(1.0, 2.5))
-        _wait_for_product_signals(driver, timeout=min(timeout, 10))
-        time.sleep(0.5)
+        _wait_for_product_signals(driver, timeout=min(timeout, 20))
+        time.sleep(1.2)
         try:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.45);")
             time.sleep(0.5)
@@ -240,7 +214,6 @@ def render_page(url: str, timeout: int = 25, proxy: str = "", user_agent: str = 
             elapsed_sec=time.time() - t0,
         )
     except Exception as exc:
-        logger.exception("render_page failed for url=%s", url)
         return RenderedPage(
             url=url,
             final_url=url,
@@ -262,18 +235,6 @@ def render_page(url: str, timeout: int = 25, proxy: str = "", user_agent: str = 
 def _extract_price_from_rendered_html(html: str) -> float:
     if not html:
         return 0.0
-    # Primary dynamic fallback: currency-aware regex over full page source.
-    pattern = r'(?:SAR|ر\.س|ريال)\s*([\d,]+\.?\d*)|([\d,]+\.?\d*)\s*(?:SAR|ر\.س|ريال)'
-    match = re.search(pattern, html, re.IGNORECASE)
-    if match:
-        raw_price = match.group(1) if match.group(1) else match.group(2)
-        try:
-            value = float(raw_price.replace(",", ""))
-            if 0 < value < 1_000_000:
-                return value
-        except Exception:
-            pass
-
     patterns = [
         r'"price"\s*:\s*"?([\d.,]+)"?',
         r'product:price:amount["\']?\s*content=["\']([\d.,]+)',
@@ -416,7 +377,6 @@ def scrape_many_products_v30(
             ai_price_extractor=ai_price_extractor,
         )
 
-    # رفع حد التوازي من 3 إلى 10 لزيادة السرعة مع مراعاة موارد Cloud Run (2GB RAM)
     workers = max(1, min(int(max_workers or 1), 10))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {executor.submit(_run, u): u for u in url_list}

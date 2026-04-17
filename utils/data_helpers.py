@@ -8,37 +8,6 @@ from typing import Optional
 
 import pandas as pd
 
-
-def optimize_dataframe_memory(df: pd.DataFrame, *, deep: bool = True) -> pd.DataFrame:
-    """
-    تقليل استهلاك الذاكرة لـ DataFrame بشكل محافظ وآمن.
-    - float64  -> float32
-    - int64    -> أصغر نوع int مناسب
-    - object   -> category عند انخفاض cardinality
-    """
-    if df is None or df.empty:
-        return df
-
-    out = df.copy()
-
-    for col in out.columns:
-        s = out[col]
-        try:
-            if pd.api.types.is_float_dtype(s):
-                out[col] = pd.to_numeric(s, downcast="float")
-            elif pd.api.types.is_integer_dtype(s):
-                out[col] = pd.to_numeric(s, downcast="integer")
-            elif pd.api.types.is_object_dtype(s):
-                non_null = s.dropna()
-                if not non_null.empty:
-                    ratio = float(non_null.nunique()) / float(len(non_null))
-                    if ratio <= 0.5:
-                        out[col] = s.astype("category")
-        except Exception:
-            continue
-
-    return out
-
 # أول رابط صورة http(s) — يتوقف عند الفاصلة (إنجليزي/عربي) حتى لا يُلتقط رابطان في src واحد
 _FIRST_HTTP_IMAGE_URL = re.compile(
     r"https?://[^\s<>\"\'\,\u060c؛;]+?"

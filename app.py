@@ -4703,11 +4703,15 @@ elif page == "🕷️ كشط المنافسين":
             concurrency = int(st.session_state.get("sc_concurrency", 8))
 
             log_fh = open(_LOG_FILE, "w", encoding="utf-8")
+            # Parallelism: run every registered competitor at the same time.
+            # parallel_stores=25 covers the current 18 stores + headroom for growth.
+            _parallel_stores_arg = int(st.session_state.get("sc_parallel_stores", 25))
             proc = subprocess.Popen(
                 [
                     _sys_sc.executable, _SCRAPER_SCRIPT,
-                    "--max-products", str(max_prod),
-                    "--concurrency",  str(concurrency),
+                    "--max-products",    str(max_prod),
+                    "--concurrency",     str(concurrency),
+                    "--parallel-stores", str(_parallel_stores_arg),
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=log_fh,
