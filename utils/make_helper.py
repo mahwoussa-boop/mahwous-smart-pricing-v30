@@ -1,17 +1,19 @@
 """
-utils/make_helper.py v24.0 — إرسال صحيح لـ Make.com
-══════════════════════════════════════════════════════
+utils/make_helper.py v25.0 — إرسال صحيح لـ Make.com + عمود NO
+══════════════════════════════════════════════════════════════
+v25.0 additions:
+  + حقل NO (رقم المنتج من كتالوج سلة/زد — Primary Key "No.") يُمرَّر صراحةً
+    في كل payload. Make.com يستخدمه لتحديث المنتج الصحيح بدقة مطلقة.
+  + دالة _extract_no() تقرأ "No." / "NO" / "رقم المنتج" من dict أو Series.
+  + في حال غياب product_id الصريح، نستخدم NO كبديل أساسي.
+
 سيناريو تحديث الأسعار (Integration Webhooks, Salla):
   Webhook → BasicFeeder يقرأ {{2.products}} → UpdateProduct
-  Payload المطلوب: {"products": [{"product_id":"...","name":"...","price":...}]}
+  Payload المطلوب: {"products": [{"NO":"...","product_id":"...","name":"...","price":...}]}
 
-سيناريو المنتجات الجديدة (Mahwous - إضافة منتجات جديدة لسلة):
+سيناريو المنتجات الجديدة:
   Webhook → BasicFeeder يقرأ {{1.data}} → CreateProduct
-  Payload المطلوب: {"data": [{"أسم المنتج":"...","سعر المنتج":...,"الوصف":"..."}]}
-
-⚠️ الإصلاح الحرج v24:
-   تحديث الأسعار → {"products": [{product_id, name, price, ...}]}
-   المنتجات الجديدة/المفقودة → {"data": [{أسم المنتج, سعر المنتج, ...}]}
+  Payload المطلوب: {"data": [{"NO":"...","أسم المنتج":"...","سعر المنتج":...,"الوصف":"..."}]}
 """
 
 import requests
@@ -39,20 +41,11 @@ TIMEOUT = 15  # ثانية
 
 # ── الإرسال الأساسي ────────────────────────────────────────────────────────
 def _post_to_webhook(url: str, payload: Any) -> Dict:
-    """
-    إرسال بيانات JSON إلى Webhook URL.
-    يُعيد dict: {"success": bool, "message": str, "status_code": int}
-    """
     if not url:
         return {"success": False, "message": "❌ Webhook URL غير محدد", "status_code": 0}
     try:
         headers = {"Content-Type": "application/json"}
-        resp = requests.post(
-            url,
-            json=payload,
-            headers=headers,
-            timeout=TIMEOUT
-        )
+        resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
         if resp.status_code in (200, 201, 202, 204):
             return {
                 "success": True,
@@ -74,7 +67,6 @@ def _post_to_webhook(url: str, payload: Any) -> Dict:
 
 # ── تحويل float آمن ───────────────────────────────────────────────────────
 def _safe_float(val, default: float = 0.0) -> float:
-    """تحويل آمن إلى float"""
     try:
         if val is None or str(val).strip() in ("", "nan", "None", "NaN"):
             return default
@@ -85,10 +77,7 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 # ── تنظيف product_id ──────────────────────────────────────────────────────
 def _clean_pid(raw) -> str:
-    """
-    product_id دائماً كـ str(int(float(value)))
-    مثال: 100.0 → "100" | "1081786650.0" → "1081786650"
-    """
+    """product_id دائماً كـ str(int(float(value))). مثال: '100.0' → '100'."""
     if raw is None: return ""
     s = str(raw).strip()
     if s in ("", "nan", "None", "NaN", "0", "0.0"): return ""
@@ -98,6 +87,25 @@ def _clean_pid(raw) -> str:
         return s
 
 
+# ── استخراج رقم المنتج No. من الكتالوج (Primary Key في سلة/زد) ───────────
+def _extract_no(row_or_dict) -> str:
+    """
+    يستخرج قيمة عمود "No." (رقم المنتج في كتالوجنا) من صف DataFrame أو dict.
+    هذا هو المعرّف الرسمي الذي يستخدمه Make.com لتحديث المنتج في سلة/زد.
+    يتحقق من عدة أسماء محتملة ويُنظّف القيمة نهائياً عبر _clean_pid().
+    """
+    if row_or_dict is None:
+        return ""
+    getter = row_or_dict.get if hasattr(row_or_dict, "get") else lambda k, d=None: d
+    raw = (
+        getter("No.")          or getter("NO")             or
+        getter("no")           or getter("No")             or
+        getter("رقم_المنتج")   or getter("رقم المنتج")    or
+        getter("catalog_no")   or getter("product_no")     or ""
+    )
+    return _clean_pid(raw)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  تحويل DataFrame → قائمة منتجات مع حساب السعر الصحيح لكل قسم
 # ══════════════════════════════════════════════════════════════════════════
@@ -105,7 +113,7 @@ def export_to_make_format(df, section_type: str = "update") -> List[Dict]:
     """
     تحويل DataFrame إلى قائمة منتجات جاهزة لـ Make.
     section_type: raise | lower | approved | update | missing | new
-    كل منتج يحتوي على: product_id, name, price, section, + حقول سياقية
+    كل منتج يحتوي على: NO, product_id, name, price, section, + حقول سياقية
     """
     if df is None or (hasattr(df, "empty") and df.empty):
         return []
@@ -113,10 +121,10 @@ def export_to_make_format(df, section_type: str = "update") -> List[Dict]:
     products = []
     for _, row in df.iterrows():
 
-        # ── رقم المنتج ────────────────────────────────────────────────────
-        product_id = _clean_pid(
+        # ── رقم المنتج (NO = Primary Key في سلة/زد) ───────────────────────
+        product_no = _extract_no(row)
+        product_id = product_no or _clean_pid(
             row.get("معرف_المنتج")  or row.get("product_id")     or
-            row.get("رقم المنتج")   or row.get("رقم_المنتج")    or
             row.get("معرف المنتج")  or row.get("sku")            or
             row.get("SKU")          or ""
         )
@@ -139,20 +147,16 @@ def export_to_make_format(df, section_type: str = "update") -> List[Dict]:
         )
 
         if section_type == "raise":
-            # سعرنا أعلى → نُخفّض لسعر المنافس مطروحاً ريال
             price = round(comp_price - 1, 2) if comp_price > 0 else our_price
         elif section_type == "lower":
-            # سعرنا أقل → نرفع لسعر المنافس مطروحاً ريال (نبقى أقل بريال)
             price = round(comp_price - 1, 2) if comp_price > 0 else our_price
         elif section_type in ("approved", "update"):
             price = our_price
         else:
-            # missing / new: سعر المنافس
             price = comp_price if comp_price > 0 else our_price
 
         if not name: continue
 
-        # ── حقول سياقية إضافية ───────────────────────────────────────────
         comp_name  = str(row.get("منتج_المنافس", ""))
         comp_src   = str(row.get("المنافس", ""))
         diff       = _safe_float(row.get("الفرق", 0))
@@ -161,6 +165,7 @@ def export_to_make_format(df, section_type: str = "update") -> List[Dict]:
         brand      = str(row.get("الماركة", ""))
 
         product = {
+            "NO":         product_no,          # ← Primary Key في سلة/زد
             "product_id": product_id,
             "name":       name,
             "price":      float(price),
@@ -187,12 +192,12 @@ def export_to_make_format(df, section_type: str = "update") -> List[Dict]:
 
 # ══════════════════════════════════════════════════════════════════════════
 #  إرسال منتج واحد — تحديث السعر
-#  Payload: {"products": [{"product_id":"...","name":"...","price":...}]}
+#  Payload: {"products": [{"NO":"...","product_id":"...","name":"...","price":...}]}
 # ══════════════════════════════════════════════════════════════════════════
 def send_single_product(product: Dict) -> Dict:
     """
     إرسال منتج واحد لتحديث سعره في سلة عبر Make.
-    Make يقرأ: {{2.products}} → product_id | name | price
+    Make يقرأ: {{2.products}} → NO | product_id | name | price
     Payload: {"products": [{...}]}
     """
     if not product:
@@ -200,15 +205,16 @@ def send_single_product(product: Dict) -> Dict:
 
     name       = str(product.get("name", "")).strip()
     price      = _safe_float(product.get("price", 0))
-    product_id = _clean_pid(product.get("product_id", ""))
+    product_no = _extract_no(product) or _clean_pid(product.get("NO", ""))
+    product_id = product_no or _clean_pid(product.get("product_id", ""))
 
     if not name:
         return {"success": False, "message": "❌ اسم المنتج مطلوب"}
     if price <= 0:
         return {"success": False, "message": f"❌ السعر غير صحيح: {price}"}
 
-    # ── Payload مطابق لما يقرأه Make: {{2.products}} ─────────────────────
     _prod = {
+        "NO":          product_no,                   # ← Primary Key Make
         "product_id":  product_id,
         "name":        name,
         "price":       float(price),
@@ -228,8 +234,8 @@ def send_single_product(product: Dict) -> Dict:
 
     result = _post_to_webhook(WEBHOOK_UPDATE_PRICES, payload)
     if result["success"]:
-        pid_info = f" [ID: {product_id}]" if product_id else ""
-        result["message"] = f"✅ تم تحديث «{name}»{pid_info} ← {price:,.0f} ر.س"
+        id_info = f" [NO: {product_no}]" if product_no else (f" [ID: {product_id}]" if product_id else "")
+        result["message"] = f"✅ تم تحديث «{name}»{id_info} ← {price:,.0f} ر.س"
     return result
 
 
@@ -244,12 +250,14 @@ def trigger_price_update(
     diff: float = 0.0,
     decision: str = "",
     competitor: str = "",
+    no: str = "",
 ) -> bool:
     """
     غلاف تفاعلي لإرسال تحديث سعر واحد إلى Make.com.
-    يعيد True عند نجاح HTTP — للاستخدام من أزرار الواجهة.
+    يعيد True عند نجاح HTTP. الحقل `no` هو رقم المنتج في كتالوج سلة/زد.
     """
     res = send_single_product({
+        "NO":         no or sku,
         "product_id": sku,
         "name": name,
         "price": float(target_price),
@@ -265,14 +273,12 @@ def trigger_price_update(
 
 # ══════════════════════════════════════════════════════════════════════════
 #  إرسال عدة منتجات — تحديث الأسعار
-#  Payload: {"products": [{product_id, name, price, ...}]}
-#  Make يقرأ: {{2.products}} → BasicFeeder → UpdateProduct
+#  Payload: {"products": [{NO, product_id, name, price, ...}]}
 # ══════════════════════════════════════════════════════════════════════════
 def send_price_updates(products: List[Dict]) -> Dict:
     """
     إرسال قائمة منتجات لتحديث أسعارها في سلة عبر Make.
-    Payload: {"products": [{product_id, name, price, ...}]}
-    Make يقرأ {{2.products}} ويمرر كل عنصر لـ UpdateProduct.
+    كل عنصر يحتوي على `NO` (رقم منتج سلة/زد) لضمان التحديث الدقيق.
     """
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات للإرسال"}
@@ -283,13 +289,15 @@ def send_price_updates(products: List[Dict]) -> Dict:
     for p in products:
         name       = str(p.get("name", "")).strip()
         price      = _safe_float(p.get("price", 0))
-        product_id = _clean_pid(p.get("product_id", ""))
+        product_no = _extract_no(p) or _clean_pid(p.get("NO", ""))
+        product_id = product_no or _clean_pid(p.get("product_id", ""))
 
         if not name or price <= 0:
             skipped += 1
             continue
 
         valid_products.append({
+            "NO":          product_no,                    # ← Primary Key Make
             "product_id":  product_id,
             "name":        name,
             "price":       float(price),
@@ -308,28 +316,22 @@ def send_price_updates(products: List[Dict]) -> Dict:
             "message": f"❌ لا توجد منتجات صالحة (تم تخطي {skipped} منتج)"
         }
 
-    # ── Payload مطابق لما يقرأه Make: {{2.products}} ─────────────────────
     payload = {"products": valid_products}
     result = _post_to_webhook(WEBHOOK_UPDATE_PRICES, payload)
 
     if result["success"]:
         skip_msg = f" (تم تخطي {skipped})" if skipped else ""
-        result["message"] = f"✅ تم إرسال {len(valid_products)} منتج لتحديث الأسعار{skip_msg}"
+        with_no = sum(1 for p in valid_products if p.get("NO"))
+        no_msg = f" | مع NO: {with_no}/{len(valid_products)}"
+        result["message"] = f"✅ تم إرسال {len(valid_products)} منتج لتحديث الأسعار{no_msg}{skip_msg}"
     return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  إرسال منتجات جديدة — Webhook منفصل
-#  Payload: {"data": [{"أسم المنتج":"...","سعر المنتج":...,"الوصف":"..."}]}
-#  Make يقرأ: {{1.data}} → BasicFeeder → CreateProduct
+#  Payload: {"data": [{NO, أسم المنتج, سعر المنتج, ...}]}
 # ══════════════════════════════════════════════════════════════════════════
 def send_new_products(products: List[Dict]) -> Dict:
-    """
-    إرسال منتجات جديدة لإضافتها في سلة عبر Make.
-    Payload: {"data": [{أسم المنتج, سعر المنتج, رمز المنتج sku, الوزن, ...}]}
-    Make يقرأ {{1.data}} ويمرر كل عنصر لـ CreateProduct.
-    يُرسل كل منتج في طلب مستقل.
-    """
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات للإرسال"}
 
@@ -340,14 +342,15 @@ def send_new_products(products: List[Dict]) -> Dict:
         price = _safe_float(
             p.get("price", 0) or p.get("سعر المنتج", 0) or p.get("السعر", 0)
         )
-        pid   = _clean_pid(p.get("product_id", p.get("معرف_المنتج", "")))
+        product_no = _extract_no(p) or _clean_pid(p.get("NO", ""))
+        pid = product_no or _clean_pid(p.get("product_id", p.get("معرف_المنتج", "")))
 
         if not name:
             skipped += 1
             continue
 
-        # ── بنية البيانات المطابقة لـ Interface سيناريو Make ─────────────
         item = {
+            "NO":              product_no,                # ← Primary Key Make
             "product_id":      pid,
             "أسم المنتج":      name,
             "سعر المنتج":      float(price),
@@ -357,7 +360,6 @@ def send_new_products(products: List[Dict]) -> Dict:
             "السعر المخفض":    float(_safe_float(p.get("sale_price",  p.get("السعر المخفض", 0)))),
             "الوصف":           str(p.get("الوصف", p.get("description", ""))).strip(),
         }
-        # حقل صورة اختياري
         if p.get("image_url"):
             item["صورة المنتج"] = str(p["image_url"])
 
@@ -395,14 +397,8 @@ def send_new_products(products: List[Dict]) -> Dict:
 
 # ══════════════════════════════════════════════════════════════════════════
 #  إرسال المنتجات المفقودة — نفس سيناريو المنتجات الجديدة
-#  Payload: {"data": [{"أسم المنتج":"...","سعر المنتج":...,"الوصف":"..."}]}
 # ══════════════════════════════════════════════════════════════════════════
 def send_missing_products(products: List[Dict]) -> Dict:
-    """
-    إرسال المنتجات المفقودة لإضافتها في سلة عبر Make.
-    يُستخدم نفس Webhook المنتجات الجديدة.
-    Payload: {"data": [{أسم المنتج, سعر المنتج, ...}]}
-    """
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات مفقودة للإرسال"}
 
@@ -413,14 +409,15 @@ def send_missing_products(products: List[Dict]) -> Dict:
         price = _safe_float(
             p.get("price", 0) or p.get("السعر", 0) or p.get("سعر_المنافس", 0)
         )
-        pid   = _clean_pid(p.get("product_id", p.get("معرف_المنتج", "")))
+        product_no = _extract_no(p) or _clean_pid(p.get("NO", ""))
+        pid = product_no or _clean_pid(p.get("product_id", p.get("معرف_المنتج", "")))
 
         if not name:
             skipped += 1
             continue
 
-        # ── بنية البيانات المطابقة لـ Interface سيناريو Make ─────────────
         item = {
+            "NO":              product_no,                # ← Primary Key Make
             "product_id":      pid,
             "أسم المنتج":      name,
             "سعر المنتج":      float(price),
@@ -465,23 +462,16 @@ def send_missing_products(products: List[Dict]) -> Dict:
     }
 
 
-# ══# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 #  إرسال بدفعات ذكية مع retry و progress callback
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 def send_batch_smart(products: list, batch_type: str = "update",
                      batch_size: int = 20, max_retries: int = 3,
                      progress_cb=None, confidence_filter: str = "") -> Dict:
-    """
-    إرسال بدفعات ذكية مع retry تلقائي و progress callback.
-    batch_type: "update" (تحديث أسعار) | "new" (منتجات جديدة/مفقودة)
-    confidence_filter: "green" | "yellow" | "" (كل المستويات)
-    progress_cb: callable(sent, failed, total, current_name)
-    """
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات للإرسال",
                 "sent": 0, "failed": 0, "total": 0, "errors": []}
 
-    # فلترة حسب الثقة (للمفقودات)
     if confidence_filter:
         products = [p for p in products
                     if p.get("مستوى_الثقة", "green") == confidence_filter
@@ -496,7 +486,6 @@ def send_batch_smart(products: list, batch_type: str = "update",
     fail_count = 0
     error_names = []
 
-    # تقسيم لدفعات
     for i in range(0, total, batch_size):
         batch = products[i:i + batch_size]
 
@@ -511,7 +500,7 @@ def send_batch_smart(products: list, batch_type: str = "update",
                     sent_count += len(batch)
                     break
                 elif attempt < max_retries:
-                    time.sleep(2 * attempt)  # backoff
+                    time.sleep(2 * attempt)
                     continue
                 else:
                     fail_count += len(batch)
@@ -523,7 +512,6 @@ def send_batch_smart(products: list, batch_type: str = "update",
                 else:
                     time.sleep(2 * attempt)
 
-        # progress callback
         if progress_cb:
             try:
                 progress_cb(sent_count, fail_count, total,
@@ -531,7 +519,6 @@ def send_batch_smart(products: list, batch_type: str = "update",
             except Exception:
                 pass
 
-        # تأخير بين الدفعات
         if i + batch_size < total:
             time.sleep(0.5)
 
@@ -549,21 +536,17 @@ def send_batch_smart(products: list, batch_type: str = "update",
         "sent":     sent_count,
         "failed":   fail_count,
         "total":    total,
-        "errors":   error_names[:20],  # أول 20 خطأ فقط
+        "errors":   error_names[:20],
     }
 
 
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 #  فحص حالة الاتصال بـ Webhooks
 # ══════════════════════════════════════════════════════════════════════════
 def verify_webhook_connection() -> Dict:
-    """
-    فحص حالة الاتصال بجميع Webhooks.
-    يُعيد dict: {"update_prices": {...}, "new_products": {...}, "all_connected": bool}
-    """
-    # فحص Webhook تحديث الأسعار — Payload المطابق للـ Parameters
     test_price_payload = {
         "products": [{
+            "NO":         "test-001",
             "product_id": "test-001",
             "name":       "اختبار الاتصال",
             "price":      1.0,
@@ -572,9 +555,9 @@ def verify_webhook_connection() -> Dict:
     }
     r1 = _post_to_webhook(WEBHOOK_UPDATE_PRICES, test_price_payload)
 
-    # فحص Webhook المنتجات الجديدة
     test_new_payload = {
         "data": [{
+            "NO":             "",
             "product_id":     "",
             "أسم المنتج":     "اختبار الاتصال",
             "سعر المنتج":     1.0,
