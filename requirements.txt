@@ -26,3 +26,12 @@ selenium>=4.15.0
 #  AI & APIs
 # ═══════════════════════════════════════════════════════
 google-generativeai==0.7.2
+
+# ═══════════════════════════════════════════════════════
+#  Google Cloud — Database & Storage
+# ═══════════════════════════════════════════════════════
+google-cloud-storage>=2.10.0
+google-cloud-firestore>=2.13.0
+cloud-sql-python-connector[pg8000]>=1.7.0
+SQLAlchemy>=2.0.0
+pg8000>=1.30.0

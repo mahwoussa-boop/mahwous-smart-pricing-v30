@@ -253,3 +253,21 @@ SECTIONS = [
 SIDEBAR_SECTIONS = SECTIONS
 PAGES_PER_TABLE  = 25
 DB_PATH          = get_data_db_path("perfume_pricing.db")
+
+# ══════════════════════════════════════════════
+#  Google Cloud Platform (GCP) Settings
+# ══════════════════════════════════════════════
+# Set these environment variables to enable cloud persistence.
+# The app continues with local SQLite if they are absent.
+
+GCP_PROJECT_ID            = _s("GCP_PROJECT_ID")
+GCS_BUCKET_NAME           = _s("GCS_BUCKET_NAME")
+GCS_DB_BLOB_NAME          = _s("GCS_DB_BLOB_NAME") or "vision2030/pricing_v18.db"
+CLOUD_SQL_CONNECTION_NAME = _s("CLOUD_SQL_CONNECTION_NAME")
+DB_USER                   = _s("DB_USER")
+DB_PASS                   = _s("DB_PASS")
+DB_NAME                   = _s("DB_NAME") or "vision2030"
+USE_FIRESTORE             = _s("USE_FIRESTORE", "false").lower() == "true"
+
+# Convenience flag — True when any GCP backend is active
+GCP_ENABLED = bool(GCS_BUCKET_NAME or CLOUD_SQL_CONNECTION_NAME or USE_FIRESTORE)

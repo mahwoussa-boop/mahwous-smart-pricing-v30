@@ -5250,11 +5250,41 @@ elif page == "🕷️ كشط المنافسين":
                 value=2000, step=500, key="adv_scraper_limit",
             )
 
-        if st.button("🚀 بدء كشط الأسعار", key="btn_adv_scraper_v30", type="primary", use_container_width=True):
-            _adv_prog = st.progress(0, text="جاري الكشط...")
+        if st.button("🚀 بدء كشط الأسعار (موازي – كل المنافسين)", key="btn_adv_scraper_v30", type="primary", use_container_width=True):
+            _adv_prog   = st.progress(0, text="جاري الكشط...")
+            _adv_status = st.empty()   # Live per-store counter panel
+            _adv_metric = st.empty()   # Totals row
 
-            def _adv_progress(done, total):
-                _adv_prog.progress(done / max(total, 1), text=f"🕷️ {done}/{total}")
+            def _adv_progress(snapshot):
+                """Live progress callback — called from the async scraper as
+                each product finishes. Accepts both the new dict shape and the
+                legacy (done, total) tuple for backwards compatibility."""
+                # Legacy signature fallback
+                if not isinstance(snapshot, dict):
+                    return
+                _done   = snapshot.get("total_done", 0)
+                _target = snapshot.get("total_target", 1)
+                _found  = snapshot.get("prices_found", 0)
+                _errs   = snapshot.get("errors", 0)
+                _saved  = snapshot.get("updated_in_db", 0)
+                _by     = snapshot.get("by_store", {})
+
+                _adv_prog.progress(
+                    min(_done / max(_target, 1), 1.0),
+                    text=f"🕷️ {_done}/{_target} | أسعار: {_found} | محفوظ: {_saved} | أخطاء: {_errs}",
+                )
+                # Per-store counter rows
+                try:
+                    _lines = []
+                    for _s, _v in _by.items():
+                        _pct = _v["done"] * 100 // max(_v["total"], 1)
+                        _lines.append(
+                            f"• **{_s}** — {_v['done']:,}/{_v['total']:,} ({_pct}%) · "
+                            f"أسعار: {_v['prices']:,}"
+                        )
+                    _adv_status.markdown("\n".join(_lines))
+                except Exception:
+                    pass
 
             try:
                 import asyncio as _aio
@@ -5264,10 +5294,27 @@ elif page == "🕷️ كشط المنافسين":
                     store_filter=_adv_store.strip(),
                     limit=int(_adv_limit),
                     progress_cb=_adv_progress,
+                    max_parallel_stores=25,
                 ))
                 _adv_prog.progress(1.0, text="✅ اكتمل")
+
+                # Final summary metrics
+                _m1, _m2, _m3, _m4 = _adv_metric.columns(4)
+                _m1.metric("✅ مكشوط", f"{_adv_result.get('total_scraped', 0):,}")
+                _m2.metric("💰 أسعار", f"{_adv_result.get('prices_found', 0):,}")
+                _m3.metric("💾 محفوظ", f"{_adv_result.get('updated_in_db', 0):,}")
+                _m4.metric("❌ أخطاء", f"{_adv_result.get('errors', 0):,}")
+
                 if _adv_result.get("prices_found", 0) > 0:
                     st.success(_adv_result["message"])
+                    # Auto-flow to full analysis — routes products to matching cards
+                    st.session_state["_use_auto_scraper"]       = True
+                    st.session_state["_sc_auto_analysis_pending"] = True
+                    st.session_state["_nav_pending"]            = "📊 لوحة التحكم"
+                    st.session_state["nav_flash"]               = (
+                        f"🤖 {_adv_result['prices_found']:,} منتج بسعر — جاري التحليل..."
+                    )
+                    st.rerun()
                 else:
                     st.info(_adv_result["message"])
             except Exception as _adv_err:
