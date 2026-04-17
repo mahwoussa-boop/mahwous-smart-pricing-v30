@@ -810,14 +810,14 @@ async def scrape_one_store(
                 if _consecutive_failures >= _CIRCUIT_BREAKER_LIMIT:
                     _circuit_broken = True
 
-        # ── Phase 2: per-store wall-clock timeout ─────────────────
-        # With an explicit product cap, keep a bounded wall clock. With max_products==0
-        # (full store / no ceiling), scale with URL count — no 45-minute cap that aborts
-        # 8k–20k+ product catalogs mid-run.
+        # ── Wall-clock timeout — ONLY when a product cap is set ──────────────
+        # max_products == 0 means "scrape everything" — no ceiling, no timeout.
+        # Imposing a timeout on a 50k-product store would abort it mid-run and drop
+        # tens of thousands of products. Only cap if the caller explicitly asked for N.
         if max_products > 0:
-            _STORE_WALL_TIMEOUT = max(600, min(2700, len(pending_urls) * 3))
+            _STORE_WALL_TIMEOUT: Optional[float] = max(600, min(2700, len(pending_urls) * 3))
         else:
-            _STORE_WALL_TIMEOUT = max(3600, len(pending_urls) * 4)
+            _STORE_WALL_TIMEOUT = None   # TRUE INFINITY — no wall-clock cap
 
         async def _run_batches():
             nonlocal _circuit_broken
@@ -828,7 +828,7 @@ async def scrape_one_store(
                     rows[:] = rows[:max_products]
                     break
 
-                # Phase 2: Circuit Breaker — save partial results and exit
+                # Circuit Breaker — save partial results and exit
                 if _circuit_broken:
                     logger.warning(
                         f"🔌 {domain} — Circuit Breaker: {_CIRCUIT_BREAKER_LIMIT} فشل متتالي. "
@@ -841,6 +841,7 @@ async def scrape_one_store(
 
                 await asyncio.gather(*[_fetch_one(u) for u in batch], return_exceptions=True)
 
+                # Persist every batch to SQLite immediately (GCP-safe, WAL mode)
                 _new_in_batch = rows[_pre_count:]
                 if _new_in_batch:
                     try:
@@ -874,15 +875,19 @@ async def scrape_one_store(
                 if start + BATCH < len(pending_urls) and (max_products == 0 or len(rows) < max_products):
                     await asyncio.sleep(adaptive_delay)
 
-        # Phase 2: wall-clock timeout wraps entire batch loop
-        try:
-            await asyncio.wait_for(_run_batches(), timeout=_STORE_WALL_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"⏰ {domain} — Store wall-clock timeout ({_STORE_WALL_TIMEOUT}s). "
-                f"Partial save: {len(rows)} products rescued."
-            )
-            # Partial results in `rows` are preserved — fall through to save
+        # Run batches — with timeout only when a product cap was requested
+        if _STORE_WALL_TIMEOUT is not None:
+            try:
+                await asyncio.wait_for(_run_batches(), timeout=_STORE_WALL_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"⏰ {domain} — Store wall-clock timeout ({_STORE_WALL_TIMEOUT}s). "
+                    f"Partial save: {len(rows)} products rescued."
+                )
+                # Partial results in `rows` are preserved — fall through to save
+        else:
+            # Truly infinite — runs until all URLs are done or circuit breaker trips
+            await _run_batches()
 
     finally:
         if own_session and session is not None and isinstance(session, aiohttp.ClientSession):
@@ -930,7 +935,10 @@ async def scrape_one_store_streaming(
     circuit-breaker tripped, wall-clock timeout, or an unhandled error).
     """
     _SENTINEL = object()  # signals producer completion — never yielded to caller
-    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    # Unbounded queue: backpressure comes from the Semaphore inside scrape_one_store,
+    # NOT from the queue. A maxsize=200 cap was blocking _fetch_one tasks inside
+    # asyncio.gather, serialising the scraping and destroying concurrency.
+    queue: asyncio.Queue = asyncio.Queue()
 
     # Fresh Progress + ScraperState for this streaming session
     domain   = _domain(store_url)
@@ -1179,11 +1187,20 @@ async def run_scraper(
     # ── Parallel mode (parallel_stores > 1) ─────────────────────────────────
     else:
         _stores_done_count = 0
-        _parallel_connector = aiohttp.TCPConnector(ssl=False, limit=100)
+        # High-concurrency connector: 25 stores × 20 concurrent each = 500 total.
+        # limit_per_host=50 caps per-domain to avoid WAF rate-limit triggers.
+        # The old limit=100 caused connection starvation for >5 simultaneous stores.
+        _parallel_connector = aiohttp.TCPConnector(
+            ssl=False,
+            limit=500,              # total concurrent connections
+            limit_per_host=50,      # per-domain cap (anti-ban)
+            enable_cleanup_closed=True,
+            keepalive_timeout=30,
+        )
         _parallel_session = aiohttp.ClientSession(
             connector=_parallel_connector,
             connector_owner=True,
-            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=15),
+            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
         )
 
         async def _scrape_store_guarded(idx: int, store_url: str) -> None:

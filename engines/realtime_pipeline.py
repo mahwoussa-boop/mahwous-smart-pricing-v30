@@ -1,43 +1,41 @@
 """
-engines/realtime_pipeline.py — Real-Time Scraping + Matching Pipeline v1.0
+engines/realtime_pipeline.py — Real-Time Scraping + Matching Pipeline v2.0
 ===========================================================================
-Streams competitor products as they are scraped and yields structured progress
-events so the Streamlit UI (Task 2.4) can update in near-real-time.
+CRITICAL FIXES in v2.0 (replacing broken v1.0):
 
-Architecture (Producer / Consumer):
-  ┌──────────────────────────────────────┐
-  │  scrape_one_store_streaming(url)     │  ←── one asyncio.Task per store
-  │  (async generator, yields dicts)    │
-  └──────────────┬───────────────────────┘
-                 │  put(event)
-                 ▼
-          asyncio.Queue  (shared, maxsize=500)
-                 │
-                 ▼
-     run_realtime_pipeline()  ←── async generator consumed by Streamlit
-         yields (event_type, data)
+  PILLAR 2 — Extreme Parallel Scraping
+    • ALL stores launch simultaneously via asyncio.gather — no sequential bottleneck
+    • Shared TCPConnector(limit=500, limit_per_host=50) — high concurrency, WAF-safe
+    • Staggered producer starts (0.5s × store_index) — anti-burst WAF protection
 
-Event types emitted (in chronological order):
-  "scraping_progress"  dict(store=str, count=int)
-      → a new product row was scraped from <store>
-  "scraping_done"      dict(store=str, total=int)
-      → one store finished scraping
-  "matching_start"     dict(total_rows=int, stores=list[str])
-      → all stores done; matching begins now
-  "complete"           dict(df=pd.DataFrame, audit=dict)
-      → matching finished; full results available
+  PILLAR 3 — Real-Time Analysis
+    • Per-row reverse matching in consumer — product arrives → analysed → UI updated
+      IMMEDIATELY, without waiting for all stores to finish
+    • Full engine analysis (run_full_analysis) runs in ThreadPoolExecutor — event loop
+      is NEVER blocked during the potentially minutes-long analysis phase
+    • Unbounded asyncio.Queue() — eliminates deadlock that occurred when 25 producers
+      raced to put() into a maxsize=500 queue while consumer was slow
 
-Backward-compatibility guarantee:
-  The old batch system (scrape_one_store / run_scraper) is untouched.
-  This module only imports from engines.async_scraper and engines.engine —
-  no monkey-patching.
+  PILLAR 4 — GCP Persistence
+    • Competitor products: upserted to SQLite (WAL mode) every 50 rows per store
+    • Analysis results: saved to data/results_pipeline_<timestamp>.csv
+      (the data/ directory is the GCP-mounted persistent volume)
+
+Event protocol (unchanged — backward-compatible with scraper_advanced.py bridge):
+  "scraping_progress"     {"store": str, "count": int, "row": dict}
+  "match_result"          {"row": dict}                 ← NEW: per-row live match
+  "scraping_done"         {"store": str, "total": int}
+  "matching_start"        {"total_rows": int, "stores": list[str]}
+  "complete"              {"df": pd.DataFrame, "audit": dict}
 """
-
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import os
 import traceback
+from datetime import datetime
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
@@ -45,9 +43,200 @@ import pandas as pd
 
 logger = logging.getLogger("RealtimePipeline")
 
-# Unique sentinel — signals that a producer task has finished.
-# Defined at module level so it survives import caching across calls.
+_DATA_DIR = os.environ.get("DATA_DIR", "data")
+os.makedirs(_DATA_DIR, exist_ok=True)
+
+# Unique sentinel — signals that a producer has finished.
 _STORE_DONE = object()
+
+# How many scraped rows to accumulate per store before flushing to SQLite.
+_PERSIST_BATCH_SIZE = 50
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Real-time reverse-match helpers
+#  (competitor product → our closest product, per-row, O(N) per batch)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_our_lookup(our_df: pd.DataFrame) -> list:
+    """
+    Pre-index our product catalogue for fast per-row reverse matching.
+    Called ONCE before scraping starts. Cost: O(len(our_df)).
+
+    Returns a list of dicts with normalised names so that the consumer can
+    do  fuzz.WRatio(comp_norm, entry["norm"])  for every incoming row.
+    """
+    try:
+        from engines.engine import normalize, extract_brand
+    except Exception:
+        def normalize(s: str) -> str:   # type: ignore[misc]
+            return str(s or "").lower().strip()
+        def extract_brand(s: str) -> str:   # type: ignore[misc]
+            return ""
+
+    entries = []
+    for _, row in our_df.iterrows():
+        name = str(
+            row.get("اسم المنتج") or row.get("product_name") or
+            row.get("المنتج") or row.get("name") or ""
+        ).strip()
+        if not name or len(name) < 2:
+            continue
+        try:
+            price = float(
+                str(row.get("السعر") or row.get("سعر المنتج") or
+                    row.get("price") or 0).replace(",", "").strip() or 0
+            )
+        except Exception:
+            price = 0.0
+        pid = str(
+            row.get("رقم المنتج") or row.get("معرف_المنتج") or
+            row.get("product_id") or row.get("id") or ""
+        ).strip().rstrip(".0") or ""
+        entries.append({
+            "norm":  normalize(name),
+            "name":  name,
+            "price": price,
+            "id":    pid,
+            "brand": extract_brand(name),
+        })
+    return entries
+
+
+def _reverse_match_one(
+    comp_row: dict,
+    our_entries: list,
+    threshold: float = 62.0,
+) -> Optional[dict]:
+    """
+    Reverse-match one scraped competitor product against the pre-indexed our_entries.
+    Returns a result dict (same schema as engine._row output) or None if no match
+    is found above `threshold`.
+
+    Wraps the entire body in try/except so a single bad row never kills the consumer.
+    """
+    if not our_entries:
+        return None
+    try:
+        from rapidfuzz import fuzz
+        from engines.engine import normalize
+    except ImportError:
+        return None
+
+    comp_name = str(
+        comp_row.get("name") or comp_row.get("المنتج") or
+        comp_row.get("product_name") or ""
+    ).strip()
+    if not comp_name or len(comp_name) < 2:
+        return None
+
+    try:
+        comp_norm  = normalize(comp_name)
+        comp_price = float(str(
+            comp_row.get("price") or comp_row.get("السعر") or 0
+        ).replace(",", "") or 0)
+        comp_store = str(comp_row.get("store") or comp_row.get("المتجر") or "")
+        comp_url   = str(comp_row.get("url") or comp_row.get("رابط_المنافس") or "")
+        comp_img   = str(comp_row.get("image") or "")
+    except Exception:
+        return None
+
+    best_score  = 0.0
+    best_entry  = None
+    for entry in our_entries:
+        try:
+            s = fuzz.WRatio(comp_norm, entry["norm"])
+        except Exception:
+            continue
+        if s > best_score:
+            best_score = s
+            best_entry = entry
+
+    if best_score < threshold or best_entry is None:
+        return None
+
+    our_price   = best_entry["price"]
+    diff        = round(our_price - comp_price, 2)
+    diff_pct    = abs(diff / comp_price * 100) if comp_price > 0 else 0.0
+
+    return {
+        "المنتج":           best_entry["name"],
+        "معرف_المنتج":      best_entry["id"],
+        "السعر":            our_price,
+        "منتج_المنافس":     comp_name,
+        "سعر_المنافس":      comp_price,
+        "الفرق":            diff,
+        "نسبة_التطابق":     round(best_score, 1),
+        "المنافس":          comp_store,
+        "رابط_المنافس":     comp_url,
+        "صورة_المنافس":     comp_img,
+        "القرار": (
+            "🔴 سعر أعلى" if diff > 5
+            else ("🟢 سعر أقل" if diff < -5 else "✅ موافق")
+        ),
+        "الخطورة": (
+            "🔴 حرج"    if diff_pct > 20
+            else ("🟡 متوسط" if diff_pct > 10 else "🟢 منخفض")
+        ),
+        "تاريخ_المطابقة":   datetime.now().strftime("%Y-%m-%d"),
+        "مصدر_المطابقة":    "realtime_fuzzy",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  GCP Persistence helpers (data/ = mounted Cloud Storage / persistent disk)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _persist_comp_batch(domain: str, rows: List[dict]) -> None:
+    """
+    Upsert a batch of scraped competitor products to SQLite (WAL mode, thread-safe).
+    Called every _PERSIST_BATCH_SIZE rows so data is never only in memory.
+    """
+    try:
+        from utils.db_manager import upsert_competitor_products
+        db_rows = [
+            {
+                "المنتج":      r.get("name") or r.get("المنتج") or "",
+                "السعر":       r.get("price") or r.get("السعر") or 0,
+                "image_url":   r.get("image") or "",
+                "product_url": r.get("url")   or "",
+                "brand":       r.get("brand") or "",
+                "size":        "",
+                "gender":      "للجنسين",
+            }
+            for r in rows
+            if (r.get("name") or r.get("المنتج"))
+        ]
+        if db_rows:
+            upsert_competitor_products(
+                domain, db_rows, name_key="المنتج", price_key="السعر"
+            )
+    except Exception as exc:
+        logger.debug("_persist_comp_batch error for %s: %s", domain, exc)
+
+
+def _persist_results_csv(df: pd.DataFrame, label: str = "pipeline") -> None:
+    """
+    Save analysis results DataFrame to data/<label>_<timestamp>.csv.
+    The data/ directory is mapped to a GCP persistent volume — this survives container restarts.
+    """
+    if df is None or df.empty:
+        return
+    try:
+        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(_DATA_DIR, f"results_{label}_{ts}.csv")
+        safe = df.copy()
+        # Serialise any list/dict columns that would break to_csv
+        for col in safe.columns:
+            try:
+                if safe[col].apply(lambda x: isinstance(x, (list, dict))).any():
+                    safe[col] = safe[col].astype(str)
+            except Exception:
+                pass
+        safe.to_csv(path, index=False, encoding="utf-8-sig")
+        logger.info("Pipeline: results saved → %s  (%d rows)", path, len(df))
+    except Exception as exc:
+        logger.warning("_persist_results_csv error: %s", exc)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -64,45 +253,11 @@ async def run_realtime_pipeline(
     parallel_stores: int = 5,
 ) -> AsyncGenerator[Tuple[str, Any], None]:
     """
-    Async generator that drives the full scrape-then-match pipeline and
-    yields structured progress events for the Streamlit UI.
+    Async generator that drives the full scrape-then-match pipeline and yields
+    structured progress events for the Streamlit UI.
 
-    Args:
-        our_df                : our product catalogue (DataFrame)
-        store_urls            : list of competitor store root URLs
-        concurrency           : max parallel URL fetches *per store*
-        max_products_per_store: cap per store; 0 means no cap (process until each
-            store stream ends). The consumer has no row batch limit — it runs until
-            every producer sends its finished sentinel (payload is None).
-        use_ai                : pass to run_full_analysis(); False = fast fuzzy only
-        result_callback       : optional sync callable(event_type, data) on each event
-                                (same tuples as yielded); must be thread-safe if used
-                                from mixed contexts.
-        parallel_stores       : exposed for UI/settings parity; all stores are always
-                                scheduled in the same event-loop tick (no semaphore
-                                that caps concurrent stores at 1). Per-URL concurrency
-                                remains `concurrency` inside each store task.
-
-    Yields:
-        ("scraping_progress", {"store": str, "count": int, "row": dict})
-        ("scraping_done",     {"store": str, "total": int})
-        ("matching_start",    {"total_rows": int, "stores": list})
-        ("complete",          {"df": pd.DataFrame, "audit": dict})
-
-    Example (Streamlit Task 2.4):
-        async for event_type, data in run_realtime_pipeline(our_df, urls):
-            if event_type == "scraping_progress":
-                st.session_state.live_count[data["store"]] = data["count"]
-                st.rerun()
-            elif event_type == "complete":
-                st.session_state.results_df = data["df"]
-                st.rerun()
-
-    Fallback behaviour:
-        Any per-store scraping error is caught and logged; that store
-        contributes 0 rows but does not abort the pipeline.
-        If no competitor data is scraped at all, ("complete", {"df": empty})
-        is still yielded so callers do not hang.
+    v2.0: ALL stores scrape simultaneously, per-row real-time analysis in consumer,
+    full analysis non-blocking in executor, immediate GCP persistence.
     """
     # ── Guard: reject obviously bad inputs early ──────────────────────────────
     if our_df is None or our_df.empty:
@@ -111,37 +266,55 @@ async def run_realtime_pipeline(
         return
 
     if not store_urls:
-        logger.warning("run_realtime_pipeline: no store URLs provided — aborting")
+        logger.warning("run_realtime_pipeline: no store URLs — aborting")
         yield ("complete", {"df": pd.DataFrame(), "audit": {"error": "no_store_urls"}})
         return
 
-    # Lazy import — avoids circular imports at module load time
     from engines.async_scraper import scrape_one_store_streaming, _domain
 
-    _ = max(1, int(parallel_stores))  # validated for callers / logging; no store cap
+    # ── Pre-index our products for per-row real-time matching ────────────────
+    # Built ONCE here (O(len(our_df))) then accessed read-only by consumer.
+    our_entries = _build_our_lookup(our_df)
+    logger.info(
+        "Pipeline: pre-indexed %d products for real-time matching", len(our_entries)
+    )
 
-    # ── Phase 1: Producer / raw-queue / Consumer ─────────────────────────────
-    # Producers: one asyncio.Task per store, all scheduled together (no store-level
-    # semaphore).  raw_queue merges interleaved rows; consumer forwards events.
+    # ── High-concurrency shared session (all stores share one connector) ─────
+    # 25 stores × 20 concurrent each = 500 total connections.
+    # limit_per_host=50 caps per-domain to avoid WAF burst detection.
+    connector = aiohttp.TCPConnector(
+        ssl=False,
+        limit=500,
+        limit_per_host=50,
+        enable_cleanup_closed=True,
+        keepalive_timeout=30,
+    )
+    shared_session = aiohttp.ClientSession(
+        connector=connector,
+        connector_owner=True,
+        timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
+    )
 
-    raw_queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue(maxsize=500)
-    event_queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue(maxsize=500)
+    # ── UNBOUNDED queues (CRITICAL FIX) ──────────────────────────────────────
+    # The old maxsize=500 caused a classic producer-consumer deadlock:
+    #   25 producers × 50-batch asyncio.gather → 1250 tasks racing to put()
+    #   into a 500-slot queue → queue full → all _fetch_one tasks blocked →
+    #   consumer task starved → no items consumed → permanent deadlock.
+    # Backpressure comes from the per-store Semaphore, NOT from the queue.
+    raw_queue:   asyncio.Queue[Tuple[str, Any]] = asyncio.Queue()
+    event_queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue()
 
-    store_rows: Dict[str, List[dict]] = {_domain(u): [] for u in store_urls}
+    store_rows:      Dict[str, List[dict]] = {_domain(u): [] for u in store_urls}
+    realtime_results: List[dict]           = []   # accumulates per-row RT matches
 
-    shared_session: Optional[aiohttp.ClientSession] = None
-    shared_connector: Optional[aiohttp.TCPConnector] = None
-    if len(store_urls) > 1:
-        shared_connector = aiohttp.TCPConnector(ssl=False, limit=100)
-        shared_session = aiohttp.ClientSession(
-            connector=shared_connector,
-            connector_owner=True,
-            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=15),
-        )
-
-    async def _producer(url: str) -> None:
-        """Scrape one store; push (domain, row) or (domain, None) when finished."""
+    # ── Producers: ALL stores start AT THE SAME TIME ─────────────────────────
+    # Staggered by 0.5s × index to avoid a simultaneous DNS/TCP burst that
+    # triggers WAF rate-limiting at the network layer.
+    async def _producer(url: str, stagger_secs: float = 0.0) -> None:
+        """Scrape one store; put each row into raw_queue the instant it's scraped."""
         domain = _domain(url)
+        if stagger_secs > 0:
+            await asyncio.sleep(stagger_secs)
         try:
             async for row in scrape_one_store_streaming(
                 url,
@@ -156,56 +329,94 @@ async def run_realtime_pipeline(
                 domain, traceback.format_exc()[:300],
             )
         finally:
+            # Sentinel ALWAYS sent — consumer must never hang waiting for a crashed producer
             await raw_queue.put((domain, None))
 
+    # ── Consumer: pull rows → match in real-time → persist → emit events ─────
     async def _consumer() -> None:
-        """Drain raw_queue; isolate per-row failures; emit UI / callback events."""
-        finished_stores = 0
-        total = len(store_urls)
-        while finished_stores < total:
-            domain, payload = await raw_queue.get()
-            if payload is None:
-                finished_stores += 1
-                try:
-                    await event_queue.put(
-                        (
-                            "scraping_done",
-                            {"store": domain, "total": len(store_rows[domain])},
-                        )
-                    )
-                except Exception:
-                    logger.error(
-                        "Pipeline consumer (scraping_done): %s",
-                        traceback.format_exc()[:200],
-                    )
-                continue
+        finished = 0
+        total    = len(store_urls)
+
+        while finished < total:
             try:
-                if not isinstance(payload, dict):
-                    continue
-                store_rows[domain].append(payload)
-                await event_queue.put(
-                    (
-                        "scraping_progress",
-                        {
-                            "store": domain,
-                            "count": len(store_rows[domain]),
-                            "row": dict(payload),
-                        },
-                    )
+                # 10-minute timeout: if no row arrives for 10 min, something is badly wrong
+                domain, payload = await asyncio.wait_for(
+                    raw_queue.get(), timeout=600.0
                 )
-            except Exception:
+            except asyncio.TimeoutError:
                 logger.error(
-                    "Pipeline consumer skipped bad row for %s: %s",
-                    domain,
-                    traceback.format_exc()[:300],
+                    "Pipeline consumer: 10-min wait on raw_queue — "
+                    "%d/%d stores still pending. Aborting consumer.",
+                    total - finished, total,
+                )
+                break
+
+            # ── Store finished (sentinel) ─────────────────────────────────
+            if payload is None:
+                finished += 1
+                store_total = len(store_rows[domain])
+
+                # Flush tail of batch to SQLite
+                _tail = store_total % _PERSIST_BATCH_SIZE
+                if _tail and store_rows[domain]:
+                    _persist_comp_batch(domain, store_rows[domain][-_tail:])
+
+                logger.info(
+                    "Pipeline: store done — %s  %d rows  (%d/%d)",
+                    domain, store_total, finished, total,
+                )
+                try:
+                    await event_queue.put((
+                        "scraping_done",
+                        {"store": domain, "total": store_total},
+                    ))
+                except Exception:
+                    pass
+                continue
+
+            # ── New product row ───────────────────────────────────────────
+            if not isinstance(payload, dict):
+                continue
+
+            store_rows[domain].append(payload)
+            count = len(store_rows[domain])
+
+            # Batch-persist to SQLite (GCP persistent volume)
+            if count % _PERSIST_BATCH_SIZE == 0:
+                _persist_comp_batch(
+                    domain, store_rows[domain][-_PERSIST_BATCH_SIZE:]
                 )
 
+            # ── Per-row real-time reverse match (THE FIX: analysis on-the-fly) ──
+            # Wrap in try/except so a single bad product never kills the consumer.
+            try:
+                rt_result = _reverse_match_one(payload, our_entries)
+                if rt_result is not None:
+                    realtime_results.append(rt_result)
+                    await event_queue.put(("match_result", {"row": rt_result}))
+            except Exception as _me:
+                logger.debug("Consumer: per-row match error: %s", _me)
+
+            # Progress event for UI counter
+            try:
+                await event_queue.put((
+                    "scraping_progress",
+                    {"store": domain, "count": count, "row": dict(payload)},
+                ))
+            except Exception:
+                pass
+
+    # ── Launch everything ────────────────────────────────────────────────────
+    # asyncio.gather is NOT used here for producers — we want each producer
+    # to run as its own independent Task so one slow store cannot starve others.
+    producer_tasks = [
+        asyncio.create_task(_producer(url, stagger_secs=i * 0.5))
+        for i, url in enumerate(store_urls)
+    ]
     consumer_task = asyncio.create_task(_consumer())
-    # All store producers start in the same tick — asyncio.gather only after shutdown.
-    producer_tasks = [asyncio.create_task(_producer(url)) for url in store_urls]
 
     stores_finished = 0
-    total_stores = len(store_urls)
+    total_stores    = len(store_urls)
 
     try:
         while stores_finished < total_stores:
@@ -214,19 +425,16 @@ async def run_realtime_pipeline(
                 try:
                     result_callback(event_type, data)
                 except Exception:
-                    logger.error(
+                    logger.debug(
                         "result_callback error: %s",
-                        traceback.format_exc()[:200],
+                        traceback.format_exc()[:150],
                     )
             yield (event_type, data)
             if event_type == "scraping_done":
                 stores_finished += 1
                 logger.info(
-                    "Pipeline: %s finished — %d rows  (%d/%d stores done)",
-                    data["store"],
-                    data["total"],
-                    stores_finished,
-                    total_stores,
+                    "Pipeline: %s done — %d rows  (%d/%d stores)",
+                    data["store"], data["total"], stores_finished, total_stores,
                 )
     finally:
         for t in producer_tasks:
@@ -235,60 +443,93 @@ async def run_realtime_pipeline(
         if not consumer_task.done():
             consumer_task.cancel()
         await asyncio.gather(*producer_tasks, consumer_task, return_exceptions=True)
-        if shared_session is not None and not shared_session.closed:
+        if not shared_session.closed:
             await shared_session.close()
 
-    # ── Phase 2: Build competitor DataFrames from accumulated rows ────────────
+    # ── Phase 2: Build competitor DataFrames from accumulated rows ───────────
     comp_dfs: Dict[str, pd.DataFrame] = {}
-    total_rows = 0
+    total_rows       = 0
     finished_stores: List[str] = []
 
     for domain, rows in store_rows.items():
         if rows:
             comp_dfs[domain] = pd.DataFrame(rows)
-            total_rows       += len(rows)
+            total_rows      += len(rows)
             finished_stores.append(domain)
-            logger.info("Pipeline: built comp_df for %s (%d rows)", domain, len(rows))
+            logger.info(
+                "Pipeline: built comp_df for %s  (%d rows)", domain, len(rows)
+            )
 
     if not comp_dfs:
-        logger.warning(
-            "run_realtime_pipeline: no competitor data scraped from any store"
-        )
-        yield (
-            "complete",
-            {"df": pd.DataFrame(), "audit": {"error": "no_competitor_data", "total_input": 0}},
-        )
+        logger.warning("Pipeline: no competitor data scraped from any store")
+        # Fall back to real-time results if we got any
+        if realtime_results:
+            yield ("complete", {
+                "df":    pd.DataFrame(realtime_results),
+                "audit": {"error": "no_competitor_data_full", "fallback": "realtime_fuzzy",
+                          "total_input": len(realtime_results)},
+            })
+        else:
+            yield ("complete", {
+                "df":    pd.DataFrame(),
+                "audit": {"error": "no_competitor_data", "total_input": 0},
+            })
         return
 
     yield ("matching_start", {"total_rows": total_rows, "stores": finished_stores})
-    logger.info("Pipeline: starting matching — %d competitor rows", total_rows)
+    logger.info("Pipeline: starting full analysis — %d competitor rows", total_rows)
 
-    # ── Phase 3: Match against our catalogue (reuses existing engine) ─────────
+    # ── Phase 3: Full engine analysis — NON-BLOCKING via ThreadPoolExecutor ──
+    # run_full_analysis is a CPU-bound sync function that can take minutes for large
+    # datasets. Running it directly in the async generator would BLOCK the entire
+    # event loop, killing all aiohttp connections and the Streamlit WebSocket.
+    loop = asyncio.get_running_loop()
     try:
         from engines.engine import run_full_analysis
-        results_df, audit = run_full_analysis(
-            our_df,
-            comp_dfs,
-            progress_callback=None,  # no per-row callback in pipeline mode
-            use_ai=use_ai,
+
+        results_df, audit = await loop.run_in_executor(
+            None,
+            functools.partial(
+                run_full_analysis,
+                our_df,
+                comp_dfs,
+                None,    # progress_callback
+                use_ai,  # use_ai
+            ),
         )
         logger.info(
-            "Pipeline: matching complete — %d result rows  (audit: %s)",
+            "Pipeline: full analysis complete — %d result rows  (audit=%s)",
             len(results_df), audit,
         )
     except Exception:
-        logger.error(
-            "run_realtime_pipeline matching failed: %s",
-            traceback.format_exc()[:400],
+        tb = traceback.format_exc()
+        logger.error("Pipeline: full analysis failed: %s", tb[:400])
+        # Fall back to real-time fuzzy results collected during scraping
+        results_df = pd.DataFrame(realtime_results) if realtime_results else pd.DataFrame()
+        audit = {
+            "error":    "matching_failed",
+            "traceback": tb[:200],
+            "fallback": "realtime_fuzzy",
+            "rt_rows":  len(realtime_results),
+        }
+
+    # ── Phase 4: Persist results to GCP data/ volume ─────────────────────────
+    # Fire-and-forget: run in executor so we don't delay emitting "complete".
+    try:
+        asyncio.ensure_future(
+            loop.run_in_executor(
+                None,
+                functools.partial(_persist_results_csv, results_df, "pipeline"),
+            )
         )
-        results_df = pd.DataFrame()
-        audit      = {"error": "matching_failed", "traceback": traceback.format_exc()[:200]}
+    except Exception as _pe:
+        logger.debug("Async persist scheduling error: %s", _pe)
 
     yield ("complete", {"df": results_df, "audit": audit})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Sync convenience wrapper (for non-async callers / testing)
+#  Sync convenience wrapper (for non-async callers / testing / Streamlit threads)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_realtime_pipeline_sync(
@@ -303,17 +544,12 @@ def run_realtime_pipeline_sync(
 ) -> pd.DataFrame:
     """
     Synchronous wrapper around run_realtime_pipeline().
-
-    Runs a fresh event loop (safe from Streamlit threads or CLI scripts).
+    Runs a fresh event loop (safe from Streamlit daemon threads or CLI scripts).
     Returns the final results DataFrame.
 
     Args:
-        on_event: optional legacy alias for result_callback (if both given,
-                  result_callback wins).
-        result_callback: optional callable(event_type: str, data: Any) per event.
-
-    Returns:
-        pd.DataFrame with match results (empty if scraping failed).
+        on_event:        legacy alias for result_callback.
+        result_callback: optional callable(event_type, data) fired on every event.
     """
     _cb = result_callback if result_callback is not None else on_event
 

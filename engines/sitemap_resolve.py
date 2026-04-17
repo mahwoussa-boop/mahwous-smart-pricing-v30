@@ -142,12 +142,14 @@ _ZID_DOMAINS = re.compile(
 )
 
 _EXCLUDE_URL_RE = re.compile(
-    r"(/blog/|/page/|/category/|/categories/|/tag/|/cart|/checkout"
-    r"|/account|/contact|/about|/faq|/privacy|/terms"
-    r"|/(?:ar|en)/(?:blog|cart|category|categories|page|tag|account"
-    r"|collections?|pages)(?:/|$)"
-    r"|/cdn\.|\\.js$|\\.css$|\\.png$|\\.jpg$|\\.webp$|\\.svg$"
-    r"|/feed/|/rss|/amp/)",
+    r"(/blog/|/category/|/categories/|/tag/"
+    r"|/cart(?:/|$)|/checkout(?:/|$)"
+    r"|/account(?:/|$)|/contact(?:/|$)|/about(?:/|$)"
+    r"|/faq(?:/|$)|/privacy(?:/|$)|/terms(?:/|$)"
+    r"|/(?:ar|en)/(?:blog|cart|category|categories|tag|account"
+    r"|collections?|pages?)(?:/|$)"
+    r"|/cdn\."
+    r"|/feed(?:/|$)|/rss(?:/|$)|/amp/)",
     re.I,
 )
 
@@ -235,9 +237,10 @@ def _parse_sitemap_xml(xml_text: str) -> Tuple[List[SitemapEntry], List[str]]:
             if loc is not None and loc.text:
                 sub_sitemaps.append(loc.text.strip())
         if not sub_sitemaps:
+            # Fallback: accept ANY <loc> inside sitemapindex (not just .xml paths)
             for el in root.iter():
                 tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-                if tag == "loc" and el.text and _loc_xml_path_endswith_xml(el.text.strip()):
+                if tag == "loc" and el.text and el.text.strip().startswith("http"):
                     sub_sitemaps.append(el.text.strip())
         return entries, sub_sitemaps
 
@@ -299,22 +302,29 @@ async def resolve_sitemap_recursively(
                 if not loc.text:
                     continue
                 cu = loc.text.strip()
-                if cu.startswith("http") and _loc_xml_path_endswith_xml(cu):
+                # BLACKLIST FIX: accept ALL <loc> entries from a sitemapindex —
+                # NOT just those ending in .xml. Many platforms (Salla, Zid, WooCommerce)
+                # serve sitemaps at URLs like /sitemap/products or /sitemap?type=products.
+                # The old `.xml`-only filter was silently dropping these entire sub-sitemaps.
+                if cu.startswith("http"):
                     child_urls.append(cu)
             if not child_urls:
                 logger.warning(
-                    "[Sitemap] sitemapindex has no <loc> child .xml URLs: %s",
+                    "[Sitemap] sitemapindex has no <loc> child URLs: %s",
                     sitemap_url,
                 )
-            tasks = [
-                resolve_sitemap_recursively(
-                    session,
-                    cu,
-                    max_depth,
-                    current_depth + 1,
-                )
-                for cu in child_urls
-            ]
+
+            # Semaphore-controlled concurrency — prevents spawning 200+ tasks at once
+            # for large sitemapindex files, which overloads aiohttp and triggers WAF.
+            _sem = asyncio.Semaphore(_SITEMAP_CONCURRENCY)
+
+            async def _fetch_child(cu: str) -> Dict[str, str]:
+                async with _sem:
+                    return await resolve_sitemap_recursively(
+                        session, cu, max_depth, current_depth + 1
+                    )
+
+            tasks = [asyncio.create_task(_fetch_child(cu)) for cu in child_urls]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for cu, res in zip(child_urls, results):
                 if isinstance(res, BaseException):
@@ -327,7 +337,7 @@ async def resolve_sitemap_recursively(
                 if not res:
                     logger.warning(
                         "[Sitemap] Child sitemap returned 0 URLs (fetch empty, parse error, "
-                        "or strict filter): %s",
+                        "or all filtered): %s",
                         cu,
                     )
                     continue
