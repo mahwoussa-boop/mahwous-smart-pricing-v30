@@ -52,6 +52,7 @@ SECTIONS = [
     "⚡ أتمتة Make",
     "🔄 الأتمتة الذكية",
     "🕷️ كشط المنافسين",
+    "🗑️ سلة المحذوفات",
     "⚙️ الإعدادات",
 ]
 from styles import (get_styles, vs_card, comp_strip, miss_card,
@@ -120,7 +121,15 @@ from utils.db_manager import (init_db, log_event, log_decision,
                                get_processed_keys, migrate_db_v26,
                                upsert_competitor_products, get_competitor_products_df,
                                get_competitor_store_stats, init_competitor_store,
-                               get_processed_hydration_sets, bulk_revert_processed)
+                               get_processed_hydration_sets, bulk_revert_processed,
+                               # Task 3.3 — Soft Delete
+                               soft_delete_product, get_soft_deleted_product_keys,
+                               restore_soft_deleted_product, ensure_is_deleted_column,
+                               apply_soft_deletes_to_df,
+                               # Task 3.5 — Inline Edit
+                               update_product_data, get_product_overrides, delete_product_override,
+                               # Task 3.6 — Force Link
+                               force_link_product, get_force_links, delete_force_link)
 
 # ── استيراد صفحات الدمج (مع try/except لضمان عدم توقف التطبيق) ────────────
 try:
@@ -1178,6 +1187,22 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
                 else "لا توجد منتجات")
         return
 
+    # ── Task 3.3: Soft-Delete filter — hide rows that were soft-deleted ───────
+    # Loads the stable-key set once per render; O(1) per-row check via set lookup.
+    # Stable key format: "softdel_{product_name}" — survives page/filter changes.
+    _sd_keys = get_soft_deleted_product_keys()
+    if _sd_keys and "المنتج" in df.columns:
+        _before_sd = len(df)
+        df = df[~df["المنتج"].apply(
+            lambda _n: f"softdel_{_n}" in _sd_keys
+        )].reset_index(drop=True)
+        _sd_hidden = _before_sd - len(df)
+        if _sd_hidden:
+            st.caption(f"🗑️ {_sd_hidden} منتج محذوف (ناعم) — مخفي عن هذا القسم")
+    if df.empty:
+        st.info("لا توجد منتجات (تم حذف الكل ناعمياً — يمكن الاسترجاع من الأرشيف)")
+        return
+
     # ── فلاتر ─────────────────────────────────
     opts = get_filter_options(df)
     if inline_filters:
@@ -1412,16 +1437,37 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
         )
         _ba1, _ba2, _ba3, _ba4 = st.columns(4)
         with _ba1:
-            # Stub — will be wired in Phase 4 (soft-delete)
+            # Task 3.3 — Soft Delete: persists in DB; hidden immediately; restorable
             if st.button(
                 f"🗑️ حذف المحدد ({_n_sel})",
                 key=f"{prefix}_bulk_del",
                 use_container_width=True,
             ):
-                st.toast(
-                    f"⚠️ حذف {_n_sel} منتج — الميزة قيد التطوير (المرحلة 3.3)",
-                    icon="🗑️",
-                )
+                _del_count = 0
+                for _si in _sel_indices:
+                    if _si not in page_df.index:
+                        continue
+                    _del_row  = page_df.loc[_si]
+                    _del_name = str(_del_row.get("المنتج", "") or "")
+                    if not _del_name or _del_name in ("—", "nan", "None"):
+                        continue
+                    # Persist soft-delete with stable key (not idx-based)
+                    _sd_key = f"softdel_{_del_name}"
+                    soft_delete_product(_sd_key, _del_name)
+                    # Also mark in session_state hidden_products for immediate hiding
+                    # using both the stable key and the legacy idx-based key
+                    st.session_state.hidden_products.add(_sd_key)
+                    st.session_state.hidden_products.add(f"{prefix}_{_del_name}_{_si}")
+                    # Clear checkbox state
+                    st.session_state[f"sel_{prefix}_{_si}"] = False
+                    _del_count += 1
+                if _del_count:
+                    st.success(
+                        f"🗑️ تم حذف {_del_count} منتج ناعمياً — "
+                        f"يمكن الاسترجاع من الأرشيف (Task 3.4)",
+                        icon="✅",
+                    )
+                    st.rerun()
         with _ba2:
             # Stub — export selected rows as CSV download
             if st.button(
@@ -1880,6 +1926,78 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
                     with st.spinner("🔍 يتم التحليل الآن..."):
                         an_res = analyze_product_inline(row, _section_map_an.get(prefix, prefix))
                         render_analysis_result(an_res)
+
+        # ── Task 3.5 & 3.6 — Inline Edit + Force Link ────────────────────────
+        _edit_col, _link_col, _spacer35 = st.columns([1.5, 1.5, 7])
+
+        with _edit_col:
+            try:
+                _pop_edit = st.popover("✏️ تعديل", use_container_width=True)
+            except Exception:
+                _pop_edit = st.expander("✏️ تعديل")
+            with _pop_edit:
+                st.markdown(f"**تعديل:** {our_name}")
+                _ov_key35 = f"edit_{our_name}"
+                _edit_name35 = st.text_input(
+                    "الاسم الجديد",
+                    value=our_name,
+                    key=f"edit_name_{prefix}_{idx}",
+                    placeholder="اتركه فارغاً للإبقاء على الأصلي",
+                )
+                _edit_price35 = st.number_input(
+                    "السعر الجديد (ر.س)",
+                    value=float(our_price or 0),
+                    min_value=0.0,
+                    step=1.0,
+                    key=f"edit_price_{prefix}_{idx}",
+                )
+                _edit_url35 = st.text_input(
+                    "الرابط الجديد",
+                    value="",
+                    key=f"edit_url_{prefix}_{idx}",
+                    placeholder="https://...",
+                )
+                if st.button("💾 حفظ", key=f"save_edit_{prefix}_{idx}", type="primary"):
+                    _ok35 = update_product_data(
+                        _ov_key35,
+                        _edit_name35.strip() or our_name,
+                        _edit_price35,
+                        _edit_url35.strip(),
+                    )
+                    if _ok35:
+                        st.success("✅ تم الحفظ")
+                        st.rerun()
+                    else:
+                        st.error("❌ فشل الحفظ")
+
+        with _link_col:
+            try:
+                _pop_link = st.popover("🔗 ربط يدوي", use_container_width=True)
+            except Exception:
+                _pop_link = st.expander("🔗 ربط يدوي")
+            with _pop_link:
+                st.markdown(f"**ربط:** {our_name}")
+                _fl_url35 = st.text_input(
+                    "رابط منتج المنافس",
+                    key=f"fl_url_{prefix}_{idx}",
+                    placeholder="https://competitor.com/product/...",
+                )
+                st.caption("سيُسجَّل كمطابقة مؤكدة (source=manual)")
+                _pid_fl35 = str(
+                    row.get("معرف_المنتج", "")
+                    or row.get("product_id", "")
+                    or ""
+                ).strip()
+                if st.button("🔗 تأكيد", key=f"confirm_fl_{prefix}_{idx}", type="primary"):
+                    if _fl_url35.startswith("http"):
+                        _ok_fl = force_link_product(_pid_fl35, our_name, _fl_url35.strip())
+                        if _ok_fl:
+                            st.success("✅ تم الربط")
+                            st.rerun()
+                        else:
+                            st.error("❌ فشل الربط")
+                    else:
+                        st.warning("⚠️ رابط غير صحيح")
 
         _hr_m = "3px 0" if (compact_cards and prefix == "raise") else "6px 0"
         st.markdown(
@@ -5602,3 +5720,149 @@ AUTOMATION_RULES_DEFAULT.append({
             }), use_container_width=True)
         else:
             st.info("لا توجد قرارات مسجلة بعد — شغّل الأتمتة من التاب الأول")
+
+
+# ════════════════════════════════════════════════════════════════
+#  Task 3.4 — سلة المحذوفات (Recycle Bin)
+# ════════════════════════════════════════════════════════════════
+elif page == "🗑️ سلة المحذوفات":
+    st.header("🗑️ سلة المحذوفات")
+    st.caption("كل المنتجات المحذوفة ناعمياً — يمكن استرجاعها أو حذفها نهائياً")
+    db_log("recycle_bin", "view")
+
+    _sd_keys = get_soft_deleted_product_keys()
+
+    # ── إحصاء وتصفية ──────────────────────────────────────────────────────────
+    _total_deleted = len(_sd_keys)
+    if _total_deleted == 0:
+        st.success("✅ سلة المحذوفات فارغة — لا يوجد أي منتج محذوف ناعمياً")
+        st.stop()
+
+    st.info(f"🗑️ يوجد **{_total_deleted}** منتج محذوف ناعمياً")
+
+    # استخراج أسماء المنتجات من المفاتيح بصيغة "softdel_{name}"
+    _deleted_items = []
+    for _sdk in sorted(_sd_keys):
+        if _sdk.startswith("softdel_"):
+            _pname = _sdk[len("softdel_"):]
+        else:
+            _pname = _sdk
+        _deleted_items.append({"key": _sdk, "name": _pname})
+
+    # ── شريط البحث + زر استرجاع الكل ─────────────────────────────────────────
+    _rb_c1, _rb_c2 = st.columns([3, 1])
+    with _rb_c1:
+        _rb_search = st.text_input(
+            "🔎 بحث في المحذوفات",
+            placeholder="اسم المنتج...",
+            key="rb_search",
+        )
+    with _rb_c2:
+        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if st.button(
+            f"♻️ استرجاع الكل ({_total_deleted})",
+            key="rb_restore_all",
+            use_container_width=True,
+            type="secondary",
+        ):
+            _restored = 0
+            for _item in _deleted_items:
+                if restore_soft_deleted_product(_item["key"]):
+                    st.session_state.hidden_products.discard(_item["key"])
+                    _restored += 1
+            if _restored:
+                st.success(f"✅ تم استرجاع {_restored} منتج")
+                st.rerun()
+
+    # ── تطبيق فلتر البحث ──────────────────────────────────────────────────────
+    if _rb_search:
+        _deleted_items = [
+            _i for _i in _deleted_items
+            if _rb_search.strip().lower() in _i["name"].lower()
+        ]
+        if not _deleted_items:
+            st.warning("لا توجد نتائج مطابقة للبحث")
+            st.stop()
+
+    st.markdown("---")
+
+    # ── عرض كل منتج محذوف ─────────────────────────────────────────────────────
+    for _di in _deleted_items:
+        _dkey  = _di["key"]
+        _dname = _di["name"]
+
+        _rb_r1, _rb_r2, _rb_r3 = st.columns([5, 1.5, 1.5])
+
+        with _rb_r1:
+            st.markdown(
+                f'<div style="padding:6px 10px;border-radius:6px;'
+                f'background:rgba(255,80,80,.08);border:1px solid rgba(255,80,80,.2);">'
+                f'🗑️ <b>{_dname}</b>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        with _rb_r2:
+            if st.button(
+                "♻️ استرجاع",
+                key=f"rb_restore_{_dkey}",
+                use_container_width=True,
+                type="primary",
+            ):
+                if restore_soft_deleted_product(_dkey):
+                    st.session_state.hidden_products.discard(_dkey)
+                    st.toast(f"♻️ تم استرجاع: {_dname}", icon="✅")
+                    st.rerun()
+                else:
+                    st.error("❌ فشل الاسترجاع")
+
+        with _rb_r3:
+            if st.button(
+                "❌ حذف نهائي",
+                key=f"rb_perma_{_dkey}",
+                use_container_width=True,
+            ):
+                # حذف دائم — نفس restore لكن بدون إعادة الإضافة للواجهة
+                if restore_soft_deleted_product(_dkey):
+                    st.session_state.hidden_products.discard(_dkey)
+                    # نُضيف مفتاحاً دائماً لمنع العودة
+                    save_hidden_product(f"perma_{_dname}", _dname, action="permanently_deleted")
+                    st.toast(f"🗑️ حُذف نهائياً: {_dname}", icon="🗑️")
+                    st.rerun()
+                else:
+                    st.error("❌ فشل الحذف النهائي")
+
+        st.markdown(
+            '<hr style="border:none;border-top:1px solid #1a1a2e;margin:4px 0">',
+            unsafe_allow_html=True,
+        )
+
+    # ── Force Links Dashboard (ضمن نفس الصفحة في expander) ──────────────────
+    st.markdown("---")
+    with st.expander("🔗 الروابط اليدوية المؤكدة (Force Links)", expanded=False):
+        _fl_list = get_force_links()
+        if not _fl_list:
+            st.info("لا توجد روابط يدوية بعد — استخدم زر '🔗 ربط يدوي' في أي منتج")
+        else:
+            st.caption(f"إجمالي الروابط: **{len(_fl_list)}**")
+            for _fl in _fl_list:
+                _fl_c1, _fl_c2, _fl_c3 = st.columns([3, 4, 1])
+                with _fl_c1:
+                    st.markdown(f"**{_fl.get('our_name','—')}**")
+                    st.caption(f"ID: {_fl.get('our_id','—')}")
+                with _fl_c2:
+                    _curl = _fl.get("comp_url", "")
+                    st.markdown(f"[{_curl[:60]}{'…' if len(_curl)>60 else ''}]({_curl})")
+                    st.caption(f"📅 {_fl.get('created_at','')}")
+                with _fl_c3:
+                    if st.button(
+                        "🗑️",
+                        key=f"del_fl_{_fl.get('our_id','')}_{_fl.get('comp_url','')}",
+                        help="حذف الربط",
+                    ):
+                        delete_force_link(_fl.get("our_id",""), _fl.get("comp_url",""))
+                        st.rerun()
+                st.markdown(
+                    '<hr style="border:none;border-top:1px solid #1a1a2e;margin:2px 0">',
+                    unsafe_allow_html=True,
+                )
