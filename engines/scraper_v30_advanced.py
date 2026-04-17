@@ -1,11 +1,15 @@
 """
-engines/scraper_v30_advanced.py — محرك الكشط المتقدم v30.2
+engines/scraper_v30_advanced.py — محرك الكشط المتقدم v30.3
 ══════════════════════════════════════════════════════════════
-v30.2 fixes:
-  • Semaphore(8) prevents TCPConnector pool exhaustion (was: 25-product deadlock)
+v30.3 change:
+  • limit=0  ⇒ بلا سقف (كشط كل المنتجات بدون سعر). الافتراضي صار 0.
+  • SQL: عند limit<=0 لا نُضيف LIMIT — نسحب كل الصفوف المؤهّلة.
+
+v30.2 fixes (retained):
+  • Semaphore(8) prevents TCPConnector pool exhaustion
   • SAR-first currency extraction — USD/$  explicitly excluded
   • JSON-LD priceCurrency check
-  • Per-request timeout=15s (was: 25s session-level causing stale connections)
+  • Per-request timeout=15s
   • Sync fallback runs in ThreadPoolExecutor to avoid event-loop blocking
   • AI fallback also cleans product names (removes Tester/Sample)
 """
@@ -70,22 +74,17 @@ class PriceExtractor:
             soup = BeautifulSoup(html, "html.parser")
 
             # ── Strategy 1: SAR-specific selectors FIRST ─────────────────
-            # Salla (sara-makeup.com) uses s-product-price-* variants; Zid
-            # (saeedsalah.com) uses product-price / product-formatted-price.
             for selector in (
                 "span[class*='sar']", "span[class*='ريال']",
                 "div[class*='sar']", "div[class*='ريال']",
                 "span.s-product-price", "div.s-product-price",
                 ".s-price-wrapper span",
-                # Salla variants
                 ".s-product-card-sale-price", ".s-product-price-sale",
                 ".s-product-card-price", "h4.s-product-card-price",
                 "span.s-product-card-price", "[data-product-price]",
-                # Zid variants
                 ".product-formatted-price", ".product-price-amount",
                 ".product-price .amount", "span.product-price",
                 "[data-testid='product-price']", "[data-testid*='price']",
-                # WooCommerce / generic Arabic stores
                 "p.price ins .woocommerce-Price-amount",
                 "p.price .woocommerce-Price-amount",
                 "bdi",
@@ -107,7 +106,7 @@ class PriceExtractor:
                 for elem in soup.select(selector):
                     text = elem.get_text(strip=True)
                     if _line_has_foreign_currency(text):
-                        continue  # Skip USD prices
+                        continue
                     p = PriceExtractor._parse_sar_text(text)
                     if p:
                         return p
@@ -136,10 +135,9 @@ class PriceExtractor:
                     offers = ld.get("offers", ld)
                     if isinstance(offers, list):
                         offers = offers[0] if offers else {}
-                    # Check currency — accept SAR or missing (assume SAR for .sa domains)
                     currency = str(offers.get("priceCurrency", offers.get("currency", ""))).upper()
                     if currency and currency not in ("SAR", ""):
-                        continue  # Skip non-SAR prices
+                        continue
                     for pk in ("price", "lowPrice", "highPrice"):
                         p_str = str(offers.get(pk, ""))
                         if p_str:
@@ -153,7 +151,7 @@ class PriceExtractor:
             for script in soup.find_all("script"):
                 txt = script.string or ""
                 if len(txt) > 200_000:
-                    continue  # Skip huge bundles
+                    continue
                 for pattern in (
                     r'"price"\s*:\s*["\']?(\d+(?:\.\d+)?)',
                     r'"sale_price"\s*:\s*["\']?(\d+(?:\.\d+)?)',
@@ -185,17 +183,9 @@ class PriceExtractor:
 
     @staticmethod
     def _parse_sar_text(text: str) -> Optional[float]:
-        """Parse price from text — strips SAR markers, rejects if USD present.
-
-        Handles Arabic-Indic digits, thousands separators and decimals. Does
-        NOT return None prematurely — falls through to the largest plausible
-        number when multiple numeric tokens appear (e.g. "299.00 ريال  /
-        شامل الضريبة").
-        """
         try:
             if _line_has_foreign_currency(text):
                 return None
-            # Normalise Arabic-Indic digits (٠-٩ and ۰-۹) → ASCII
             trans = str.maketrans(
                 "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
                 "01234567890123456789",
@@ -209,7 +199,6 @@ class PriceExtractor:
             numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
             if not numbers:
                 return None
-            # Prefer the first plausible price; fall back to any in-range value
             for n in numbers:
                 try:
                     p = float(n)
@@ -231,7 +220,6 @@ _ai_fallback_lock = threading.Lock()
 
 
 def _ai_extract_price(text_snippet: str) -> Optional[float]:
-    """Minimal Gemini prompt to extract SAR price. Capped at budget."""
     global _ai_fallback_used
     with _ai_fallback_lock:
         if _ai_fallback_used >= _AI_FALLBACK_BUDGET:
@@ -264,10 +252,8 @@ def _ai_extract_price(text_snippet: str) -> Optional[float]:
 
 
 def _ai_clean_product_name(raw_name: str) -> str:
-    """Clean product name — remove junk like 'Tester', page titles, etc."""
     if not raw_name or len(raw_name) < 3:
         return raw_name
-    # Fast local cleaning first
     cleaned = raw_name
     for junk in (
         " - متجر", " | متجر", " – متجر", "| مهووس", "| Mahwous",
@@ -276,7 +262,6 @@ def _ai_clean_product_name(raw_name: str) -> str:
         " - Golden Scent", "| Golden Scent",
     ):
         cleaned = cleaned.replace(junk, "")
-    # Remove store name patterns from <title>
     cleaned = re.sub(r"\s*[|\-–—]\s*[^\|–—]{0,40}(متجر|store|shop|ستور)\s*$", "", cleaned, flags=re.I)
     return cleaned.strip()
 
@@ -295,20 +280,18 @@ class AdvancedScraper:
     async def _ensure_session(self):
         if self.session is None or self.session.closed:
             connector = aiohttp.TCPConnector(
-                limit=50,           # Pool size (was 20 — caused exhaustion)
-                limit_per_host=8,   # Per-domain cap
+                limit=50,
+                limit_per_host=8,
                 ttl_dns_cache=300,
                 ssl=False,
                 enable_cleanup_closed=True,
             )
-            # Session-level timeout is generous; per-request timeout is strict
             self.session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=60),
                 connector=connector,
             )
 
     async def scrape_product_page(self, url: str, store_name: str) -> Dict[str, Any]:
-        """Scrape one product page — semaphore-guarded."""
         async with self._sem:
             return await self._scrape_inner(url, store_name)
 
@@ -316,7 +299,6 @@ class AdvancedScraper:
         domain = urlparse(url).netloc
         html = None
 
-        # ── Phase 1: aiohttp with per-request timeout ────────────────────
         try:
             if self._rate_limiter:
                 await self._rate_limiter.wait(domain)
@@ -326,7 +308,6 @@ class AdvancedScraper:
             await self._ensure_session()
             headers = get_browser_headers(referer=f"https://{domain}/")
 
-            # Per-request timeout — strict 15s, not session-level 25s
             req_timeout = aiohttp.ClientTimeout(total=15, connect=8)
             async with self.session.get(
                 url, headers=headers, ssl=False,
@@ -346,7 +327,6 @@ class AdvancedScraper:
         except (aiohttp.ClientError, OSError) as e:
             logger.debug(f"aiohttp error {url}: {type(e).__name__}")
 
-        # ── Phase 2: Sync fallbacks in thread pool (non-blocking) ────────
         if not html or (_HAS_ANTI_BAN and looks_like_bot_challenge(html)):
             if _HAS_ANTI_BAN:
                 try:
@@ -363,10 +343,8 @@ class AdvancedScraper:
         if not html:
             return self._fail_result(url, store_name)
 
-        # ── Phase 3: Extract price (SAR-first) ──────────────────────────
         price = self.price_extractor.extract_price(html, url)
 
-        # ── Phase 4: AI Fallback ─────────────────────────────────────────
         if not price or price <= 0:
             try:
                 text_for_ai = BeautifulSoup(html, "html.parser").get_text()[:3000]
@@ -375,7 +353,6 @@ class AdvancedScraper:
             except Exception as e:
                 logger.debug("AI phase error %s: %s", url, e)
 
-        # ── Extract metadata ─────────────────────────────────────────────
         try:
             soup = BeautifulSoup(html, "html.parser")
         except Exception:
@@ -420,13 +397,10 @@ class AdvancedScraper:
         self, urls: List[str], store_name: str,
         progress_cb=None,
     ) -> List[Dict]:
-        """Scrape all URLs — semaphore controls concurrency, no fixed batch size."""
-        # Launch all tasks — semaphore(8) throttles concurrency automatically
         tasks = [self.scrape_product_page(u, store_name) for u in urls]
         results = []
         total = len(tasks)
 
-        # Use as_completed for real-time progress instead of batched gather
         for i, coro in enumerate(asyncio.as_completed(tasks)):
             try:
                 r = await coro
@@ -451,7 +425,7 @@ class AdvancedScraper:
 # ══════════════════════════════════════════════════════════════════════════════
 async def run_advanced_price_scraping(
     store_filter: str = "",
-    limit: int = 2000,
+    limit: int = 0,                       # 0 = بلا سقف (كشط كل المنتجات)
     progress_cb=None,
     max_parallel_stores: int = 25,
     flush_every: int = 20,
@@ -459,19 +433,17 @@ async def run_advanced_price_scraping(
     """
     Scrape products with price=0 across ALL competitor stores in PARALLEL.
 
-    v30.3 — parallel-stores edition:
-      • All stores run simultaneously (asyncio.gather with Semaphore cap).
-      • Each scraped product is streamed to DB in small batches (`flush_every`)
-        so nothing is lost if the process is interrupted.
-      • progress_cb receives a dict with live per-store + global counters.
+    v30.3 — uncapped + parallel:
+      • limit <= 0 ⇒ كشط جميع المنتجات المؤهّلة (بلا LIMIT في SQL).
+      • All stores run simultaneously (asyncio.gather + Semaphore).
+      • Each scraped product is streamed to DB every `flush_every`.
+      • progress_cb receives live per-store + global counters.
 
     Args:
         store_filter         : scrape only this one store (empty = all stores).
-        limit                : max products per store.
-        progress_cb          : callable(dict) invoked as counters change.
-                               Dict keys: total_done, total_target, by_store,
-                                          prices_found, errors.
-        max_parallel_stores  : max competitor stores scraped at the same time.
+        limit                : max products per batch; 0 أو سالب = بلا حد.
+        progress_cb          : callable(dict) with live counters.
+        max_parallel_stores  : max competitor stores scraped simultaneously.
         flush_every          : flush scraped products to DB every N rows.
     """
     global _ai_fallback_used
@@ -481,19 +453,31 @@ async def run_advanced_price_scraping(
 
     conn = get_db()
     try:
-        if store_filter:
+        use_limit = bool(limit) and limit > 0
+        if store_filter and use_limit:
             rows = conn.execute(
                 """SELECT product_url, competitor FROM competitor_products_store
                    WHERE (price IS NULL OR price = 0) AND product_url != '' AND competitor = ?
                    LIMIT ?""",
                 (store_filter, limit),
             ).fetchall()
-        else:
+        elif store_filter:
+            rows = conn.execute(
+                """SELECT product_url, competitor FROM competitor_products_store
+                   WHERE (price IS NULL OR price = 0) AND product_url != '' AND competitor = ?""",
+                (store_filter,),
+            ).fetchall()
+        elif use_limit:
             rows = conn.execute(
                 """SELECT product_url, competitor FROM competitor_products_store
                    WHERE (price IS NULL OR price = 0) AND product_url != ''
                    LIMIT ?""",
                 (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT product_url, competitor FROM competitor_products_store
+                   WHERE (price IS NULL OR price = 0) AND product_url != ''"""
             ).fetchall()
     finally:
         conn.close()
@@ -508,10 +492,10 @@ async def run_advanced_price_scraping(
         urls_by_store.setdefault(store, []).append(url)
 
     total_target = sum(len(u) for u in urls_by_store.values())
-    logger.info("🚀 Parallel scrape across %d stores (target=%d products, max_parallel=%d)",
-                len(urls_by_store), total_target, max_parallel_stores)
+    logger.info("🚀 Parallel scrape across %d stores (target=%d products, max_parallel=%d, limit=%s)",
+                len(urls_by_store), total_target, max_parallel_stores,
+                "UNCAPPED" if not use_limit else limit)
 
-    # Shared live counters — updated from every store's task
     counters = {
         "total_done":    0,
         "total_target":  total_target,
@@ -527,7 +511,6 @@ async def run_advanced_price_scraping(
         if progress_cb is None:
             return
         try:
-            # Snapshot under lock so callback sees a consistent view
             snapshot = {
                 "total_done":    counters["total_done"],
                 "total_target":  counters["total_target"],
@@ -544,7 +527,6 @@ async def run_advanced_price_scraping(
     store_semaphore = asyncio.Semaphore(max_parallel_stores)
 
     async def _scrape_one_store(store: str, urls: List[str]) -> None:
-        """Scrape a single store, streaming saves to DB every `flush_every` products."""
         async with store_semaphore:
             buffer: List[Dict] = []
             tasks = [scraper.scrape_product_page(u, store) for u in urls]
@@ -579,7 +561,6 @@ async def run_advanced_price_scraping(
                         "image_url":   r.get("image_url", ""),
                     })
 
-                # Stream-save to DB every N products so data survives crashes
                 if len(buffer) >= flush_every:
                     try:
                         res = upsert_competitor_products(
@@ -593,7 +574,6 @@ async def run_advanced_price_scraping(
 
                 await _emit_progress()
 
-            # Final flush for this store
             if buffer:
                 try:
                     res = upsert_competitor_products(
@@ -618,7 +598,6 @@ async def run_advanced_price_scraping(
     finally:
         await scraper.close()
 
-    # Final GCS sync after the full batch (no-op if GCS not configured)
     try:
         from utils.db_manager import trigger_gcs_sync
         trigger_gcs_sync(force=True)
@@ -645,7 +624,7 @@ async def run_advanced_price_scraping(
 if __name__ == "__main__":
     import sys
     _store = sys.argv[1] if len(sys.argv) > 1 else ""
-    _limit = int(sys.argv[2]) if len(sys.argv) > 2 else 5000
-    print(f"🕷️ Advanced Scraper v30.2 — store={_store or 'ALL'}, limit={_limit}")
+    _limit = int(sys.argv[2]) if len(sys.argv) > 2 else 0   # 0 = بلا سقف
+    print(f"🕷️ Advanced Scraper v30.3 — store={_store or 'ALL'}, limit={_limit or 'UNCAPPED'}")
     result = asyncio.run(run_advanced_price_scraping(_store, _limit))
-    print(result["message"])
+    print(result.get("message", result))
