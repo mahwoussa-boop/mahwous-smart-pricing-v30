@@ -390,6 +390,8 @@ def show() -> None:
             mime="text/csv; charset=utf-8",
             type="primary",
             use_container_width=True,
+        
+            on_click="ignore"
         )
     with c_xlsx:
         st.download_button(
@@ -398,6 +400,8 @@ def show() -> None:
             file_name="mahwous_missing_ready.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
+        
+            on_click="ignore"
         )
 
     st.caption(

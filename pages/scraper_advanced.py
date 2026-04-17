@@ -668,6 +668,8 @@ def show() -> None:
                 data=csv_b,
                 file_name=f"scraped_{filter_domain or 'all'}_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv",
+            
+                on_click="ignore"
             )
         else:
             st.info("⏳ لا توجد بيانات بعد — ابدأ الكشط من تبويب «إدارة المنافسين»")
@@ -1043,6 +1045,8 @@ def show() -> None:
                         ),
                         mime="text/csv",
                         key="rt_download",
+                    
+                        on_click="ignore"
                     )
 
                 if _rt_audit:

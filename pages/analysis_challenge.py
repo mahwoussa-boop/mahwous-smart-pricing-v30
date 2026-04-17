@@ -153,6 +153,8 @@ def _render_preview(df: pd.DataFrame, title: str, icon: str, color: str, key: st
         file_name=f"{key}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"dl_{key}",
+    
+        on_click="ignore"
     )
 
 
@@ -355,6 +357,8 @@ def render():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_all",
         type="primary",
+    
+        on_click="ignore"
     )
 
     st.markdown("أو قم بتنزيل كل ملف على حدة:")

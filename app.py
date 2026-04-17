@@ -807,6 +807,8 @@ def _render_reconciliation_dashboard(audit_stats: dict):
                     file_name="failed_rows.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="dl_failed_rows_prominent",
+                
+                    on_click="ignore"
                 )
     if not _fb:
         from pathlib import Path
@@ -827,6 +829,8 @@ def _render_reconciliation_dashboard(audit_stats: dict):
             file_name="failed_rows.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_failed_rows_log",
+        
+            on_click="ignore"
         )
     st.caption(
         "الأرقام تعكس **صفوف ملفات المنافس** في آخر تشغيل؛ إن فعّلت الدمج التراكمي قد يزيد عدد "
@@ -1291,7 +1295,9 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
         st.download_button("📥 Excel", data=excel_data,
             file_name=f"{prefix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"{prefix}_xl")
+            key=f"{prefix}_xl",
+                on_click="ignore"
+            )
     with ac2:
         _csdf = filtered.copy()
         if "جميع المنافسين" in _csdf.columns: _csdf = _csdf.drop(columns=["جميع المنافسين"])
@@ -1299,7 +1305,9 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
         _csv_bytes = _csdf.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button("📄 CSV", data=_csv_bytes,
             file_name=f"{prefix}_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv", key=f"{prefix}_csv")
+            mime="text/csv", key=f"{prefix}_csv",
+                on_click="ignore"
+            )
     with ac3:
         _bulk_labels = {"raise": "🤖 تحليل ذكي — خفض (أول 20)",
                         "lower": "🤖 تحليل ذكي — رفع (أول 20)",
@@ -2380,7 +2388,9 @@ if page == "📊 لوحة التحكم":
                 excel_all = export_multiple_sheets(sheets)
                 st.download_button("📥 تصدير كل الأقسام Excel",
                     data=excel_all, file_name="mahwous_all.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        on_click="ignore"
+                    )
         with cc2:
             if st.button("📤 إرسال كل شيء لـ Make (دفعات ذكية)",
                          key="dash_send_all_make"):
@@ -3497,6 +3507,8 @@ elif page == "🔍 منتجات مفقودة":
                             type="primary",
                             use_container_width=True,
                             help=f"يحتوي على {_csv_count} منتج — قالب سلة الرسمي مع صف بيانات المنتج",
+                        
+                            on_click="ignore"
                         )
                     except Exception as _csv_exp:
                         st.error(f"❌ فشل توليد CSV سلة: {_csv_exp}")
@@ -3512,6 +3524,8 @@ elif page == "🔍 منتجات مفقودة":
                             file_name="mahwous_missing_ready.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             use_container_width=True,
+                        
+                            on_click="ignore"
                         )
                     except Exception as _xlsx_exp:
                         st.error(f"❌ فشل توليد XLSX: {_xlsx_exp}")
@@ -3875,7 +3889,9 @@ elif page == "⚠️ تحت المراجعة":
             with col_r2:
                 excel_rv = export_to_excel(df, "مراجعة")
                 st.download_button("📥 Excel", data=excel_rv, file_name="review.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="rv_dl")
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="rv_dl",
+                        on_click="ignore"
+                    )
 
             # ── فلتر بحث ──────────────────────────────────────────────────
             search_rv = st.text_input("🔎 بحث في المنتجات", key="rv_search")
@@ -4222,7 +4238,9 @@ elif page in ("✔️ تمت المعالجة", "✅ تمت المعالجة"):
         st.markdown("---")
         csv_proc = df_proc.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button("📥 تصدير CSV", data=csv_proc,
-                           file_name="processed_products.csv", mime="text/csv")
+                           file_name="processed_products.csv", mime="text/csv",
+                               on_click="ignore"
+                           )
 
 
 
@@ -5342,6 +5360,8 @@ elif page == "🕷️ كشط المنافسين":
                     f"📥 CSV ({_csv_size_kb} KB · {_csv_rows:,} منتج)",
                     data=_fout.read(), file_name="competitors_latest.csv",
                     mime="text/csv", key="sc_download_csv", use_container_width=True,
+                
+                    on_click="ignore"
                 )
         with _go_col:
             if st.button("🚀 تحليل شامل", key="sc_go_match", type="primary", use_container_width=True):
