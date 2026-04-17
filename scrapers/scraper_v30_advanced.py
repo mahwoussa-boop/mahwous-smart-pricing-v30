@@ -17,7 +17,6 @@ import logging
 import random
 import re
 import json
-import threading
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -132,8 +131,8 @@ class PriceExtractor:
                             p = float(p_str.replace(",", ""))
                             if 0 < p < 100_000:
                                 return p
-                except Exception as e:
-                    logger.debug("JSON-LD parse error %s: %s", url, e)
+                except Exception:
+                    pass
 
             # ── Strategy 5: Inline JS patterns ───────────────────────────
             for script in soup.find_all("script"):
@@ -194,15 +193,13 @@ class PriceExtractor:
 # ══════════════════════════════════════════════════════════════════════════════
 _AI_FALLBACK_BUDGET = 50
 _ai_fallback_used = 0
-_ai_fallback_lock = threading.Lock()
 
 
 def _ai_extract_price(text_snippet: str) -> Optional[float]:
     """Minimal Gemini prompt to extract SAR price. Capped at budget."""
     global _ai_fallback_used
-    with _ai_fallback_lock:
-        if _ai_fallback_used >= _AI_FALLBACK_BUDGET:
-            return None
+    if _ai_fallback_used >= _AI_FALLBACK_BUDGET:
+        return None
     try:
         from engines.ai_engine import _call_gemini
     except ImportError:
@@ -218,8 +215,7 @@ def _ai_extract_price(text_snippet: str) -> Optional[float]:
     try:
         resp = _call_gemini(prompt, temperature=0.0, max_tokens=32)
         if resp:
-            with _ai_fallback_lock:
-                _ai_fallback_used += 1
+            _ai_fallback_used += 1
             nums = re.findall(r"\d+\.?\d*", str(resp).strip())
             if nums:
                 p = float(nums[0])
@@ -339,8 +335,8 @@ class AdvancedScraper:
                 text_for_ai = BeautifulSoup(html, "html.parser").get_text()[:3000]
                 if text_for_ai.strip():
                     price = _ai_extract_price(text_for_ai)
-            except Exception as e:
-                logger.debug("AI phase error %s: %s", url, e)
+            except Exception:
+                pass
 
         # ── Extract metadata ─────────────────────────────────────────────
         try:
