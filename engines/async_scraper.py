@@ -451,8 +451,8 @@ async def fetch_product(
                         http_status_counters[str(resp.status)] = (
                             http_status_counters.get(str(resp.status), 0) + 1
                         )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("JSON fetch error %s: %s", url, e)
 
         # ── HTML Fetch بأسلوب التخفي ──────────────────────────────────────
         if _ANTI_BAN_AVAILABLE:
@@ -775,7 +775,7 @@ async def scrape_one_store(
                 _consecutive_failures += 1
             except Exception:
                 progress.fetch_exceptions += 1
-                progress.last_error = traceback.format_exc()[:100]
+                progress.last_error = traceback.format_exc()[:500]
                 _consecutive_failures += 1
             finally:
                 done_count += 1
