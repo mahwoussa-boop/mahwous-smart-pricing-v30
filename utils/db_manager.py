@@ -15,9 +15,41 @@ from utils.data_paths import get_data_db_path
 
 _logger = logging.getLogger(__name__)
 
-# قاعدة SQLite الرئيسية — مسار الملف عبر get_data_db_path() (DATA_DIR على Railway)
+# Main SQLite database — path via get_data_db_path() (DATA_DIR on Railway/GCP, ./data locally)
 _DB_NAME = "pricing_v18.db"
 DB_PATH = get_data_db_path(_DB_NAME)
+
+# ─── GCP Integration ─────────────────────────────────────────────────────────
+# Import GCP helpers; if the module is missing (e.g. first run before pip install)
+# the app continues with pure SQLite — no crash.
+try:
+    from utils.gcp_db import (
+        sync_db_from_gcs,
+        sync_db_to_gcs,
+        schedule_background_gcs_sync,
+        is_gcs_configured,
+        is_cloud_sql_configured,
+        gcp_status,
+    )
+    _GCP_AVAILABLE = True
+except ImportError:
+    _GCP_AVAILABLE = False
+    def sync_db_from_gcs(p): return False          # type: ignore[misc]
+    def sync_db_to_gcs(p, force=False): return False  # type: ignore[misc]
+    def schedule_background_gcs_sync(p, interval_secs=300): pass  # type: ignore[misc]
+    def is_gcs_configured(): return False          # type: ignore[misc]
+    def is_cloud_sql_configured(): return False    # type: ignore[misc]
+    def gcp_status(): return {}                    # type: ignore[misc]
+
+# On startup: pull the database from GCS if configured.
+# This runs once at import time so both the UI and the scraper engine
+# always start with the latest persisted data from the cloud.
+if _GCP_AVAILABLE and is_gcs_configured():
+    _pulled = sync_db_from_gcs(DB_PATH)
+    if _pulled:
+        _logger.info("db_manager: DB restored from GCS on startup → %s", DB_PATH)
+    else:
+        _logger.info("db_manager: GCS configured but no remote DB yet — starting fresh locally")
 
 
 def _ts():
@@ -26,6 +58,18 @@ def _ts():
 
 def _date():
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def trigger_gcs_sync(force: bool = False) -> bool:
+    """
+    Manually trigger a GCS upload of the SQLite DB.
+    Called after high-value writes (bulk scrape results, job completion).
+    Throttled internally — safe to call frequently.
+    Returns True if an upload occurred.
+    """
+    if _GCP_AVAILABLE and is_gcs_configured():
+        return sync_db_to_gcs(DB_PATH, force=force)
+    return False
 
 
 def get_db():
@@ -297,6 +341,9 @@ def save_job_progress(job_id, total, processed, results, status="running",
              results_data, missing_data, our_file, comp_files, audit_data)
         )
         conn.commit()
+    # Push to GCS when a job completes — captures full analysis results
+    if status in ("done", "completed", "finished"):
+        trigger_gcs_sync(force=True)
 
 
 def get_job_progress(job_id):
@@ -686,6 +733,22 @@ def delete_force_link(our_id: str, comp_url: str) -> bool:
 # ── module-level initialisation ───────────────────────────────────────────────
 init_db()
 init_db_v35()
+
+# Start background GCS sync thread (uploads DB to GCS every 5 minutes).
+# Only activates when GCS_BUCKET_NAME env var is set.
+if _GCP_AVAILABLE and is_gcs_configured():
+    schedule_background_gcs_sync(DB_PATH, interval_secs=300)
+    _logger.info("db_manager: GCS background sync active for %s", DB_PATH)
+
+# Bootstrap: register canonical competitors list (18 stores) at first run.
+# Safe to call every time — uses INSERT OR IGNORE internally.
+try:
+    migrate_db_v26()
+    _n_registered = register_competitors_from_json()
+    if _n_registered:
+        _logger.info("db_manager: %d competitors registered from JSON", _n_registered)
+except Exception as _boot_exc:
+    _logger.debug("db_manager: competitor bootstrap skipped: %s", _boot_exc)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1285,6 +1348,47 @@ def get_all_competitors() -> list:
         return []
 
 
+def register_competitors_from_json(json_path: str = "") -> int:
+    """
+    Load competitors list from JSON file and register them in the DB.
+    Reads data/competitors_list_v30.json by default.
+    Returns the number of competitors registered (new or updated).
+
+    Expected JSON format:
+        [{"name": "...", "store_url": "...", "sitemap_url": "..."}, ...]
+    """
+    if not json_path:
+        # Default: data/competitors_list_v30.json in project root
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        json_path = os.path.join(root, "data", "competitors_list_v30.json")
+
+    if not os.path.exists(json_path):
+        _logger.debug("register_competitors_from_json: file not found %s", json_path)
+        return 0
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as _f:
+            comps = json.load(_f)
+    except Exception as exc:
+        _logger.warning("register_competitors_from_json read error: %s", exc)
+        return 0
+
+    if not isinstance(comps, list):
+        return 0
+
+    count = 0
+    for c in comps:
+        name = str(c.get("name", "")).strip()
+        if not name:
+            continue
+        domain = str(c.get("store_url", "")).strip()
+        notes  = str(c.get("sitemap_url", "")).strip()
+        if register_competitor(name, domain=domain, notes=notes):
+            count += 1
+    _logger.info("register_competitors_from_json: registered %d competitors", count)
+    return count
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  محرك تراكم بيانات المنافسين عبر الجلسات — Persistent Competitor Store
@@ -1397,6 +1501,11 @@ def upsert_competitor_products(
         raise
     finally:
         conn.close()
+
+    # Sync to GCS after a bulk competitor scrape batch
+    if inserted > 0 or updated > 0:
+        trigger_gcs_sync()
+
     return {"inserted": inserted, "updated": updated}
 
 

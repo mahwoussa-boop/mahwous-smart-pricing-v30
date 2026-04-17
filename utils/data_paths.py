@@ -2,7 +2,7 @@
 مسارات التخزين الدائم — Railway Volume وغيرها.
 
 اضبط المتغير DATA_DIR ليطابق مسار تثبيت الـ volume (مثلاً /data).
-بدون ذلك يُستخدم /tmp (مناسب لـ Streamlit Cloud؛ يُفقد عند إعادة تشغيل الحاوية).
+بدون ذلك يُستخدم مجلد data/ داخل جذر المشروع (للتطوير المحلي).
 """
 import os
 
@@ -12,7 +12,11 @@ def get_data_dir() -> str:
     if d:
         os.makedirs(d, exist_ok=True)
         return d
-    return "/tmp"
+    # Fallback: use data/ relative to this file's project root (two levels up from utils/)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    local_data = os.path.join(root, "data")
+    os.makedirs(local_data, exist_ok=True)
+    return local_data
 
 
 def get_data_db_path(filename: str) -> str:
