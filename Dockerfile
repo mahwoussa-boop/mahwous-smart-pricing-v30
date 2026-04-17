@@ -3,9 +3,8 @@ FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-# Persistent data directory (Cloud Run: mount a volume here if needed)
-ENV DATA_DIR=/data
-
+# Use the app-local data directory by default. Set DATA_DIR only when you
+# intentionally mount persistent storage or want a custom writable path.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
