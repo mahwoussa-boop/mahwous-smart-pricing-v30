@@ -38,20 +38,18 @@ steps:
       - '--concurrency'
       - '10'
       - '--min-instances'
-      - '1'
+      - '0'
       - '--max-instances'
       - '10'
       - '--execution-environment'
       - 'gen2'
       - '--cpu-boost'
       - '--no-cpu-throttling'
-      # Persistent storage via Cloud Storage FUSE mounted at /data so SQLite DBs
-      # and progress JSONs survive Cloud Run restarts. Bucket must be created
-      # manually once: gsutil mb gs://$PROJECT_ID-scraper-data
-      - '--add-volume'
-      - 'name=scraper-data,type=cloud-storage,bucket=$PROJECT_ID-scraper-data'
-      - '--add-volume-mount'
-      - 'volume=scraper-data,mount-path=/data'
+      # Important: do not mount Cloud Storage FUSE by default here.
+      # A missing bucket or insufficient permissions can cause the revision
+      # to fail before the container ever listens on PORT=8080.
+      # If persistent storage is required later, add the volume only after
+      # the bucket exists and the Cloud Run runtime identity has access.
 
 images:
   - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
