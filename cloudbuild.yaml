@@ -1,0 +1,53 @@
+steps:
+  # 1. Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
+      - '.'
+
+  # 2. Push image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-image'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
+
+  # 3. Deploy to Cloud Run. Secrets/env vars are configured on the service
+  #    directly (see `gcloud run services update`) and persist across deploys.
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-cloud-run'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'mahwous-smart-pricing'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
+      - '--region'
+      - 'us-central1'
+      - '--allow-unauthenticated'
+      - '--memory'
+      - '4Gi'
+      - '--cpu'
+      - '2'
+      - '--timeout'
+      - '3600'
+      - '--concurrency'
+      - '10'
+      - '--min-instances'
+      - '1'
+      - '--max-instances'
+      - '10'
+      - '--execution-environment'
+      - 'gen2'
+      - '--cpu-boost'
+      - '--no-cpu-throttling'
+
+images:
+  - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
+
+options:
+  logging: 'CLOUD_LOGGING_ONLY'
