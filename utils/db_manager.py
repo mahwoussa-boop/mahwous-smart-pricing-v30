@@ -60,6 +60,15 @@ def _date():
     return datetime.now().strftime("%Y-%m-%d")
 
 
+# In-memory product cache: persists scraped rows for the container lifetime.
+# On Cloud Run without GCS, the SQLite file resets on every container restart.
+# This cache lets the session survive short restarts and prevents re-reads
+# from a blank DB right after a scrape that wrote to GCS but whose sync
+# cooldown hasn't expired yet.
+_IN_MEMORY_PRODUCTS: dict[str, list] = {}  # {domain: [row_dicts]}
+_IN_MEMORY_LOCK = __import__("threading").Lock()
+
+
 def trigger_gcs_sync(force: bool = False) -> bool:
     """
     Manually trigger a GCS upload of the SQLite DB.
@@ -1502,9 +1511,15 @@ def upsert_competitor_products(
     finally:
         conn.close()
 
-    # Sync to GCS after a bulk competitor scrape batch
+    # Update in-memory cache so the UI reflects new rows immediately,
+    # even before the GCS sync cooldown expires on the next container restart.
     if inserted > 0 or updated > 0:
-        trigger_gcs_sync()
+        with _IN_MEMORY_LOCK:
+            existing_cache = _IN_MEMORY_PRODUCTS.get(competitor, [])
+            _IN_MEMORY_PRODUCTS[competitor] = existing_cache + list(products)
+
+        # Force a GCS upload after every scrape batch so data survives restarts.
+        trigger_gcs_sync(force=True)
 
     return {"inserted": inserted, "updated": updated}
 
@@ -1533,10 +1548,26 @@ def get_all_competitor_products(competitor: str = "") -> list[dict]:
 
 
 def get_competitor_products_df(competitor: str = "") -> "pd.DataFrame":
-    """يُرجع DataFrame من جدول التراكم."""
+    """
+    Returns a DataFrame from the persistent competitor store.
+    Falls back to the in-memory cache when the SQLite table is empty
+    (e.g. immediately after a Cloud Run container restart before GCS restore).
+    """
     import pandas as _pd
     rows = get_all_competitor_products(competitor)
     if not rows:
+        # SQLite is empty — check in-memory cache before returning empty
+        with _IN_MEMORY_LOCK:
+            if competitor:
+                cached = _IN_MEMORY_PRODUCTS.get(competitor, [])
+            else:
+                cached = [r for rows_list in _IN_MEMORY_PRODUCTS.values() for r in rows_list]
+        if cached:
+            _logger.info(
+                "get_competitor_products_df: SQLite empty, serving %d rows from memory cache for '%s'",
+                len(cached), competitor or "ALL",
+            )
+            return _pd.DataFrame(cached)
         return _pd.DataFrame()
     return _pd.DataFrame(rows)
 
