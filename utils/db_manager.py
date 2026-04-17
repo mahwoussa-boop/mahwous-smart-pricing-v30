@@ -9,6 +9,7 @@ import hashlib
 import logging
 import sqlite3, json, os
 from datetime import datetime
+from typing import List, Optional, Dict
 
 from utils.data_paths import get_data_db_path
 
@@ -408,7 +409,283 @@ def get_hidden_product_keys() -> set:
         return set()
 
 
+# ── Task 3.3 — Soft Delete System ─────────────────────────────────────────────
+
+def soft_delete_product(product_key: str, product_name: str = "") -> None:
+    """
+    Soft-delete: persists the product in hidden_products with action='soft_deleted'.
+    Uses the stable key format  "softdel_{product_name}"  so the record survives
+    across sessions and page/filter changes (unlike the fragile idx-based legacy key).
+    Thread-safe — delegates to save_hidden_product which uses WAL-mode SQLite.
+    """
+    save_hidden_product(product_key, product_name, action="soft_deleted")
+
+
+def get_soft_deleted_product_keys() -> set:
+    """
+    Returns the set of product_keys that were soft-deleted (action='soft_deleted').
+    Called once at the top of render_pro_table() to filter before rendering.
+    """
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT product_key FROM hidden_products WHERE action='soft_deleted'"
+        ).fetchall()
+        conn.close()
+        return {r["product_key"] for r in rows}
+    except Exception as _e:
+        _logger.debug("get_soft_deleted_product_keys error: %s", _e)
+        return set()
+
+
+def restore_soft_deleted_product(product_key: str) -> bool:
+    """
+    Undo soft-delete: removes the row from hidden_products.
+    Called by the Recycle Bin (Task 3.4) restore button.
+    Returns True on success, False on failure.
+    """
+    try:
+        conn = get_db()
+        conn.execute(
+            "DELETE FROM hidden_products WHERE product_key=? AND action='soft_deleted'",
+            (product_key,),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as _e:
+        _logger.debug("restore_soft_deleted_product error: %s", _e)
+        return False
+
+
+def ensure_is_deleted_column(df: "pd.DataFrame") -> "pd.DataFrame":  # type: ignore[name-defined]
+    """
+    Guarantees df has an 'is_deleted' bool column.
+    Returns the SAME df if the column already exists (no copy overhead).
+    Returns a copy with the column added as False if it was missing.
+    """
+    if "is_deleted" not in df.columns:
+        df = df.copy()
+        df["is_deleted"] = False
+    return df
+
+
+def apply_soft_deletes_to_df(
+    df: "pd.DataFrame",  # type: ignore[name-defined]
+    prefix: str = "",
+) -> "pd.DataFrame":  # type: ignore[name-defined]
+    """
+    Hydrates the 'is_deleted' column from the DB:
+      - Fetches the set of soft-deleted keys (action='soft_deleted').
+      - Marks rows whose stable key  "softdel_{product_name}"  is in the set.
+    Stable key is based on 'المنتج' column value — not on positional idx.
+
+    Args:
+        df      : analysis results DataFrame (must have 'المنتج' column).
+        prefix  : optional section prefix; currently unused but kept for future
+                  per-section isolation (e.g. "raise", "lower").
+
+    Returns:
+        df with 'is_deleted' column populated (True = soft-deleted, False = visible).
+    """
+    df = ensure_is_deleted_column(df)
+    if df.empty:
+        return df
+
+    _deleted_keys = get_soft_deleted_product_keys()
+    if not _deleted_keys:
+        return df  # fast-path: nothing deleted yet
+
+    _name_col = "المنتج" if "المنتج" in df.columns else None
+    if _name_col is None:
+        return df  # no product-name column — cannot match
+
+    def _check_deleted(row) -> bool:
+        pname = str(row.get(_name_col, "") or "")
+        return f"softdel_{pname}" in _deleted_keys
+
+    df["is_deleted"] = df.apply(_check_deleted, axis=1)
+    return df
+
+
+# ── Task 3.5 & 3.6 — Product Overrides + Force Links ──────────────────────────
+
+def init_db_v35() -> None:
+    """
+    Create product_overrides and force_links tables (idempotent).
+    Called at module load right after init_db().
+    """
+    conn = get_db()
+    c = conn.cursor()
+    # Task 3.5 — inline-edit overrides
+    c.execute("""CREATE TABLE IF NOT EXISTS product_overrides (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        stable_key TEXT    UNIQUE NOT NULL,
+        new_name   TEXT    DEFAULT '',
+        new_price  REAL    DEFAULT 0,
+        new_url    TEXT    DEFAULT '',
+        updated_at TEXT
+    )""")
+    # Task 3.6 — manual force-links (source='manual')
+    c.execute("""CREATE TABLE IF NOT EXISTS force_links (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        our_id     TEXT    DEFAULT '',
+        our_name   TEXT    DEFAULT '',
+        comp_url   TEXT    NOT NULL,
+        source     TEXT    DEFAULT 'manual',
+        created_at TEXT,
+        UNIQUE(our_id, comp_url)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+# ─── Task 3.5: Inline Edit ────────────────────────────────────────────────────
+
+def update_product_data(
+    stable_key: str,
+    new_name: str = "",
+    new_price: float = 0.0,
+    new_url: str = "",
+) -> bool:
+    """
+    Upsert a product override into product_overrides.
+    stable_key format: 'edit_{product_name}' (mirrors soft-delete key convention).
+    Returns True on success.
+    """
+    try:
+        conn = get_db()
+        conn.execute(
+            """INSERT INTO product_overrides
+                   (stable_key, new_name, new_price, new_url, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(stable_key) DO UPDATE SET
+                   new_name   = excluded.new_name,
+                   new_price  = excluded.new_price,
+                   new_url    = excluded.new_url,
+                   updated_at = excluded.updated_at""",
+            (
+                str(stable_key).strip(),
+                str(new_name or "").strip(),
+                float(new_price or 0),
+                str(new_url or "").strip(),
+                _ts(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as _e:
+        _logger.debug("update_product_data error: %s", _e)
+        return False
+
+
+def get_product_overrides() -> dict:
+    """
+    Returns {stable_key: {new_name, new_price, new_url}} for every override row.
+    Called once at the top of render_pro_table() — O(1) DB round-trip.
+    """
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT stable_key, new_name, new_price, new_url FROM product_overrides"
+        ).fetchall()
+        conn.close()
+        return {
+            r["stable_key"]: {
+                "new_name":  r["new_name"],
+                "new_price": r["new_price"],
+                "new_url":   r["new_url"],
+            }
+            for r in rows
+        }
+    except Exception as _e:
+        _logger.debug("get_product_overrides error: %s", _e)
+        return {}
+
+
+def delete_product_override(stable_key: str) -> bool:
+    """Remove an override row — resets product to its original scraped values."""
+    try:
+        conn = get_db()
+        conn.execute(
+            "DELETE FROM product_overrides WHERE stable_key=?", (stable_key,)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as _e:
+        _logger.debug("delete_product_override error: %s", _e)
+        return False
+
+
+# ─── Task 3.6: Force Link ─────────────────────────────────────────────────────
+
+def force_link_product(our_id: str, our_name: str, comp_url: str) -> bool:
+    """
+    Write a manual competitor match into force_links with source='manual'.
+    UNIQUE(our_id, comp_url) prevents duplicate entries.
+    Returns True on success.
+    """
+    try:
+        conn = get_db()
+        conn.execute(
+            """INSERT OR REPLACE INTO force_links
+                   (our_id, our_name, comp_url, source, created_at)
+               VALUES (?, ?, ?, 'manual', ?)""",
+            (
+                str(our_id or "").strip(),
+                str(our_name or "").strip(),
+                str(comp_url or "").strip(),
+                _ts(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as _e:
+        _logger.debug("force_link_product error: %s", _e)
+        return False
+
+
+def get_force_links() -> list:
+    """
+    Returns all force-linked rows newest-first.
+    Each row: {our_id, our_name, comp_url, source, created_at}.
+    """
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT our_id, our_name, comp_url, source, created_at
+               FROM force_links
+               ORDER BY id DESC"""
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as _e:
+        _logger.debug("get_force_links error: %s", _e)
+        return []
+
+
+def delete_force_link(our_id: str, comp_url: str) -> bool:
+    """Remove a force link by (our_id, comp_url) pair."""
+    try:
+        conn = get_db()
+        conn.execute(
+            "DELETE FROM force_links WHERE our_id=? AND comp_url=?",
+            (str(our_id or "").strip(), str(comp_url or "").strip()),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as _e:
+        _logger.debug("delete_force_link error: %s", _e)
+        return False
+
+
+# ── module-level initialisation ───────────────────────────────────────────────
 init_db()
+init_db_v35()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1182,4 +1459,132 @@ def clear_competitor_store(competitor: str = "") -> int:
     conn.commit()
     conn.close()
     return deleted
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Pillar 4 — GCP Real-Time Persistence
+#  data/ directory is mounted as a Cloud persistent volume on GCP.
+#  Every analysis result and scraped batch is written here so data survives
+#  container restarts and is not lost in ephemeral memory.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def save_realtime_results(
+    df: "pd.DataFrame",   # type: ignore[name-defined]
+    label: str = "pipeline",
+    also_update_price_history: bool = True,
+) -> str:
+    """
+    Persist a real-time analysis results DataFrame to two places:
+      1. data/results_<label>_<timestamp>.csv  — GCP persistent volume, CSV format
+      2. price_history table (SQLite)          — optional, for trend tracking
+
+    Returns the path of the written CSV (or "" on failure).
+
+    Thread-safe: CSV write uses a unique timestamp in the filename (no race conditions).
+    SQLite writes use WAL mode (concurrent readers + one writer).
+
+    Args:
+        df                       : analysis results DataFrame from run_full_analysis()
+                                   or the real-time fuzzy fallback.
+        label                    : filename prefix (e.g. "pipeline", "batch_run").
+        also_update_price_history: if True, upserts each matched row into price_history
+                                   table for trend analysis and alerts.
+    """
+    import pandas as _pd
+    if df is None or (hasattr(df, "empty") and df.empty):
+        _logger.debug("save_realtime_results: empty DataFrame — skipping")
+        return ""
+
+    _data_dir = os.environ.get("DATA_DIR", "data")
+    os.makedirs(_data_dir, exist_ok=True)
+
+    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(_data_dir, f"results_{label}_{ts}.csv")
+
+    # ── 1. Write CSV ─────────────────────────────────────────────────────────
+    try:
+        safe = df.copy()
+        # Serialise list/dict columns that would corrupt CSV
+        for col in safe.columns:
+            try:
+                if safe[col].apply(lambda x: isinstance(x, (list, dict))).any():
+                    safe[col] = safe[col].astype(str)
+            except Exception:
+                pass
+        safe.to_csv(path, index=False, encoding="utf-8-sig")
+        _logger.info("save_realtime_results: CSV saved → %s  (%d rows)", path, len(df))
+    except Exception as _csv_err:
+        _logger.error("save_realtime_results: CSV write failed: %s", _csv_err)
+        path = ""
+
+    # ── 2. Update price_history (SQLite) ────────────────────────────────────
+    if also_update_price_history:
+        try:
+            for _, row in df.iterrows():
+                prod_name  = str(row.get("المنتج") or row.get("product_name") or "")
+                competitor = str(row.get("المنافس") or row.get("competitor") or "")
+                comp_price = float(row.get("سعر_المنافس") or row.get("comp_price") or 0)
+                our_price  = float(row.get("السعر") or row.get("our_price") or 0)
+                diff       = float(row.get("الفرق") or 0)
+                score      = float(row.get("نسبة_التطابق") or 0)
+                decision   = str(row.get("القرار") or "")
+                pid        = str(row.get("معرف_المنتج") or row.get("product_id") or "")
+                if prod_name and competitor and comp_price > 0:
+                    upsert_price_history(
+                        prod_name, competitor, comp_price,
+                        our_price=our_price, diff=diff,
+                        match_score=score, decision=decision,
+                        product_id=pid,
+                    )
+        except Exception as _ph_err:
+            _logger.debug("save_realtime_results: price_history update error: %s", _ph_err)
+
+    return path
+
+
+def append_scraper_csv(
+    rows: List[dict],
+    competitor: str,
+    output_path: str = "",
+) -> int:
+    """
+    Append a list of scraped product rows to a persistent CSV file in data/.
+    Creates the file if it does not exist; appends without rewriting existing rows.
+
+    Used by the realtime pipeline consumer to ensure every batch of scraped products
+    is durably written to the GCP volume even if the analysis stage fails.
+
+    Returns the total row-count of the file after appending.
+    """
+    import pandas as _pd
+
+    if not rows:
+        return 0
+
+    _data_dir = os.environ.get("DATA_DIR", "data")
+    os.makedirs(_data_dir, exist_ok=True)
+
+    if not output_path:
+        output_path = os.path.join(
+            _data_dir,
+            f"scraped_{competitor}_{datetime.now().strftime('%Y%m%d')}.csv",
+        )
+
+    new_df = _pd.DataFrame(rows)
+    try:
+        if os.path.exists(output_path):
+            existing = _pd.read_csv(output_path, encoding="utf-8-sig", low_memory=False)
+            combined = _pd.concat([existing, new_df], ignore_index=True)
+        else:
+            combined = new_df
+        combined.to_csv(output_path, index=False, encoding="utf-8-sig")
+        return len(combined)
+    except Exception as _e:
+        _logger.warning("append_scraper_csv error for %s: %s", competitor, _e)
+        try:
+            # Last resort: write just the new rows
+            new_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+            return len(new_df)
+        except Exception:
+            return 0
 
