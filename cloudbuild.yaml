@@ -1,5 +1,5 @@
 steps:
-  # 1. بناء صورة Docker
+  # 1. Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-image'
     args:
@@ -8,14 +8,15 @@ steps:
       - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
       - '.'
 
-  # 2. دفع الصورة إلى Container Registry
+  # 2. Push image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-image'
     args:
       - 'push'
       - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
 
-  # 3. النشر على Cloud Run مع ربط قاعدة البيانات والمتغيرات
+  # 3. Deploy to Cloud Run. Secrets/env vars are configured on the service
+  #    directly (see `gcloud run services update`) and persist across deploys.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloud-run'
     entrypoint: gcloud
@@ -27,10 +28,6 @@ steps:
       - 'gcr.io/$PROJECT_ID/mahwous-smart-pricing:latest'
       - '--region'
       - 'us-central1'
-      - '--add-cloudsql-instances'
-      - 'mahwous-smart-pricing-v30:us-central1:smart-pricing-db'
-      - '--update-env-vars'
-      - 'USE_MYSQL=True,MYSQL_USER=mahwous_user,MYSQL_PASSWORD=mahwous_pass_2026,MYSQL_DB=smart_pricing_db,MYSQL_HOST=/cloudsql/mahwous-smart-pricing-v30:us-central1:smart-pricing-db,GEMINI_KEY_1=AIzaSyD3BaXoNcmjweRuRZGhfYgUxr_YHAH8bZk,GEMINI_KEY_2=AIzaSyDtJgPxv3hXruK8tfFr8mWSC7ano40uAT0,OPENROUTER_API_KEY=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,WEBHOOK_NEW_PRODUCTS=https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm,WEBHOOK_UPDATE_PRICES=https://hook.eu2.make.com/8jia6gc7s1cpkeg6catlrvwck768sbfk,SCRAPER_STORE_CONCURRENCY=2,SCRAPER_MAX_URL_CONCURRENCY=8,SCRAPER_URL_BATCH_SIZE=8,SCRAPER_STORE_START_STAGGER_SEC=1.5'
       - '--allow-unauthenticated'
       - '--memory'
       - '4Gi'

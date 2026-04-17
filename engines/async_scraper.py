@@ -23,8 +23,20 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from urllib.parse import urlparse
 
+import concurrent.futures
+
 import aiohttp
 import pandas as pd
+
+# Dedicated thread pool for sync fallback calls (cloudscraper / curl_cffi / Selenium).
+# The default asyncio executor has only ~5 threads on Cloud Run (1 CPU + 4).
+# Without a dedicated pool, 50 concurrent URL fetches exhaust the shared pool,
+# new run_in_executor calls block waiting for a free thread, and the event loop
+# itself stalls — producing the indefinite "hang" after alkhabeershop.com.
+_SYNC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=12,
+    thread_name_prefix="scraper-sync",
+)
 
 if os.name == "nt":
     try:
@@ -451,8 +463,8 @@ async def fetch_product(
                         http_status_counters[str(resp.status)] = (
                             http_status_counters.get(str(resp.status), 0) + 1
                         )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("JSON fetch error %s: %s", url, e)
 
         # ── HTML Fetch بأسلوب التخفي ──────────────────────────────────────
         if _ANTI_BAN_AVAILABLE:
@@ -503,9 +515,12 @@ async def fetch_product(
             try:
                 from scrapers.anti_ban import try_all_sync_fallbacks
                 loop = asyncio.get_running_loop()
+                # Use dedicated executor to prevent default pool exhaustion.
+                # Reduced timeout: 12s instead of 25s — still enough for most
+                # cloudscraper/curl_cffi attempts without blocking the pool.
                 html = await loop.run_in_executor(
-                    None,
-                    lambda: try_all_sync_fallbacks(url, timeout=25),
+                    _SYNC_EXECUTOR,
+                    lambda: try_all_sync_fallbacks(url, timeout=12),
                 )
             except Exception:
                 html = None
@@ -624,7 +639,11 @@ async def fetch_product(
 
         try:
             loop = asyncio.get_running_loop()
-            v30_result = await loop.run_in_executor(None, lambda: _run_v30_sync(url, store_url))
+            # Use dedicated executor — same reason as sync fallback above.
+            v30_result = await loop.run_in_executor(
+                _SYNC_EXECUTOR,
+                lambda: _run_v30_sync(url, store_url),
+            )
             v30_row = _v30_row_from_result(v30_result, store_url)
             if _has_valid_price(v30_row):
                 return v30_row
@@ -718,7 +737,74 @@ async def scrape_one_store(
             return []
 
         if not all_urls:
-            logger.warning(f"⚠️ {domain} — لا روابط في Sitemap")
+            logger.warning(f"⚠️ {domain} — لا روابط في Sitemap، يحاول /products.json (Shopify API)...")
+            # Shopify fallback: many Saudi stores run Shopify but block sitemaps.
+            # /products.json?limit=250&page=X is usually unrestricted.
+            shopify_rows: List[dict] = []
+            try:
+                base = store_url.rstrip("/")
+                page = 1
+                while True:
+                    pj_url = f"{base}/products.json?limit=250&page={page}"
+                    try:
+                        _pj_resp = await asyncio.wait_for(
+                            session.get(
+                                pj_url,
+                                timeout=aiohttp.ClientTimeout(total=20),
+                                ssl=False,
+                                headers={"User-Agent": "Mozilla/5.0"},
+                                allow_redirects=True,
+                            ),
+                            timeout=25,
+                        )
+                    except Exception:
+                        break
+                    async with _pj_resp:
+                        if _pj_resp.status != 200:
+                            break
+                        try:
+                            pj_data = await _pj_resp.json(content_type=None)
+                        except Exception:
+                            break
+                    prods = pj_data.get("products", [])
+                    if not prods:
+                        break
+                    for prod in prods:
+                        variants = prod.get("variants", [{}])
+                        best_variant = next(
+                            (v for v in variants if v.get("available", True)), variants[0] if variants else {}
+                        )
+                        try:
+                            price = float(best_variant.get("price") or 0)
+                        except Exception:
+                            price = 0.0
+                        name = str(prod.get("title") or "").strip()
+                        if not name:
+                            continue
+                        handle = prod.get("handle", "")
+                        prod_url = f"{base}/products/{handle}" if handle else ""
+                        images = prod.get("images", [])
+                        img = str(images[0].get("src", "")) if images else ""
+                        row = extract_product(
+                            {"name": name, "price": price, "url": prod_url,
+                             "image": img, "brand": prod.get("vendor", ""),
+                             "sku": str(best_variant.get("sku", ""))},
+                            store_url,
+                        )
+                        if row:
+                            shopify_rows.append(row)
+                    if len(prods) < 250:
+                        break
+                    page += 1
+            except Exception as _shopify_exc:
+                logger.debug("Shopify products.json fallback failed for %s: %s", domain, _shopify_exc)
+
+            if shopify_rows:
+                logger.info(f"✅ {domain} — Shopify fallback: {len(shopify_rows)} منتج من products.json")
+                state.mark_done(domain, len(shopify_rows))
+                return shopify_rows
+
+            logger.warning(f"⚠️ {domain} — Sitemap فارغ وفشل Shopify fallback")
             state.mark_error(domain, "empty_sitemap")
             return []
 
@@ -775,7 +861,7 @@ async def scrape_one_store(
                 _consecutive_failures += 1
             except Exception:
                 progress.fetch_exceptions += 1
-                progress.last_error = traceback.format_exc()[:100]
+                progress.last_error = traceback.format_exc()[:500]
                 _consecutive_failures += 1
             finally:
                 done_count += 1
@@ -1027,15 +1113,35 @@ def run_single_store(
         progress.save()
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        rows = loop.run_until_complete(
-            scrape_one_store(
-                store_url, progress, state,
-                concurrency=concurrency,
-                max_products=max_products,
-                resume=False, # Architectural Fix: Force fetch for UI requests
-                single_mode=True,
+
+        # Hard ceiling per store: 2 hours. Prevents the daemon thread from
+        # hanging indefinitely when the event loop stalls (e.g. after thread-pool
+        # exhaustion caused by many concurrent sync fallback calls).
+        _SINGLE_STORE_TIMEOUT = 7200
+
+        async def _scrape_with_timeout():
+            return await asyncio.wait_for(
+                scrape_one_store(
+                    store_url, progress, state,
+                    concurrency=concurrency,
+                    max_products=max_products,
+                    resume=False,
+                    single_mode=True,
+                ),
+                timeout=_SINGLE_STORE_TIMEOUT,
             )
-        )
+
+        rows = loop.run_until_complete(_scrape_with_timeout())
+    except asyncio.TimeoutError:
+        msg = f"⏰ {domain} — Store timeout after {_SINGLE_STORE_TIMEOUT}s"
+        logger.warning(msg)
+        progress.running = False
+        progress.phase = "timeout"
+        progress.finished_at = datetime.now().isoformat()
+        progress.last_error = msg
+        progress.save()
+        state.mark_error(domain, "store_timeout")
+        return {"success": False, "rows": 0, "message": msg, "domain": domain}
     except Exception:
         progress.running = False
         progress.phase = "failed"

@@ -14,5 +14,7 @@ terminals
 agent-transcripts
 mcps
 
-# ملفات البيانات المحلية — تُحقن عبر env vars أو Railway Volume
-data/
+# Local data files — not baked into image
+data/*
+# Exception: competitors bootstrap file is needed inside the container
+!data/competitors_list_v30.json
