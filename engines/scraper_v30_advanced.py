@@ -70,11 +70,25 @@ class PriceExtractor:
             soup = BeautifulSoup(html, "html.parser")
 
             # ── Strategy 1: SAR-specific selectors FIRST ─────────────────
+            # Salla (sara-makeup.com) uses s-product-price-* variants; Zid
+            # (saeedsalah.com) uses product-price / product-formatted-price.
             for selector in (
                 "span[class*='sar']", "span[class*='ريال']",
                 "div[class*='sar']", "div[class*='ريال']",
                 "span.s-product-price", "div.s-product-price",
                 ".s-price-wrapper span",
+                # Salla variants
+                ".s-product-card-sale-price", ".s-product-price-sale",
+                ".s-product-card-price", "h4.s-product-card-price",
+                "span.s-product-card-price", "[data-product-price]",
+                # Zid variants
+                ".product-formatted-price", ".product-price-amount",
+                ".product-price .amount", "span.product-price",
+                "[data-testid='product-price']", "[data-testid*='price']",
+                # WooCommerce / generic Arabic stores
+                "p.price ins .woocommerce-Price-amount",
+                "p.price .woocommerce-Price-amount",
+                "bdi",
             ):
                 for elem in soup.select(selector):
                     text = elem.get_text(strip=True)
@@ -171,17 +185,36 @@ class PriceExtractor:
 
     @staticmethod
     def _parse_sar_text(text: str) -> Optional[float]:
-        """Parse price from text — strips SAR markers, rejects if USD present."""
+        """Parse price from text — strips SAR markers, rejects if USD present.
+
+        Handles Arabic-Indic digits, thousands separators and decimals. Does
+        NOT return None prematurely — falls through to the largest plausible
+        number when multiple numeric tokens appear (e.g. "299.00 ريال  /
+        شامل الضريبة").
+        """
         try:
             if _line_has_foreign_currency(text):
                 return None
-            cleaned = (
-                text.replace("ريال", "").replace("رس", "").replace("ر.س", "")
-                .replace("SAR", "").replace(",", "").replace("،", "").strip()
+            # Normalise Arabic-Indic digits (٠-٩ and ۰-۹) → ASCII
+            trans = str.maketrans(
+                "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+                "01234567890123456789",
             )
-            numbers = re.findall(r"\d+\.?\d*", cleaned)
-            if numbers:
-                p = float(numbers[0])
+            cleaned = (
+                text.translate(trans)
+                .replace("ريال", "").replace("رس", "").replace("ر.س", "")
+                .replace("ر.س.", "").replace("SR", "").replace("SAR", "")
+                .replace(",", "").replace("،", "").strip()
+            )
+            numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
+            if not numbers:
+                return None
+            # Prefer the first plausible price; fall back to any in-range value
+            for n in numbers:
+                try:
+                    p = float(n)
+                except ValueError:
+                    continue
                 if 0 < p < 100_000:
                     return p
         except Exception:

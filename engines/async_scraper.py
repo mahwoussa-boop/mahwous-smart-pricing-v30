@@ -518,11 +518,18 @@ async def fetch_product(
                 # Use dedicated executor to prevent default pool exhaustion.
                 # Reduced timeout: 12s instead of 25s — still enough for most
                 # cloudscraper/curl_cffi attempts without blocking the pool.
-                html = await loop.run_in_executor(
-                    _SYNC_EXECUTOR,
-                    lambda: try_all_sync_fallbacks(url, timeout=12),
+                # Hard absolute timeout — protects against sync libs (curl_cffi /
+                # cloudscraper) that ignore their own timeout under Cloudflare.
+                # Without wait_for, a hung thread occupies an executor slot
+                # indefinitely and eventually deadlocks the event loop.
+                html = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _SYNC_EXECUTOR,
+                        lambda: try_all_sync_fallbacks(url, timeout=10),
+                    ),
+                    timeout=15.0,
                 )
-            except Exception:
+            except (asyncio.TimeoutError, Exception):
                 html = None
 
         if not html:
@@ -640,9 +647,14 @@ async def fetch_product(
         try:
             loop = asyncio.get_running_loop()
             # Use dedicated executor — same reason as sync fallback above.
-            v30_result = await loop.run_in_executor(
-                _SYNC_EXECUTOR,
-                lambda: _run_v30_sync(url, store_url),
+            # Hard absolute timeout so v30 Selenium/sync fallbacks can never
+            # hang a worker thread forever on blocked targets.
+            v30_result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _SYNC_EXECUTOR,
+                    lambda: _run_v30_sync(url, store_url),
+                ),
+                timeout=25.0,
             )
             v30_row = _v30_row_from_result(v30_result, store_url)
             if _has_valid_price(v30_row):
