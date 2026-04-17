@@ -34,7 +34,7 @@ import pandas as pd
 # new run_in_executor calls block waiting for a free thread, and the event loop
 # itself stalls — producing the indefinite "hang" after alkhabeershop.com.
 _SYNC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=12,
+    max_workers=50,
     thread_name_prefix="scraper-sync",
 )
 

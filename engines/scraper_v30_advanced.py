@@ -48,7 +48,7 @@ except ImportError:
         return False
 
 # Thread pool for sync fallbacks — avoids blocking the event loop
-_SYNC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="scrv30")
+_SYNC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="scrv30")
 
 # ── USD/non-SAR detection ────────────────────────────────────────────────────
 _USD_MARKERS = re.compile(r"\$|USD|usd|دولار|euro|EUR|eur|يورو|£|GBP", re.I)

@@ -224,18 +224,24 @@ async def run_automation():
     if not entries:
         return 0
 
-    async with aiohttp.ClientSession() as session:
-        tasks = []
+    connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=120, connect=15)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        results = []
         for entry in entries:
-            tasks.append(process_store_sitemap(
-                session,
-                entry["name"],
-                entry["store_url"],
-                entry["sitemap_url"],
-            ))
+            try:
+                count = await process_store_sitemap(
+                    session,
+                    entry["name"],
+                    entry["store_url"],
+                    entry["sitemap_url"],
+                )
+                results.append(count or 0)
+            except Exception as e:
+                logger.error(f"❌ خطأ في {entry['name']}: {e}")
+                results.append(0)
 
-        results = await asyncio.gather(*tasks)
-        total_saved = sum(r for r in results if r)
+        total_saved = sum(results)
         logger.info(f"🏁 انتهت الأتمتة. إجمالي المنتجات المكتشفة: {total_saved}")
         return total_saved
 
