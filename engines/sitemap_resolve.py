@@ -18,6 +18,7 @@ scrapers/sitemap_resolve.py و make/sitemap_resolve.py مجرد Shims تستور
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -26,6 +27,13 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
+
+# Dedicated executor for sync sitemap fallbacks (cloudscraper / curl_cffi).
+# Keeps the shared asyncio default pool free for other awaitable work.
+_SITEMAP_SYNC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="sitemap-sync",
+)
 
 from scrapers.anti_ban import (
     fetch_with_retry,
@@ -85,9 +93,10 @@ async def _fetch_sitemap_text(
             )
 
     loop = asyncio.get_running_loop()
+    # Use dedicated executor and shorter timeout to avoid blocking the shared pool.
     sync_text = await loop.run_in_executor(
-        None,
-        lambda u=url: try_all_sync_fallbacks(u, timeout=28),
+        _SITEMAP_SYNC_EXECUTOR,
+        lambda u=url: try_all_sync_fallbacks(u, timeout=15),
     )
     if sync_text and (
         _looks_like_xml(sync_text)
