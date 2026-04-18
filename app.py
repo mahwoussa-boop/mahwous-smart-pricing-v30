@@ -1915,8 +1915,21 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
                         _pid = str(_pid_raw).strip()
                     if _pid in ("nan", "None", "NaN", ""):
                         _pid = ""
+                    # رقم المنتج NO. من كتالوج سلة (Primary Key)
+                    _no_raw_b7 = (
+                        row.get("No.", "") or row.get("NO", "") or row.get("no", "")
+                        or row.get("No", "") or row.get("رقم_المنتج", "") or ""
+                    )
+                    try:
+                        _fv_no = float(_no_raw_b7)
+                        _no_b7 = str(int(_fv_no)) if _fv_no == int(_fv_no) else str(_no_raw_b7)
+                    except (ValueError, TypeError):
+                        _no_b7 = str(_no_raw_b7).strip()
+                    if _no_b7 in ("nan", "None", "NaN", ""):
+                        _no_b7 = ""
                     _final_price = _custom_price if _custom_price > 0 else _auto_price_row
                     res = send_single_product({
+                        "NO":         _no_b7 or _pid,
                         "product_id": _pid,
                         "name": our_name, "price": _final_price,
                         "comp_name": comp_name, "comp_price": comp_price,
@@ -3160,6 +3173,65 @@ elif page == "🔍 منتجات مفقودة":
         "has_results": bool(st.session_state.results),
         "has_missing_key": bool(st.session_state.results and "missing" in st.session_state.results),
     })
+    # ── 🤖 الاستخراج الذكي بـ AI (محرك جديد — يدمج: مطابقة + ماركات + تصنيفات + وصف) ──
+    with st.expander("🤖 استخراج ذكي بـ AI (مع ماركات + تصنيفات + وصف Mahwous)", expanded=False):
+        st.markdown(
+            "ارفع كتالوجك + ملفات المنافسين + ماركات/تصنيفات مهووس → "
+            "يستخرج المفقودات الحقيقية فقط (≥85%=موجود، 70-85%=AI verify، <70%=مفقود) "
+            "ويصدّر `new_products.xlsx` + `new_brands.csv` بصيغة سلة."
+        )
+        try:
+            from engines.missing_products_engine import build_missing_exports
+            import tempfile as _tmp
+            from pathlib import Path as _Path
+
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                _smart_cat  = st.file_uploader("📦 كتالوج متجرنا", type=["xlsx","xls","csv"], key="smart_miss_cat")
+                _smart_br   = st.file_uploader("🏷️ ماركات مهووس", type=["csv","xlsx"], key="smart_miss_br")
+            with _c2:
+                _smart_cmp  = st.file_uploader("🏪 ملفات المنافسين (متعدد)", type=["csv","xlsx"],
+                                                accept_multiple_files=True, key="smart_miss_cmp")
+                _smart_cats = st.file_uploader("📁 تصنيفات مهووس", type=["csv","xlsx"], key="smart_miss_cats")
+
+            _o1, _o2 = st.columns(2)
+            _use_ai     = _o1.toggle("🤖 تفعيل AI", value=True, key="smart_miss_ai")
+            _gen_desc   = _o2.toggle("📝 توليد الوصف", value=True, key="smart_miss_desc")
+
+            if st.button("🚀 ابدأ الاستخراج الذكي", type="primary", key="smart_miss_run"):
+                if not all([_smart_cat, _smart_br, _smart_cats, _smart_cmp]):
+                    st.error("❌ ارفع جميع الملفات الأربعة.")
+                else:
+                    def _save(f):
+                        t = _tmp.NamedTemporaryFile(delete=False, suffix=_Path(f.name).suffix)
+                        t.write(f.read()); t.close(); return t.name
+                    with st.spinner("⚙️ جارٍ الفحص الذكي..."):
+                        _res = build_missing_exports(
+                            catalog_path=_save(_smart_cat),
+                            competitor_paths=[_save(f) for f in _smart_cmp],
+                            brands_path=_save(_smart_br),
+                            categories_path=_save(_smart_cats),
+                            output_dir="data/exports",
+                            use_ai=_use_ai,
+                            generate_descriptions=_gen_desc,
+                        )
+                    st.success(f"✅ {_res['products_count']} منتج | {_res['new_brands_count']} ماركة جديدة")
+                    _d1, _d2 = st.columns(2)
+                    with _d1:
+                        with open(_res["products_file"], "rb") as fh:
+                            st.download_button("📥 تحميل المنتجات الجديدة", fh.read(),
+                                file_name=_Path(_res["products_file"]).name,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True, key="smart_dl_prod")
+                    with _d2:
+                        if _res["new_brands_file"]:
+                            with open(_res["new_brands_file"], "rb") as fh:
+                                st.download_button("📥 تحميل الماركات الجديدة", fh.read(),
+                                    file_name=_Path(_res["new_brands_file"]).name,
+                                    mime="text/csv", use_container_width=True, key="smart_dl_br")
+        except Exception as _smart_e:
+            st.error(f"تعذّر تحميل المحرك الذكي: {_smart_e}")
+
     # ── المستشار الذكي للمفقودات ─────────────────────────────────────────
     with st.expander("🧠 المستشار الذكي للمفقودات (AI Expert)", expanded=False):
         st.markdown("اسأل المستشار عن استراتيجية إضافة هذه المنتجات أو تحليل السوق لها:")
