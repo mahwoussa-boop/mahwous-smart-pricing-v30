@@ -485,14 +485,25 @@ async def fetch_product(
 ) -> dict | None:
     async with semaphore:
         json_url = url if url.endswith(".json") else url.rstrip("/") + ".json"
-        
+
+        # Sticky-per-store proxy selection (None if pool empty → direct).
+        _domain_for_proxy = _domain(store_url)
+        _proxy_url: Optional[str] = None
+        try:
+            if _ANTI_BAN_AVAILABLE:
+                from scrapers.anti_ban import proxy_rotator as _pr
+                _proxy_url = _pr.get_proxy_for_domain(_domain_for_proxy)
+        except Exception:
+            _proxy_url = None
+
         # تطبيق تأخير بسيط جداً داخل كل سレッド لمنع الـ Spike Requests
         if _ANTI_BAN_AVAILABLE:
             await stealth_manager.apply_smart_delay(0.5, 1.5)
-            
+
         try:
             if _ANTI_BAN_AVAILABLE:
-                resp = await fetch_with_retry(session, json_url, max_retries=2, referer=store_url)
+                resp = await fetch_with_retry(session, json_url, max_retries=2,
+                                               referer=store_url, proxy=_proxy_url)
                 if resp is not None:
                     try:
                         if resp.status == 200 and "json" in resp.headers.get("Content-Type", ""):
@@ -534,7 +545,8 @@ async def fetch_product(
 
         try:
             if _ANTI_BAN_AVAILABLE:
-                resp = await fetch_with_retry(session, url, max_retries=3, referer=store_url)
+                resp = await fetch_with_retry(session, url, max_retries=3,
+                                               referer=store_url, proxy=_proxy_url)
                 if resp is not None:
                     try:
                         if resp.status == 200:
@@ -583,7 +595,7 @@ async def fetch_product(
                 html = await asyncio.wait_for(
                     loop.run_in_executor(
                         _SYNC_EXECUTOR,
-                        lambda: try_all_sync_fallbacks(url, timeout=10),
+                        lambda: try_all_sync_fallbacks(url, timeout=10, proxy=_proxy_url),
                     ),
                     timeout=15.0,
                 )
@@ -719,6 +731,38 @@ async def fetch_product(
                 return v30_row
         except Exception:
             logger.debug("v30 async fallback failed for %s: %s", url, traceback.format_exc())
+
+        # ── Last-resort: name-only row ────────────────────────────────────
+        # If we have a product name from JSON-LD/OG/H1 but no extractable
+        # price, still return the row with price=0 so it is persisted. The
+        # advanced scraper (v30.2 — "كشط الأسعار المفقودة") is designed to
+        # backfill prices for rows with missing price. Without this, sites
+        # that obscure prices produce 0 rows + high errors — misclassified.
+        try:
+            _fallback_name = ""
+            _fallback_img = ""
+            _fallback_brand = ""
+            if 'ld_acc' in locals() and isinstance(ld_acc, dict) and ld_acc.get("name"):
+                _fallback_name = str(ld_acc.get("name", "")).strip()
+                _imgs = ld_acc.get("images") or []
+                _fallback_img = str(_imgs[0]).strip() if _imgs else ""
+                _fallback_brand = str(ld_acc.get("brand") or "")
+            elif 'pname' in locals() and pname:
+                _fallback_name = str(pname).strip()
+                _fallback_img = str(pimg or "") if 'pimg' in locals() else ""
+            if _fallback_name and _url_looks_like_product_page(url):
+                return extract_product(
+                    {
+                        "name":  _fallback_name,
+                        "price": 0.0,
+                        "image": _fallback_img,
+                        "url":   url,
+                        "brand": _fallback_brand,
+                    },
+                    store_url,
+                )
+        except Exception:
+            pass
 
         return None
 
@@ -1055,9 +1099,20 @@ async def scrape_one_store(
     if not _force_run:
         state.mark_done(domain, len(rows))
 
+    # Merge counts from the rate-limiter (which also sees 403/429 responses
+    # handled internally by fetch_with_retry) so the UI diagnostic reflects
+    # total HTTP blocks, not only those observed in the outer response.
+    _rl_blocks = {"403": 0, "429": 0, "5xx": 0}
+    try:
+        if _ANTI_BAN_AVAILABLE:
+            from scrapers.anti_ban import get_rate_limiter as _grl
+            _rl_blocks = _grl().get_block_counts(domain) or _rl_blocks
+    except Exception:
+        pass
     progress.stores_http_errors[domain] = {
-        "403": int(store_http_status.get("403", 0)),
-        "429": int(store_http_status.get("429", 0)),
+        "403": max(int(store_http_status.get("403", 0)), int(_rl_blocks.get("403", 0))),
+        "429": max(int(store_http_status.get("429", 0)), int(_rl_blocks.get("429", 0))),
+        "5xx": int(_rl_blocks.get("5xx", 0)),
     }
     progress.save()
     logger.info(f"✅ {domain} — {len(rows)} منتج")
@@ -1238,10 +1293,14 @@ def run_single_store(
     progress.rows_in_csv  = n
     progress.save()
 
+    # Classify success from the derived terminal phase (never True when 0 rows).
+    _ok = progress.phase == "completed" or (progress.phase == "partial" and len(rows) > 0)
+    _msg_icon = "✅" if _ok else ("⚠️" if progress.phase == "partial" else "❌")
     return {
-        "success": True,
+        "success": bool(_ok),
         "rows":    len(rows),
-        "message": f"✅ {len(rows)} منتج من {domain}",
+        "phase":   progress.phase,
+        "message": f"{_msg_icon} {len(rows)} منتج من {domain} — حالة: {progress.phase}",
         "domain":  domain,
     }
 
