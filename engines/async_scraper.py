@@ -207,6 +207,40 @@ def _cleanup_pid_file() -> None:
         logger.warning(f"تعذّر حذف PID file: {traceback.format_exc()}")
 
 
+def _derive_terminal_phase(rows: int, errors: int, urls_processed: int) -> str:
+    """
+    يحسم الحالة النهائية للكشط بشكل حتمي:
+      - failed   : 0 منتج محفوظ + أخطاء مرصودة (أو لا معالجة أصلاً)
+      - partial  : منتجات محفوظة لكن نسبة الأخطاء ≥ 40% من المعالج
+      - completed: نجاح طبيعي
+    تُستخدم من جميع نقاط الإنهاء لضمان اتساق UI.
+    """
+    try:
+        rows    = int(rows or 0)
+        errors  = int(errors or 0)
+        urls_processed = int(urls_processed or 0)
+    except Exception:
+        return "completed"
+    if rows <= 0 and (errors > 0 or urls_processed == 0):
+        return "failed"
+    denom = max(urls_processed, rows + errors, 1)
+    err_ratio = errors / denom
+    if rows > 0 and err_ratio >= 0.40:
+        return "partial"
+    return "completed"
+
+
+def _finalize_progress_phase(progress) -> str:
+    """يضبط progress.phase للحالة النهائية المشتقة ويعيدها."""
+    phase = _derive_terminal_phase(
+        getattr(progress, "rows_in_csv", 0),
+        getattr(progress, "fetch_exceptions", 0),
+        getattr(progress, "urls_processed", 0),
+    )
+    progress.phase = phase
+    return phase
+
+
 def _mark_progress_failed(message: str) -> None:
     try:
         progress = Progress.load()
@@ -1090,7 +1124,7 @@ async def scrape_one_store_streaming(
             except asyncio.CancelledError:
                 pass
         progress.running     = False
-        progress.phase       = "completed"
+        _finalize_progress_phase(progress)
         progress.finished_at = datetime.now().isoformat()
         progress.save()
 
@@ -1170,7 +1204,7 @@ def run_single_store(
 
     n = _merge_rows_to_csv(rows, domain)
     progress.running      = False
-    progress.phase        = "completed"
+    _finalize_progress_phase(progress)
     progress.finished_at  = datetime.now().isoformat()
     progress.stores_done  = 1
     progress.stores_results[domain] = len(rows)
@@ -1369,7 +1403,7 @@ async def run_scraper(
 
     # ── Finalise ─────────────────────────────────────────────────────────────
     progress.running     = False
-    progress.phase       = "completed"
+    _finalize_progress_phase(progress)
     progress.finished_at = datetime.now().isoformat()
     progress.save()
 
