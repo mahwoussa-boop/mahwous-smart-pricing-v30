@@ -4439,35 +4439,204 @@ elif page == "⚡ أتمتة Make":
             sec_type = section_type_map[sec_key]
             df_s     = st.session_state.results.get(sec_key, pd.DataFrame())
 
+            # ═══════════════════════════════════════════════════════════════
+            # قسم المفقودات — نظام إدارة سلة الذكي
+            # ═══════════════════════════════════════════════════════════════
+            if sec_type == "missing":
+                try:
+                    from utils.missing_queue_manager import (
+                        enqueue_missing_products, get_queue_stats,
+                        get_ready_products, get_pending_brands,
+                        get_failed_products, get_waiting_products,
+                        update_brand_catalog_from_file, update_category_catalog_from_file,
+                        mark_products_sent, retry_failed_products,
+                        mark_brand_uploaded, export_missing_brands_csv,
+                        export_ready_products_salla_csv,
+                        BRANDS_QUEUE_FILE, PRODUCTS_QUEUE_FILE,
+                    )
+                    _qmgr_ok = True
+                except ImportError:
+                    _qmgr_ok = False
+                    st.warning("⚠️ تعذّر تحميل نظام الطابور — تحقق من utils/missing_queue_manager.py")
+
+                if _qmgr_ok:
+                    st.markdown("---")
+                    st.markdown("### 🛒 إدارة سلة الذكية — المنتجات المفقودة")
+
+                    # ── أضف نتائج التحليل الحالي للطابور ────────────────────
+                    if not df_s.empty:
+                        _products_for_queue = export_to_make_format(df_s, "missing")
+                        if st.button("➕ أضف نتائج التحليل الحالية للطابور", key="enqueue_btn"):
+                            _eq = enqueue_missing_products(_products_for_queue)
+                            st.success(_eq["message"])
+                            st.rerun()
+
+                    # ── إحصاءات الطابور ──────────────────────────────────────
+                    _stats = get_queue_stats()
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("⏳ بانتظار ماركة", _stats["waiting_brand"])
+                    c2.metric("✅ جاهز للإرسال",  _stats["ready_to_send"])
+                    c3.metric("📤 أُرسل بنجاح",   _stats["sent_success"])
+                    c4.metric("❌ فشل الإرسال",   _stats["sent_failed"])
+
+                    st.markdown("---")
+
+                    # ══════════════════════════════════════════════════════
+                    # 1️⃣ تحديث كتالوج الماركات
+                    # ══════════════════════════════════════════════════════
+                    with st.expander(f"1️⃣ تحديث كتالوج الماركات — {_stats.get('brands_pending',0)} ماركة مفقودة", expanded=_stats.get('brands_pending',0) > 0):
+                        st.caption("ارفع ملف «ماركات مهووس.csv» المحدث بعد إضافة الماركات الجديدة في سلة")
+                        _brand_file = st.file_uploader("📂 ارفع ماركات مهووس.csv", type=["csv","xlsx"], key="brand_catalog_upload")
+                        if _brand_file:
+                            try:
+                                _bdf = pd.read_csv(_brand_file) if _brand_file.name.endswith(".csv") else pd.read_excel(_brand_file)
+                                _bres = update_brand_catalog_from_file(_bdf)
+                                if _bres["success"]:
+                                    st.success(_bres["message"])
+                                    if _bres.get("upgraded_products", 0) > 0:
+                                        st.info(f"🔓 {_bres['upgraded_products']} منتج انتقل إلى «جاهز للإرسال»")
+                                    st.rerun()
+                                else:
+                                    st.error(_bres["message"])
+                            except Exception as _be:
+                                st.error(f"❌ خطأ في قراءة الملف: {_be}")
+
+                    # ══════════════════════════════════════════════════════
+                    # 2️⃣ الماركات المفقودة — تصدير إجباري قبل الإرسال
+                    # ══════════════════════════════════════════════════════
+                    _pending_brands = get_pending_brands()
+                    with st.expander(f"2️⃣ الماركات المفقودة 🏷️ ({len(_pending_brands)} ماركة تنتظر الرفع)", expanded=len(_pending_brands) > 0):
+                        if _pending_brands:
+                            st.warning("⚠️ يجب رفع هذه الماركات يدوياً في سلة قبل إرسال منتجاتها")
+                            _bq_df = pd.DataFrame(_pending_brands)[["brand_name","discovered_at"]]
+                            _bq_df.columns = ["اسم الماركة", "تاريخ الاكتشاف"]
+                            st.dataframe(_bq_df, use_container_width=True, hide_index=True)
+
+                            _brands_export_path = str(BRANDS_QUEUE_FILE.parent / "missing_brands_export.csv")
+                            if st.button("⬇️ تصدير ملف الماركات المفقودة (صيغة سلة)", key="export_brands_btn", type="primary"):
+                                _bexp = export_missing_brands_csv(_brands_export_path)
+                                if _bexp["success"]:
+                                    with open(_brands_export_path, "rb") as _f:
+                                        st.download_button(
+                                            label=f"💾 تحميل {_bexp['count']} ماركة مفقودة",
+                                            data=_f.read(),
+                                            file_name="missing_brands_salla.csv",
+                                            mime="text/csv",
+                                            key="download_brands_csv",
+                                        )
+                                    st.success(_bexp["message"])
+                                else:
+                                    st.error(_bexp["message"])
+
+                            st.caption("بعد الرفع في سلة، حدد الماركات المرفوعة:")
+                            for _pb in _pending_brands[:20]:
+                                _pb_col1, _pb_col2 = st.columns([4, 1])
+                                _pb_col1.write(_pb["brand_name"])
+                                if _pb_col2.button("✅ مرفوعة", key=f"uploaded_brand_{_pb['brand_key']}"):
+                                    mark_brand_uploaded(_pb["brand_key"])
+                                    st.success(f"✅ تم تعليم «{_pb['brand_name']}» كمرفوعة — منتجاتها جاهزة الآن")
+                                    st.rerun()
+                        else:
+                            st.success("✅ كل الماركات متوفرة في المتجر — لا شيء مفقود")
+
+                    # ══════════════════════════════════════════════════════
+                    # 3️⃣ المنتجات الجاهزة للإرسال
+                    # ══════════════════════════════════════════════════════
+                    _ready_products = get_ready_products()
+                    with st.expander(f"3️⃣ المنتجات الجاهزة للإرسال 📦 ({len(_ready_products)} منتج)", expanded=len(_ready_products) > 0):
+                        if _ready_products:
+                            _rp_df = pd.DataFrame(_ready_products)[["product_name","brand_name","price","category_name"]]
+                            _rp_df.columns = ["المنتج","الماركة","السعر","التصنيف"]
+                            st.dataframe(_rp_df.head(50), use_container_width=True, hide_index=True)
+
+                            _rc1, _rc2 = st.columns(2)
+
+                            # إرسال عبر Make
+                            if _rc1.button("📤 إرسال عبر Make", key="send_ready_make", type="primary",
+                                           disabled=len(_pending_brands) > 0):
+                                if _pending_brands:
+                                    st.error("⛔ أرفع الماركات المفقودة أولاً قبل الإرسال")
+                                else:
+                                    _pkeys = [p["product_key"] for p in _ready_products]
+                                    _res = send_missing_products(_ready_products)
+                                    mark_products_sent(_pkeys, _res.get("success", False), _res.get("message",""))
+                                    if _res.get("success"):
+                                        st.success(_res["message"])
+                                    else:
+                                        st.error(_res["message"])
+                                    st.rerun()
+
+                            # تصدير CSV سلة
+                            if _rc2.button("⬇️ تصدير CSV سلة (رفع يدوي)", key="export_ready_csv"):
+                                _prod_export_path = str(PRODUCTS_QUEUE_FILE.parent / "ready_products_salla.csv")
+                                _pexp = export_ready_products_salla_csv(_prod_export_path)
+                                if _pexp["success"]:
+                                    with open(_prod_export_path, "rb") as _f:
+                                        st.download_button(
+                                            label=f"💾 تحميل {_pexp['count']} منتج (صيغة سلة)",
+                                            data=_f.read(),
+                                            file_name="ready_products_salla.csv",
+                                            mime="text/csv",
+                                            key="download_products_csv",
+                                        )
+                                    st.success(_pexp["message"])
+                                else:
+                                    st.error(_pexp["message"])
+
+                            if _pending_brands:
+                                st.warning(f"⛔ زر الإرسال معطّل — أرفع {len(_pending_brands)} ماركة مفقودة أولاً")
+                        else:
+                            st.info("لا توجد منتجات جاهزة حالياً")
+
+                    # ══════════════════════════════════════════════════════
+                    # 4️⃣ سجل الطابور الكامل
+                    # ══════════════════════════════════════════════════════
+                    with st.expander("4️⃣ سجل الطابور الكامل 📋"):
+                        _waiting = get_waiting_products()
+                        _failed  = get_failed_products()
+
+                        if _waiting:
+                            st.markdown(f"**⏳ بانتظار ماركات: {len(_waiting)} منتج**")
+                            _wdf = pd.DataFrame(_waiting)[["product_name","brand_name","discovered_at"]]
+                            _wdf.columns = ["المنتج","الماركة","تاريخ الاكتشاف"]
+                            st.dataframe(_wdf.head(100), use_container_width=True, hide_index=True)
+
+                        if _failed:
+                            st.markdown(f"**❌ فشل الإرسال: {len(_failed)} منتج**")
+                            _fdf = pd.DataFrame(_failed)[["product_name","brand_name","error_msg","sent_at"]]
+                            _fdf.columns = ["المنتج","الماركة","سبب الفشل","وقت المحاولة"]
+                            st.dataframe(_fdf, use_container_width=True, hide_index=True)
+                            if st.button("🔄 إعادة محاولة الفاشلة", key="retry_failed_btn"):
+                                _rc = retry_failed_products()
+                                st.success(f"✅ أُعيد تعيين {_rc} منتج إلى «جاهز للإرسال»")
+                                st.rerun()
+
+                        if not _waiting and not _failed:
+                            st.success("✅ الطابور نظيف — لا منتجات متعطلة")
+
+                    st.markdown("---")
+
+            # ═══════════════════════════════════════════════════════════════
+            # باقي الأقسام (غير المفقودات) — الإرسال المباشر
+            # ═══════════════════════════════════════════════════════════════
             if not df_s.empty:
-                # معاينة ما سيُرسل
-                _prev_cols = ["المنتج","السعر","سعر_المنافس","الماركة"]
-                _prev_cols = [c for c in _prev_cols if c in df_s.columns]
-                if _prev_cols:
-                    st.dataframe(df_s[_prev_cols].head(10), use_container_width=True)
+                if sec_type != "missing":
+                    # معاينة ما سيُرسل
+                    _prev_cols = ["المنتج","السعر","سعر_المنافس","الماركة"]
+                    _prev_cols = [c for c in _prev_cols if c in df_s.columns]
+                    if _prev_cols:
+                        st.dataframe(df_s[_prev_cols].head(10), use_container_width=True)
 
-                products = export_to_make_format(df_s, sec_type)
-                _sendable = [p for p in products if p.get("name") and p.get("price",0) > 0]
-                st.info(f"سيتم إرسال {len(_sendable)} منتج → Make (Payload: product_id + name + price)")
+                    products = export_to_make_format(df_s, sec_type)
+                    _sendable = [p for p in products if p.get("name") and p.get("price",0) > 0]
+                    st.info(f"سيتم إرسال {len(_sendable)} منتج → Make")
 
-                if st.button("📤 إرسال الآن", type="primary"):
-                    if sec_type == "missing":
-                        res = send_missing_products(_sendable)
-                    else:
+                    if st.button("📤 إرسال الآن", type="primary"):
                         res = send_price_updates(_sendable)
-                    # FIX: Missing Products Display Recovery
-                    if sec_type == "missing" and res.get("success"):
-                        _missing_link_col = None
-                        for _c in ["رابط_المنافس", "الرابط", "رابط المنتج", "url", "رابط", "Link"]:
-                            if _c in df_s.columns:
-                                _missing_link_col = _c
-                                break
-                        if _missing_link_col:
-                            for _u in df_s[_missing_link_col].dropna().astype(str):
-                                _track_processed_missing_url(_u)
-                    st.success(res["message"]) if res["success"] else st.error(res["message"])
+                        st.success(res["message"]) if res["success"] else st.error(res["message"])
             else:
-                st.info("لا توجد بيانات في هذا القسم")
+                if sec_type != "missing":
+                    st.info("لا توجد بيانات في هذا القسم")
 
     with tab3:
         pending = st.session_state.decisions_pending
