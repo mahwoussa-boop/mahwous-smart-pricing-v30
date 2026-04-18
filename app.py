@@ -115,6 +115,7 @@ from utils.db_manager import (init_db, log_event, log_decision,
                                get_analysis_history, upsert_price_history,
                                get_price_history, get_price_changes,
                                save_job_progress, get_job_progress, get_last_job,
+                               any_running_job, release_stale_running_jobs,
                                save_hidden_product, get_hidden_product_keys,
                                init_db_v26, upsert_our_catalog, upsert_comp_catalog,
                                save_processed, get_processed, undo_processed,
@@ -2650,7 +2651,54 @@ if page == "📊 لوحة التحكم":
             help="عطّلها لتشغيل المقارنة فقط دون تعديل جداول كتالوجنا والمنافسين في SQLite.",
         )
 
-    if st.button("🚀 بدء التحليل", type="primary", key="dash_btn_start_analysis"):
+    # ── Duplicate-click mutex: UI + DB level ────────────────────────────
+    try:
+        release_stale_running_jobs(stale_after_seconds=3600)
+    except Exception:
+        pass
+    _db_running_job = None
+    try:
+        _db_running_job = any_running_job(stale_after_seconds=3600)
+    except Exception:
+        _db_running_job = None
+    _ui_job_running = bool(st.session_state.get("job_running", False))
+    _analysis_locked = _ui_job_running or bool(_db_running_job)
+
+    if _analysis_locked:
+        _lock_jid = (
+            st.session_state.get("job_id")
+            or (_db_running_job or {}).get("job_id")
+            or "?"
+        )
+        _lock_proc = (_db_running_job or {}).get("processed", 0)
+        _lock_tot  = (_db_running_job or {}).get("total", 0)
+        _prog_txt = (
+            f" — {_lock_proc:,}/{_lock_tot:,}"
+            if (_lock_tot and _lock_tot > 0) else ""
+        )
+        st.info(
+            f"⏳ يوجد تحليل قيد التشغيل (Job: `{_lock_jid}`){_prog_txt} — "
+            "زر «بدء التحليل» مُعطَّل حتى الانتهاء."
+        )
+
+    if st.button(
+        "🚀 بدء التحليل" if not _analysis_locked else "⏳ تحليل جارٍ... (يرجى الانتظار)",
+        type="primary",
+        key="dash_btn_start_analysis",
+        disabled=_analysis_locked,
+    ):
+        # Second-chance re-check right before doing work: covers race between
+        # render and click-handler (another replica may have acquired the lock).
+        try:
+            _late = any_running_job(stale_after_seconds=3600)
+        except Exception:
+            _late = None
+        if _late or st.session_state.get("job_running", False):
+            st.warning(
+                f"⚠️ تم منع تشغيل مزدوج — تحليل قيد التنفيذ بالفعل "
+                f"(Job: `{(_late or {}).get('job_id', st.session_state.get('job_id','?'))}`)."
+            )
+            st.stop()
         # Phase 1: لا نمسح المعالجات — البيانات المعالجة تبقى مستمرة عبر التحليلات
         # Smart Reversion في _split_results سيُعيد المنتجات تلقائياً إذا تغير سعر المنافس
         # ── حارس المدخلات (يدعم الوضعين: يدوي وتلقائي) ──────────────────
