@@ -547,7 +547,13 @@ def _get_cffi_session():
             if _CFFI_SESSION is None:
                 try:
                     from curl_cffi import requests as cffi_requests
-                    _CFFI_SESSION = cffi_requests.Session(impersonate="chrome110")
+                    # Try newest Chrome impersonation, fall back gracefully
+                    for imp in ("chrome131", "chrome124", "chrome120", "chrome110"):
+                        try:
+                            _CFFI_SESSION = cffi_requests.Session(impersonate=imp)
+                            break
+                        except Exception:
+                            continue
                 except ImportError:
                     pass
     return _CFFI_SESSION

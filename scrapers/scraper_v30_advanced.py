@@ -338,8 +338,22 @@ class AdvancedScraper:
         if not html:
             return self._fail_result(url, store_name)
 
-        # ── Phase 3: Extract price (SAR-first) ──────────────────────────
-        price = self.price_extractor.extract_price(html, url)
+        # ── Phase 0: Structured data (JSON-LD + OG meta) — fastest, richest ─
+        structured_name = ""
+        structured_image = ""
+        try:
+            from engines.json_ld_extractor import extract as _ld_extract
+            ld = _ld_extract(html)
+        except Exception:
+            ld = {}
+        price = ld.get("price") if ld else None
+        if ld:
+            structured_name = ld.get("name", "") or ""
+            structured_image = ld.get("image", "") or ""
+
+        # ── Phase 3: CSS selector extraction (when structured data missing) ─
+        if not price or price <= 0:
+            price = self.price_extractor.extract_price(html, url)
 
         # ── Phase 4a: AI Selector fallback (cached per domain) ───────────
         ai_name = ""
@@ -372,7 +386,7 @@ class AdvancedScraper:
 
         title_tag = soup.find("title")
         raw_name = (
-            ai_name if ai_name else (
+            structured_name or ai_name or (
                 title_tag.get_text(strip=True) if title_tag
                 else url.split("/")[-1].replace("-", " ")
             )
@@ -380,8 +394,9 @@ class AdvancedScraper:
         product_name = _ai_clean_product_name(raw_name)
 
         image_url = ""
-        if ai_image and ai_image.startswith(("http", "//")):
-            image_url = urljoin(url, ai_image)
+        preferred_img = structured_image or ai_image
+        if preferred_img and preferred_img.startswith(("http", "//")):
+            image_url = urljoin(url, preferred_img)
         if not image_url:
             og_img = soup.find("meta", property="og:image")
             if og_img and og_img.get("content", "").startswith("http"):
