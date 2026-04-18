@@ -5291,21 +5291,75 @@ elif page == "🕷️ كشط المنافسين":
                     except Exception:
                         pass
 
+            # ── Evidence-backed failure-class selection ───────────────────
+            # Trust persisted counters (urls_discovered/enqueued/attempted +
+            # skipped_reason histogram). Never claim "sitemap empty" unless
+            # urls_discovered == 0.
+            _discovered = int(_prog.get("urls_discovered", 0) or 0)
+            _enqueued   = int(_prog.get("urls_enqueued",   0) or 0)
+            _attempted  = int(_prog.get("urls_attempted",  0) or 0)
+            _skipmap    = _prog.get("urls_skipped_reason") or {}
+            if not isinstance(_skipmap, dict):
+                _skipmap = {}
+
             _hints = []
+            # Class 1 — HTTP blocks dominate (Cloudflare / WAF / 429 rate-limit)
             if _sum_403 > 0 or _sum_429 > 0:
                 _hints.append(
                     f"🛡️ **حجب HTTP مرصود**: 403×{_sum_403} · 429×{_sum_429} — "
-                    "غالباً Cloudflare/Rate-Limit. قلّل «طلبات متزامنة» إلى 2–4 وأعد المحاولة."
+                    "غالباً Cloudflare/Rate-Limit. قلّل «طلبات متزامنة» إلى 2–4 "
+                    "أو فعّل بروكسي عبر متغيرات البيئة `SCRAPER_PROXIES`."
                 )
-            if _urls_proc == 0:
-                _hints.append("🗺️ **Sitemap فارغ/محمي** — تحقق من أن الموقع يعرض `/sitemap.xml`.")
-            elif _rows == 0 and _errors > 0 and _sum_403 == 0 and _sum_429 == 0:
+
+            # Class 2 — sitemap/discovery failure (truly no URLs found)
+            if _discovered == 0:
+                _sm_to  = int(_skipmap.get("sitemap_timeout", 0) or 0)
+                _sm_blk = int(_skipmap.get("sitemap_blocked", 0) or 0)
+                _sm_emp = int(_skipmap.get("empty_sitemap",   0) or 0)
+                if _sm_blk:
+                    _hints.append("🗺️ **Sitemap محجوب** — المضيف يرفض `/sitemap.xml` (WAF/403). جرّب بروكسي.")
+                elif _sm_to:
+                    _hints.append("🗺️ **انتهت مهلة Sitemap** — المضيف بطيء أو يعلق. أعد المحاولة لاحقاً.")
+                elif _sm_emp:
+                    _hints.append("🗺️ **Sitemap فارغ** — لم يُرجع أي روابط منتج، و `products.json` أيضاً فشل.")
+                else:
+                    _hints.append("🗺️ **لم تُكتشف روابط** — تعذّر حلّ أي مسار منتج لهذا المتجر.")
+
+            # Class 3 — discovered URLs but nothing was attempted (logic bug)
+            elif _attempted == 0:
                 _hints.append(
-                    "🧩 **لم يُستخرج JSON-LD/بيانات منتج** — الصفحات قد لا تحتوي Structured Data "
-                    "أو تستخدم تحميلاً ديناميكياً (JS)."
+                    f"🐛 **اكتُشف {_discovered:,} رابط لكن لم تُحاوَل معالجة أيّها** — "
+                    "خلل في قائمة الانتظار أو جميع الروابط قد تم تخطّيها."
                 )
+                if _skipmap:
+                    _top = ", ".join(f"{k}:{v}" for k, v in
+                                     sorted(_skipmap.items(), key=lambda x: -int(x[1] or 0))[:4])
+                    _hints.append(f"• أسباب التخطّي المرصودة: {_top}")
+
+            # Class 4 — attempted but 0 rows and 0 HTTP blocks and 0 exceptions
+            #          => parse-empty (JS-rendered / no Structured Data)
+            elif _rows == 0 and _errors == 0 and _sum_403 == 0 and _sum_429 == 0:
+                _hints.append(
+                    f"🧩 **{_attempted:,} محاولة دون استخراج** — الصفحات لا تحتوي "
+                    "JSON-LD/OpenGraph أو تستخدم تحميلاً ديناميكياً (JS). "
+                    "فعّل المستخرج الاحتياطي (AI last-resort)."
+                )
+
+            # Class 5 — exceptions dominate (network / parsing errors)
+            elif _rows == 0 and _errors > 0:
+                _hints.append(
+                    f"⏱️ **{_errors} خطأ شبكة/تحليل** على {_attempted:,} محاولة — "
+                    "تحقّق من التزامن ومهلة الطلب."
+                )
+
+            # Transparent evidence footer so the user sees raw counters
+            _hints.append(
+                f"📊 اكتُشف {_discovered:,} · أُدرج {_enqueued:,} · "
+                f"حُوول {_attempted:,} · حُفظ {_rows:,}"
+            )
+
             if not _hints:
-                _hints.append("⏱️ نسبة مهلات/أخطاء عالية — جرّب تقليل التزامن أو فحص الشبكة.")
+                _hints.append("⏱️ سبب غير مصنّف — راجع السجلات.")
 
             _head_color = "#EF5350" if _phase == "failed" else "#FF9800"
             _head_icon  = "❌" if _phase == "failed" else ("⚠️" if _phase == "partial" else "⏰")
