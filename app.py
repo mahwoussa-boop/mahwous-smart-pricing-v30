@@ -5032,7 +5032,9 @@ elif page == "🕷️ كشط المنافسين":
         "retrying":    ("⏳ إعادة محاولة (backoff)...", "#2a1a00", "#FFA000"),
         "stale":       ("⚠️ يبدو معلقاً — يجري التحقق (5+ دق بدون تحديث)", "#2a1800", "#FF6F00"),
         "completed":   ("✅ اكتمل بنجاح",              "#0a2a0a", "#00C853"),
-        "failed":      ("❌ فشل",                      "#2a0a0a", "#EF5350"),
+        "partial":     ("⚠️ اكتمل جزئياً (أخطاء مرتفعة)", "#2a1800", "#FF9800"),
+        "failed":      ("❌ فشل — لم تُحفظ منتجات",    "#2a0a0a", "#EF5350"),
+        "timeout":     ("⏰ انتهت المهلة",             "#2a1800", "#FF6F00"),
         "stopped":     ("⏹️ موقوف",                   "#1a1a1a", "#9e9e9e"),
     }
     _plabel, _pbg, _pcolor = _PHASE_META.get(_phase, ("◻️ غير معروف", "#111", "#666"))
@@ -5225,21 +5227,54 @@ elif page == "🕷️ كشط المنافسين":
                 unsafe_allow_html=True,
             )
 
-        # ── تشخيص: اكتمل بنجاح لكن 0 منتجات + أخطاء مرتفعة ───────────────
-        if (not _is_alive) and _phase == "completed" and _rows == 0 and _errors > 0:
+        # ── تشخيص: الفشل / الاكتمال الجزئي ───────────────────────────────
+        if (not _is_alive) and _phase in ("failed", "partial", "timeout") :
             _urls_proc = int(_prog.get("urls_processed", 0) or 0)
             _err_ratio = (_errors / max(_urls_proc, 1)) * 100 if _urls_proc else 100.0
-            st.error(
-                f"⚠️ انتهى الكشط دون حفظ أي منتج — رُصد **{_errors}** خطأ "
-                f"(≈ {_err_ratio:.0f}% من المحاولات).\n\n"
-                "الأسباب الشائعة:\n"
-                "• الموقع يحجب الطلبات (Cloudflare/403/429)  "
-                "• خريطة الموقع (sitemap) فارغة أو محمية  "
-                "• مهلة (timeout) شبكة  "
-                "• صفحات لا تحتوي JSON-LD/بيانات منتج قابلة للاستخراج.\n\n"
-                "الخطوات المقترحة: قلّل «طلبات متزامنة» إلى 2–4، تحقق من الرابط، "
-                "راجع سجل التشغيل أدناه."
+            # تجميع مؤشرات الحجب HTTP من stores_http_errors
+            _http_err_map = _prog.get("stores_http_errors") or {}
+            _sum_403 = 0
+            _sum_429 = 0
+            if isinstance(_http_err_map, dict):
+                for _v in _http_err_map.values():
+                    try:
+                        _sum_403 += int((_v or {}).get("403", 0) or 0)
+                        _sum_429 += int((_v or {}).get("429", 0) or 0)
+                    except Exception:
+                        pass
+
+            _hints = []
+            if _sum_403 > 0 or _sum_429 > 0:
+                _hints.append(
+                    f"🛡️ **حجب HTTP مرصود**: 403×{_sum_403} · 429×{_sum_429} — "
+                    "غالباً Cloudflare/Rate-Limit. قلّل «طلبات متزامنة» إلى 2–4 وأعد المحاولة."
+                )
+            if _urls_proc == 0:
+                _hints.append("🗺️ **Sitemap فارغ/محمي** — تحقق من أن الموقع يعرض `/sitemap.xml`.")
+            elif _rows == 0 and _errors > 0 and _sum_403 == 0 and _sum_429 == 0:
+                _hints.append(
+                    "🧩 **لم يُستخرج JSON-LD/بيانات منتج** — الصفحات قد لا تحتوي Structured Data "
+                    "أو تستخدم تحميلاً ديناميكياً (JS)."
+                )
+            if not _hints:
+                _hints.append("⏱️ نسبة مهلات/أخطاء عالية — جرّب تقليل التزامن أو فحص الشبكة.")
+
+            _head_color = "#EF5350" if _phase == "failed" else "#FF9800"
+            _head_icon  = "❌" if _phase == "failed" else ("⚠️" if _phase == "partial" else "⏰")
+            _head_txt = {
+                "failed":  f"{_head_icon} انتهى الكشط دون حفظ أي منتج",
+                "partial": f"{_head_icon} اكتمل جزئياً — {_rows:,} منتج محفوظ لكن نسبة الأخطاء عالية",
+                "timeout": f"{_head_icon} انتهت المهلة قبل اكتمال الكشط",
+            }[_phase]
+            st.markdown(
+                f"<div style='background:#2a0a0a;border:1px solid {_head_color};"
+                f"border-radius:8px;padding:10px 14px;color:{_head_color};"
+                f"font-weight:700;margin-bottom:6px'>{_head_txt} — "
+                f"{_errors} خطأ (≈ {_err_ratio:.0f}%)</div>",
+                unsafe_allow_html=True,
             )
+            for _h in _hints:
+                st.markdown(f"- {_h}")
 
         # ── سجل الأخطاء ──────────────────────────────────────────────────
         if _last_err:
@@ -5495,7 +5530,7 @@ elif page == "🕷️ كشط المنافسين":
 
     # ── Auto-Analysis Trigger (fires ONCE per completed scrape) ──────────
     if (
-        _phase == "completed"
+        _phase in ("completed", "partial")
         and not _is_alive
         and _rows > 0
         and _finished
