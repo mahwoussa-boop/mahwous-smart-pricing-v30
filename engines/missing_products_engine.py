@@ -1,0 +1,429 @@
+"""
+engines/missing_products_engine.py — Smart Missing-Products Extractor (v1.0)
+════════════════════════════════════════════════════════════════════════════
+يستخرج «المنتجات المفقودة» الحقيقية: متوفرة عند المنافس، غير متوفرة لدينا.
+
+Pipeline:
+  1) تطبيع أسماء كتالوجنا (No., أسم المنتج, سعر المنتج)
+  2) مطابقة RapidFuzz لكل منتج منافس → ≥85% = موجود (يُستبعد)
+  3) تحقق AI للحالات الرمادية (70-85%) لمنع False-Positive
+  4) إزالة التكرار بين المنافسين (أعلى سعر يبقى)
+  5) تصنيف الماركة ضد `ماركات مهووس` → إذا مفقودة → ملف new_brands
+  6) تصنيف Category ضد `تصنيفات مهووس` (AI)
+  7) توليد وصف بتنسيق mahwous عبر Gemini (grounded)
+  8) تصدير: new_products.xlsx + new_brands.csv
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
+from rapidfuzz import fuzz, process as rf_process
+
+try:
+    from engines.ai_engine import _call_gemini
+except Exception:
+    _call_gemini = None
+
+logger = logging.getLogger("MissingProductsEngine")
+
+# ── Thresholds ─────────────────────────────────────────────────────────────
+EXISTS_THRESHOLD   = 85.0   # ≥85% → موجود عندنا
+UNCERTAIN_LOWER    = 70.0   # 70-85% → AI verify
+# <70% → مفقود مؤكد
+
+BRAND_MATCH_THRESHOLD    = 88.0
+CATEGORY_MATCH_THRESHOLD = 85.0
+
+_ARABIC_DIACRITICS = re.compile(r"[\u064B-\u065F\u0670]")
+_NON_ALNUM_AR = re.compile(r"[^\w\u0600-\u06FF\s]")
+_WS = re.compile(r"\s+")
+
+_NOISE_WORDS = {
+    "عينة", "او", "أو", "دو", "بارفيوم", "برفيوم", "بارفان",
+    "eau", "de", "parfum", "edp", "edt", "toilette", "cologne",
+    "ml", "مل", "رجالي", "نسائي", "للرجال", "للنساء", "فرنسي",
+}
+
+
+def _normalize(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    s = _ARABIC_DIACRITICS.sub("", s)
+    s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    s = s.replace("ة", "ه").replace("ى", "ي")
+    s = _NON_ALNUM_AR.sub(" ", s)
+    s = s.lower()
+    parts = [w for w in _WS.split(s) if w and w not in _NOISE_WORDS]
+    return " ".join(parts).strip()
+
+
+def _hash_key(s: str) -> str:
+    return hashlib.md5(_normalize(s).encode("utf-8")).hexdigest()[:12]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Data loaders
+# ══════════════════════════════════════════════════════════════════════════
+def load_catalog(path: str) -> pd.DataFrame:
+    """كتالوجنا: No. | أسم المنتج | سعر المنتج — مع تطبيع اسم."""
+    df = pd.read_excel(path) if str(path).lower().endswith(("xlsx", "xls")) \
+         else pd.read_csv(path, encoding="utf-8-sig")
+    name_col = next((c for c in df.columns if "اسم" in str(c) or "أسم" in str(c) or "name" in str(c).lower()), None)
+    no_col   = next((c for c in df.columns if str(c).strip() in ("No.", "NO", "No", "no")), None)
+    df = df.rename(columns={name_col: "أسم المنتج"} if name_col else {})
+    if no_col and no_col != "No.":
+        df = df.rename(columns={no_col: "No."})
+    df["_norm"] = df["أسم المنتج"].fillna("").astype(str).apply(_normalize)
+    df = df[df["_norm"].str.len() > 0].reset_index(drop=True)
+    logger.info("📦 كتالوجنا: %d منتج", len(df))
+    return df
+
+
+def load_competitors(paths: List[str]) -> pd.DataFrame:
+    """دمج ملفات المنافسين في DataFrame موحّد."""
+    frames = []
+    for p in paths:
+        try:
+            df = pd.read_csv(p, encoding="utf-8-sig") if str(p).lower().endswith("csv") \
+                 else pd.read_excel(p)
+        except Exception as e:
+            logger.warning("تعذّر قراءة %s: %s", p, e)
+            continue
+        name_col  = next((c for c in df.columns if "اسم" in str(c) or "name" in str(c).lower() or "المنتج" in str(c)), None)
+        price_col = next((c for c in df.columns if "سعر" in str(c) or "price" in str(c).lower()), None)
+        url_col   = next((c for c in df.columns if "رابط" in str(c) or "url" in str(c).lower()), None)
+        img_col   = next((c for c in df.columns if "صورة" in str(c) or "image" in str(c).lower()), None)
+        if not name_col or not price_col:
+            logger.warning("تخطي %s — أعمدة ناقصة", p)
+            continue
+        comp_name = Path(p).stem
+        sub = pd.DataFrame({
+            "اسم_المنتج": df[name_col].fillna("").astype(str),
+            "السعر":      pd.to_numeric(df[price_col], errors="coerce"),
+            "الرابط":     df[url_col].fillna("").astype(str) if url_col else "",
+            "الصورة":     df[img_col].fillna("").astype(str) if img_col else "",
+            "المنافس":    comp_name,
+        })
+        frames.append(sub)
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if out.empty:
+        return out
+    out["_norm"] = out["اسم_المنتج"].apply(_normalize)
+    out = out[out["_norm"].str.len() > 0].reset_index(drop=True)
+    logger.info("🏪 منتجات منافسين: %d", len(out))
+    return out
+
+
+def load_brands(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, encoding="utf-8-sig") if str(path).lower().endswith("csv") \
+         else pd.read_excel(path)
+    brand_col = next((c for c in df.columns if "اسم" in str(c) and "الماركة" in str(c)), df.columns[0])
+    df = df.rename(columns={brand_col: "اسم الماركة"})
+    df["_norm"] = df["اسم الماركة"].fillna("").astype(str).apply(_normalize)
+    logger.info("🏷️ ماركاتنا: %d", len(df))
+    return df
+
+
+def load_categories(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, encoding="utf-8-sig") if str(path).lower().endswith("csv") \
+         else pd.read_excel(path)
+    cat_col = next((c for c in df.columns if "تصنيف" in str(c)), df.columns[0])
+    df = df.rename(columns={cat_col: "التصنيفات"})
+    df["_norm"] = df["التصنيفات"].fillna("").astype(str).apply(_normalize)
+    logger.info("📁 تصنيفاتنا: %d", len(df))
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Core: Missing detection
+# ══════════════════════════════════════════════════════════════════════════
+@dataclass
+class MissingProduct:
+    name: str
+    price: float
+    competitor: str
+    url: str
+    image: str
+    key: str                     # hash key لمنع التكرار
+    confidence: str              # "sure_missing" | "ai_verified"
+
+
+def detect_missing(comp_df: pd.DataFrame, catalog: pd.DataFrame,
+                   use_ai: bool = True) -> List[MissingProduct]:
+    """يصنّف كل منتج منافس: موجود / مشكوك (AI) / مفقود."""
+    catalog_norms = catalog["_norm"].tolist()
+    seen_keys: Dict[str, MissingProduct] = {}
+    uncertain: List[Tuple[int, pd.Series, float]] = []
+
+    for idx, row in comp_df.iterrows():
+        q = row["_norm"]
+        if not q:
+            continue
+        m = rf_process.extractOne(q, catalog_norms, scorer=fuzz.token_set_ratio)
+        score = m[1] if m else 0.0
+
+        if score >= EXISTS_THRESHOLD:
+            continue                                          # موجود عندنا
+        if UNCERTAIN_LOWER <= score < EXISTS_THRESHOLD:
+            uncertain.append((idx, row, score))
+            continue
+        # مفقود مؤكد
+        k = _hash_key(row["اسم_المنتج"])
+        if k in seen_keys:
+            if float(row["السعر"] or 0) > seen_keys[k].price:
+                seen_keys[k].price = float(row["السعر"] or 0)
+                seen_keys[k].competitor = row["المنافس"]
+                seen_keys[k].url = row["الرابط"]
+            continue
+        seen_keys[k] = MissingProduct(
+            name=row["اسم_المنتج"], price=float(row["السعر"] or 0),
+            competitor=row["المنافس"], url=row["الرابط"],
+            image=row["الصورة"], key=k, confidence="sure_missing",
+        )
+
+    # AI verify للمشكوكين
+    if use_ai and uncertain and _call_gemini:
+        for idx, row, score in uncertain:
+            if _ai_is_missing(row["اسم_المنتج"], catalog, score):
+                k = _hash_key(row["اسم_المنتج"])
+                if k not in seen_keys:
+                    seen_keys[k] = MissingProduct(
+                        name=row["اسم_المنتج"], price=float(row["السعر"] or 0),
+                        competitor=row["المنافس"], url=row["الرابط"],
+                        image=row["الصورة"], key=k, confidence="ai_verified",
+                    )
+
+    logger.info("✅ مفقودات نهائية: %d (مشكوك %d)", len(seen_keys), len(uncertain))
+    return list(seen_keys.values())
+
+
+def _ai_is_missing(name: str, catalog: pd.DataFrame, score: float) -> bool:
+    """Gemini check: هل هذا المنتج = أحد المنتجات في كتالوجنا؟"""
+    if not _call_gemini:
+        return False
+    top5 = rf_process.extract(_normalize(name), catalog["_norm"].tolist(),
+                              scorer=fuzz.token_set_ratio, limit=5)
+    candidates = [catalog.iloc[i]["أسم المنتج"] for _, _, i in top5]
+    prompt = (
+        f"منتج منافس: «{name}»\n"
+        f"أقرب 5 منتجات في كتالوجنا:\n"
+        + "\n".join(f"{i+1}. {c}" for i, c in enumerate(candidates))
+        + "\n\nهل المنتج المنافس يطابق أي منها (نفس الاسم/الحجم/النوع)؟ "
+          "أجب بـ: نعم / لا فقط."
+    )
+    try:
+        ans = (_call_gemini(prompt, temperature=0.1, max_tokens=10) or "").strip()
+        return ans.startswith("لا") or "no" in ans.lower()
+    except Exception:
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Brand + Category resolution
+# ══════════════════════════════════════════════════════════════════════════
+def resolve_brand(name: str, brands: pd.DataFrame) -> Tuple[str, bool]:
+    """يعيد (اسم_الماركة_الرسمي, is_existing)."""
+    q = _normalize(name)
+    m = rf_process.extractOne(q, brands["_norm"].tolist(), scorer=fuzz.partial_ratio)
+    if m and m[1] >= BRAND_MATCH_THRESHOLD:
+        return brands.iloc[m[2]]["اسم الماركة"], True
+    # AI extract brand name
+    if _call_gemini:
+        try:
+            ans = _call_gemini(
+                f"استخرج اسم الماركة فقط (بالإنجليزية) من اسم المنتج: «{name}»\n"
+                "مثال: 'Dior Sauvage EDP 100ml' → Dior\nأجب بكلمة واحدة فقط.",
+                temperature=0.1, max_tokens=20,
+            ) or ""
+            brand_guess = ans.strip().split("\n")[0][:40]
+            if brand_guess:
+                return brand_guess, False
+        except Exception:
+            pass
+    return "غير محدد", False
+
+
+def resolve_category(name: str, categories: pd.DataFrame) -> str:
+    """يصنّف المنتج ضمن أحد تصنيفاتنا."""
+    if categories.empty:
+        return ""
+    if not _call_gemini:
+        return categories.iloc[0]["التصنيفات"]
+    cats = categories["التصنيفات"].tolist()
+    try:
+        ans = _call_gemini(
+            f"صنّف المنتج: «{name}»\nضمن إحدى هذه التصنيفات فقط:\n"
+            + "\n".join(f"- {c}" for c in cats)
+            + "\nأجب باسم التصنيف فقط.",
+            temperature=0.1, max_tokens=40,
+        ) or ""
+        pick = ans.strip().split("\n")[0]
+        m = rf_process.extractOne(pick, cats, scorer=fuzz.partial_ratio)
+        if m and m[1] >= CATEGORY_MATCH_THRESHOLD:
+            return cats[m[2]]
+    except Exception:
+        pass
+    return cats[0] if cats else ""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Description generator (Mahwous style)
+# ══════════════════════════════════════════════════════════════════════════
+_DESCRIPTION_PROMPT = """اكتب وصفاً لمنتج عطر بتنسيق HTML مطابق لأسلوب mahwous.com:
+
+المنتج: {name}
+الماركة: {brand}
+
+التنسيق المطلوب (HTML فعلي، استبدل القيم):
+<h2>{name}</h2>
+<p>تعريف موجز عن العطر والماركة (3 أسطر).</p>
+<h3>تفاصيل المنتج</h3>
+<ul>
+<li><strong>الماركة:</strong> {brand}</li>
+<li><strong>الجنس:</strong> [رجالي/نسائي/مشترك]</li>
+<li><strong>نوع المنتج:</strong> عطور</li>
+<li><strong>شخصية العطر:</strong> [وصفان]</li>
+<li><strong>العائلة العطرية:</strong> [زهري-خشبي]</li>
+<li><strong>الحجم:</strong> [مل]</li>
+<li><strong>نسبة التركيز:</strong> [EDP/EDT]</li>
+</ul>
+<h3>رحلة العطر (النفحات والمكونات)</h3>
+<ul>
+<li><strong>مقدمة العطر:</strong> ...</li>
+<li><strong>قلب العطر:</strong> ...</li>
+<li><strong>قاعدة العطر:</strong> ...</li>
+</ul>
+<h3>لماذا تختار هذا العطر؟</h3>
+<ul><li>...</li></ul>
+
+اعتمد على Fragrantica/Parfumo/الموقع الرسمي. لا تخترع مكوّنات.
+أخرج HTML فقط — لا شرح خارجي."""
+
+
+def generate_description(name: str, brand: str) -> str:
+    if not _call_gemini:
+        return f"<p>{name}</p>"
+    try:
+        txt = _call_gemini(
+            _DESCRIPTION_PROMPT.format(name=name, brand=brand),
+            grounding=True, temperature=0.4, max_tokens=2000,
+        ) or ""
+        return txt.strip() or f"<p>{name}</p>"
+    except Exception:
+        return f"<p>{name}</p>"
+
+
+def fetch_brand_logo(brand: str) -> str:
+    """يحاول جلب رابط شعار الماركة عبر Gemini grounding."""
+    if not _call_gemini:
+        return ""
+    try:
+        ans = _call_gemini(
+            f"ابحث عن الرابط المباشر لشعار ماركة العطور «{brand}» (PNG/JPG شفاف إن أمكن). "
+            "أجب برابط واحد فقط بدون شرح.",
+            grounding=True, temperature=0.1, max_tokens=100,
+        ) or ""
+        url = ans.strip().split()[0] if ans.strip() else ""
+        return url if url.startswith(("http://", "https://")) else ""
+    except Exception:
+        return ""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Full pipeline + export
+# ══════════════════════════════════════════════════════════════════════════
+def build_missing_exports(
+    catalog_path: str,
+    competitor_paths: List[str],
+    brands_path: str,
+    categories_path: str,
+    output_dir: str = "data/exports",
+    use_ai: bool = True,
+    generate_descriptions: bool = True,
+) -> Dict[str, str]:
+    """
+    ينفّذ كامل المسار ويكتب ملفين:
+      - new_products_{ts}.xlsx   بتنسيق قريب من منتج جديد.csv
+      - new_brands_{ts}.csv      للماركات الجديدة فقط
+    يعيد dict بمسارات الملفات.
+    """
+    from datetime import datetime
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+
+    catalog    = load_catalog(catalog_path)
+    comp_df    = load_competitors(competitor_paths)
+    brands     = load_brands(brands_path)
+    categories = load_categories(categories_path)
+
+    missing = detect_missing(comp_df, catalog, use_ai=use_ai)
+
+    products_rows: List[Dict[str, Any]] = []
+    new_brands_rows: List[Dict[str, Any]] = []
+    seen_new_brands: set = set()
+
+    for mp in missing:
+        brand_name, exists = resolve_brand(mp.name, brands)
+        if not exists and brand_name not in seen_new_brands and brand_name != "غير محدد":
+            seen_new_brands.add(brand_name)
+            new_brands_rows.append({
+                "اسم الماركة":                brand_name,
+                "نص مقدمة عن الماركة":        f"ماركة {brand_name} المميزة.",
+                "رابط شعار الماركة":          fetch_brand_logo(brand_name) if use_ai else "",
+                "(الترتيب) صفحة الماركة":     "",
+                "(Page Title) عنوان صفحة الماركة التسويقية":
+                    f"{brand_name} | عطور أصلية - مهووس",
+                "(SEO Page URL) رابط صفحة الماركة التسويقية":
+                    re.sub(r"\s+", "-", brand_name.lower()),
+                "(Page Description) وصف صفحة الماركة التسويقية":
+                    f"تسوق عطور {brand_name} الأصلية من مهووس.",
+            })
+
+        category = resolve_category(mp.name, categories) if use_ai else ""
+        description = generate_description(mp.name, brand_name) if generate_descriptions else ""
+
+        products_rows.append({
+            "أسم المنتج":          mp.name,
+            "الحالة":              "نشط",
+            "تصنيف المنتج":        category,
+            "صورة المنتج":         mp.image,
+            "اسم صورة المنتج":     mp.name[:80],
+            "حالة المنتج":         "جديد",
+            "نص المنتج":           description,
+            "الماركة":             brand_name,
+            "رمز المنتج sku":      "",
+            "سعر المنتج":          float(mp.price),
+            "السعر المخفض":        0,
+            "تكلفة المنتج":        0,
+            "كمية المنتج":         0,
+            "أقل كمية للتنبيه":    0,
+            "إظهار كمية المنتج":   0,
+            "الوزن":               0.2,
+            "وحدة الوزن":          "kg",
+            "رابط المنافس":        mp.url,
+            "المنافس":             mp.competitor,
+            "_hash":               mp.key,
+            "_confidence":         mp.confidence,
+        })
+
+    products_path = str(Path(output_dir) / f"new_products_{ts}.xlsx")
+    brands_path_out = str(Path(output_dir) / f"new_brands_{ts}.csv")
+
+    pd.DataFrame(products_rows).to_excel(products_path, index=False)
+    if new_brands_rows:
+        pd.DataFrame(new_brands_rows).to_csv(brands_path_out, index=False, encoding="utf-8-sig")
+
+    logger.info("📤 تم التصدير: %d منتج | %d ماركة جديدة",
+                len(products_rows), len(new_brands_rows))
+    return {
+        "products_file":    products_path,
+        "new_brands_file":  brands_path_out if new_brands_rows else "",
+        "products_count":   len(products_rows),
+        "new_brands_count": len(new_brands_rows),
+    }
