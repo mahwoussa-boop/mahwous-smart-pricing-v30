@@ -436,13 +436,18 @@ def send_missing_products(products: List[Dict]) -> Dict:
 
     for p in products:
         name  = str(p.get("name", p.get("المنتج", p.get("منتج_المنافس", "")))).strip()
-        price = _safe_float(
-            p.get("price", 0) or p.get("السعر", 0) or p.get("سعر_المنافس", 0)
+        comp_price = _safe_float(
+            p.get("سعر_المنافس", 0) or p.get("comp_price", 0) or p.get("competitor_price", 0)
         )
+        # قاعدة التسعير للمفقودات: سعر المنافس − 1
+        if comp_price > 0:
+            price = max(int(round(comp_price - 1)), 1)
+        else:
+            price = int(round(_safe_float(p.get("price", 0) or p.get("السعر", 0))))
         product_no = _extract_no(p) or _clean_pid(p.get("NO", ""))
         pid = product_no or _clean_pid(p.get("product_id", p.get("معرف_المنتج", "")))
 
-        if not name:
+        if not name or price <= 0:
             skipped += 1
             continue
 
@@ -450,15 +455,13 @@ def send_missing_products(products: List[Dict]) -> Dict:
             "NO":              product_no,                # ← Primary Key Make
             "product_id":      pid,
             "أسم المنتج":      name,
-            "سعر المنتج":      float(price),
+            "سعر المنتج":      price,                      # uinteger لـ Salla
             "رمز المنتج sku":  str(p.get("sku", p.get("رمز المنتج sku", ""))).strip(),
-            "الوزن":           int(_safe_float(p.get("weight", p.get("الوزن", 1))) or 1),
-            "سعر التكلفة":     float(_safe_float(p.get("cost_price", p.get("سعر التكلفة", 0)))),
-            "السعر المخفض":    float(_safe_float(p.get("sale_price",  p.get("السعر المخفض", 0)))),
+            "الوزن":           1,                          # ثابت حسب القاعدة
+            "سعر التكلفة":     int(round(_safe_float(p.get("cost_price", p.get("سعر التكلفة", 0))))),
+            "السعر المخفض":    int(round(_safe_float(p.get("sale_price",  p.get("السعر المخفض", 0))))),
             "الوصف":           str(p.get("الوصف", p.get("description", ""))).strip(),
         }
-        if p.get("image_url"):
-            item["صورة المنتج"] = str(p["image_url"])
 
         result = _post_to_webhook(WEBHOOK_NEW_PRODUCTS, {"data": [item]})
         if result["success"]:
