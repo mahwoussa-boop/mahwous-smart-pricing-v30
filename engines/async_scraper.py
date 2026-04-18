@@ -172,6 +172,18 @@ class Progress:
     last_error: str = ""
     stores_results: Dict[str, int] = field(default_factory=dict)
     stores_http_errors: Dict[str, dict] = field(default_factory=dict)
+    # ── Evidence-backed failure-class counters (truthful diagnostics) ──────
+    # urls_discovered : roots returned by sitemap/products.json resolution
+    # urls_enqueued   : roots passed the prioritisation filter and entered queue
+    # urls_attempted  : fetch_product was actually invoked (reached HTTP stage)
+    # urls_skipped_reason : histogram of why URLs were skipped before attempt
+    #   e.g. {"resume_done": N, "max_reached": N, "circuit_broken": N,
+    #         "not_product_url": N, "empty_sitemap": N, "sitemap_timeout": N,
+    #         "sitemap_blocked": N, "import_error": N}
+    urls_discovered: int = 0
+    urls_enqueued: int = 0
+    urls_attempted: int = 0
+    urls_skipped_reason: Dict[str, int] = field(default_factory=dict)
 
     def save(self, path: str = PROGRESS_FILE) -> None:
         try:
@@ -263,6 +275,18 @@ def _finalize_progress_phase(progress) -> str:
     )
     progress.phase = phase
     return phase
+
+
+def _bump_skip(progress: "Progress", reason: str, n: int = 1) -> None:
+    """Increment urls_skipped_reason[reason] safely."""
+    try:
+        d = progress.urls_skipped_reason
+        if not isinstance(d, dict):
+            d = {}
+            progress.urls_skipped_reason = d
+        d[reason] = int(d.get(reason, 0) or 0) + int(n)
+    except Exception:
+        pass
 
 
 def _mark_progress_failed(message: str) -> None:
@@ -808,6 +832,8 @@ async def scrape_one_store(
     except ImportError:
         logger.error("تعذّر تحميل engines.sitemap_resolve")
         state.mark_error(domain, "import_error")
+        _bump_skip(progress, "import_error")
+        progress.save()
         return []
 
     own_session = external_session is None
@@ -841,14 +867,24 @@ async def scrape_one_store(
             )
         except asyncio.TimeoutError:
             state.mark_error(domain, "sitemap_timeout")
+            _bump_skip(progress, "sitemap_timeout")
+            progress.save()
             return []
         except SitemapDiscoveryError as exc:
             logger.error("🛑 %s — Sitemap محجوب أو غير متاح: %s", domain, exc)
             state.mark_error(domain, str(exc)[:200])
+            _bump_skip(progress, "sitemap_blocked")
+            progress.save()
             return []
         except Exception:
             state.mark_error(domain, traceback.format_exc()[:150])
+            _bump_skip(progress, "sitemap_error")
+            progress.save()
             return []
+
+        # Record discovered count BEFORE the empty-check — evidence that
+        # sitemap resolution did (or did not) yield URLs for this domain.
+        progress.urls_discovered += int(len(all_urls or []))
 
         if not all_urls:
             logger.warning(f"⚠️ {domain} — لا روابط في Sitemap، يحاول /products.json (Shopify API)...")
@@ -920,6 +956,8 @@ async def scrape_one_store(
 
             logger.warning(f"⚠️ {domain} — Sitemap فارغ وفشل Shopify fallback")
             state.mark_error(domain, "empty_sitemap")
+            _bump_skip(progress, "empty_sitemap")
+            progress.save()
             return []
 
         total = len(all_urls)
@@ -930,6 +968,11 @@ async def scrape_one_store(
         if resume_idx > 0:
             logger.info(f"🔄 {domain} — استئناف من الرابط {resume_idx}/{total}")
         pending_urls = all_urls[resume_idx:]
+
+        # Evidence counters: URLs skipped by resume checkpoint vs enqueued now
+        if resume_idx > 0:
+            _bump_skip(progress, "resume_done", resume_idx)
+        progress.urls_enqueued += len(pending_urls)
 
         state.update(domain, urls_total=total, urls_done=resume_idx)
         progress.urls_total        += total
@@ -948,6 +991,7 @@ async def scrape_one_store(
 
         async def _fetch_one(url: str) -> None:
             nonlocal done_count, _consecutive_failures, _circuit_broken
+            progress.urls_attempted += 1
             try:
                 row = await asyncio.wait_for(
                     fetch_product(
@@ -1026,6 +1070,9 @@ async def scrape_one_store(
             for start in range(0, len(pending_urls), BATCH):
                 if max_products > 0 and len(rows) >= max_products:
                     logger.info(f"🛑 {domain} — تم الوصول للحد الأقصى ({max_products}). جاري إيقاف السحب.")
+                    _skipped = max(0, len(pending_urls) - start)
+                    if _skipped:
+                        _bump_skip(progress, "max_reached", _skipped)
                     rows[:] = rows[:max_products]
                     break
 
@@ -1035,6 +1082,9 @@ async def scrape_one_store(
                         f"🔌 {domain} — Circuit Breaker: {_CIRCUIT_BREAKER_LIMIT} فشل متتالي. "
                         f"تم إنقاذ {len(rows)} منتج ناجح."
                     )
+                    _skipped = max(0, len(pending_urls) - start)
+                    if _skipped:
+                        _bump_skip(progress, "circuit_broken", _skipped)
                     break
 
                 batch = pending_urls[start: start + BATCH]
