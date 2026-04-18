@@ -500,6 +500,13 @@ def _product_fields_from_all_json_ld(html: str) -> dict:
 #  جلب منتج واحد من URL مع حماية Stealth
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Per-domain strategy: after N consecutive aiohttp 403/429, skip aiohttp entirely
+# for this domain and go straight to curl_cffi sync fallback. This prevents
+# concurrent 403 storms from tripping the circuit breaker.
+_DOMAIN_AIOHTTP_403: Dict[str, int] = {}
+_DOMAIN_SKIP_THRESHOLD = 3
+
+
 async def fetch_product(
     session: aiohttp.ClientSession,
     url: str,
@@ -512,6 +519,7 @@ async def fetch_product(
 
         # Sticky-per-store proxy selection (None if pool empty → direct).
         _domain_for_proxy = _domain(store_url)
+        _skip_aiohttp = _DOMAIN_AIOHTTP_403.get(_domain_for_proxy, 0) >= _DOMAIN_SKIP_THRESHOLD
         _proxy_url: Optional[str] = None
         try:
             if _ANTI_BAN_AVAILABLE:
@@ -525,7 +533,7 @@ async def fetch_product(
             await stealth_manager.apply_smart_delay(0.5, 1.5)
 
         try:
-            if _ANTI_BAN_AVAILABLE:
+            if _ANTI_BAN_AVAILABLE and not _skip_aiohttp:
                 resp = await fetch_with_retry(session, json_url, max_retries=2,
                                                referer=store_url, proxy=_proxy_url)
                 if resp is not None:
@@ -536,12 +544,16 @@ async def fetch_product(
                             row  = extract_product(prod, store_url)
                             if _has_valid_price(row):
                                 return row
-                        elif resp.status in (403, 429) and http_status_counters is not None:
-                            http_status_counters[str(resp.status)] = (
-                                http_status_counters.get(str(resp.status), 0) + 1
-                            )
+                        elif resp.status in (403, 429):
+                            _DOMAIN_AIOHTTP_403[_domain_for_proxy] = _DOMAIN_AIOHTTP_403.get(_domain_for_proxy, 0) + 1
+                            if http_status_counters is not None:
+                                http_status_counters[str(resp.status)] = (
+                                    http_status_counters.get(str(resp.status), 0) + 1
+                                )
                     finally:
                         resp.close()
+            elif _ANTI_BAN_AVAILABLE:
+                pass  # skip aiohttp JSON phase for domains that consistently block
             else:
                 async with session.get(
                     json_url, timeout=aiohttp.ClientTimeout(total=12), ssl=False
@@ -568,7 +580,7 @@ async def fetch_product(
         html: str | None = None
 
         try:
-            if _ANTI_BAN_AVAILABLE:
+            if _ANTI_BAN_AVAILABLE and not _skip_aiohttp:
                 resp = await fetch_with_retry(session, url, max_retries=3,
                                                referer=store_url, proxy=_proxy_url)
                 if resp is not None:
@@ -578,8 +590,10 @@ async def fetch_product(
                             is_banned, ban_msg = stealth_manager.is_shadow_banned(html, resp.status)
                             if is_banned:
                                 logger.error(f"[Anti-Ban] Shadow ban during fetch on {url}: {ban_msg}")
+                                _DOMAIN_AIOHTTP_403[_domain_for_proxy] = _DOMAIN_AIOHTTP_403.get(_domain_for_proxy, 0) + 1
                                 html = None
                         elif resp.status in (403, 429, 503):
+                            _DOMAIN_AIOHTTP_403[_domain_for_proxy] = _DOMAIN_AIOHTTP_403.get(_domain_for_proxy, 0) + 1
                             if http_status_counters is not None:
                                 http_status_counters[str(resp.status)] = (
                                     http_status_counters.get(str(resp.status), 0) + 1
@@ -587,6 +601,8 @@ async def fetch_product(
                             logger.debug(f"HTTP {resp.status} Blocked: {url}")
                     finally:
                         resp.close()
+            elif _ANTI_BAN_AVAILABLE:
+                pass  # skip aiohttp HTML phase — goes straight to curl_cffi below
             else:
                 async with session.get(
                     url, timeout=aiohttp.ClientTimeout(total=20),
@@ -799,7 +815,7 @@ async def scrape_one_store(
     store_url: str,
     progress: Progress,
     state: ScraperState,
-    concurrency: int = 10,
+    concurrency: int = 3,
     max_products: int = 0,
     resume: bool = True,
     single_mode: bool = False,
