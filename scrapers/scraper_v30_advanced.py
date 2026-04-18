@@ -49,6 +49,11 @@ except ImportError:
 # Thread pool for sync fallbacks — avoids blocking the event loop
 _SYNC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="scrv30")
 
+# Per-domain strategy: after N aiohttp 403s/challenges, skip aiohttp entirely
+# for this domain and go straight to curl_cffi (saves time + avoids more bans).
+_DOMAIN_AIOHTTP_FAILS: Dict[str, int] = {}
+_DOMAIN_SKIP_AIOHTTP_THRESHOLD = 2
+
 # ── USD/non-SAR detection ────────────────────────────────────────────────────
 _USD_MARKERS = re.compile(r"\$|USD|usd|دولار|euro|EUR|eur|يورو|£|GBP", re.I)
 
@@ -249,7 +254,7 @@ def _ai_clean_product_name(raw_name: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 class AdvancedScraper:
 
-    def __init__(self, max_concurrent: int = 8):
+    def __init__(self, max_concurrent: int = 3):
         self.session: Optional[aiohttp.ClientSession] = None
         self.price_extractor = PriceExtractor()
         self._rate_limiter = get_rate_limiter() if _HAS_ANTI_BAN else None
@@ -258,8 +263,8 @@ class AdvancedScraper:
     async def _ensure_session(self):
         if self.session is None or self.session.closed:
             connector = aiohttp.TCPConnector(
-                limit=50,           # Pool size (was 20 — caused exhaustion)
-                limit_per_host=8,   # Per-domain cap
+                limit=20,           # Pool size — lowered to reduce CF block signal
+                limit_per_host=3,   # Per-domain cap — lowered (was 8) to avoid 403 storms
                 ttl_dns_cache=300,
                 ssl=False,
                 enable_cleanup_closed=True,
@@ -278,39 +283,46 @@ class AdvancedScraper:
     async def _scrape_inner(self, url: str, store_name: str) -> Dict[str, Any]:
         domain = urlparse(url).netloc
         html = None
+        skip_aiohttp = _DOMAIN_AIOHTTP_FAILS.get(domain, 0) >= _DOMAIN_SKIP_AIOHTTP_THRESHOLD
 
         # ── Phase 1: aiohttp with per-request timeout ────────────────────
-        try:
-            if self._rate_limiter:
-                await self._rate_limiter.wait(domain)
-            else:
-                await asyncio.sleep(random.uniform(0.8, 2.5))
-
-            await self._ensure_session()
-            headers = get_browser_headers(referer=f"https://{domain}/")
-
-            # Per-request timeout — strict 15s, not session-level 25s
-            req_timeout = aiohttp.ClientTimeout(total=15, connect=8)
-            async with self.session.get(
-                url, headers=headers, ssl=False,
-                allow_redirects=True, timeout=req_timeout,
-            ) as response:
-                if response.status == 200:
-                    html = await response.text(errors="ignore")
-                    if self._rate_limiter:
-                        self._rate_limiter.record_success(domain)
-                elif response.status in (404, 410):
-                    return self._fail_result(url, store_name)
+        if not skip_aiohttp:
+            try:
+                if self._rate_limiter:
+                    await self._rate_limiter.wait(domain)
                 else:
-                    if self._rate_limiter:
-                        self._rate_limiter.record_error(domain, response.status)
-        except asyncio.TimeoutError:
-            logger.debug(f"timeout: {url}")
-        except (aiohttp.ClientError, OSError) as e:
-            logger.debug(f"aiohttp error {url}: {type(e).__name__}")
+                    await asyncio.sleep(random.uniform(0.8, 2.5))
+
+                await self._ensure_session()
+                headers = get_browser_headers(referer=f"https://{domain}/")
+
+                # Per-request timeout — strict 15s, not session-level 25s
+                req_timeout = aiohttp.ClientTimeout(total=15, connect=8)
+                async with self.session.get(
+                    url, headers=headers, ssl=False,
+                    allow_redirects=True, timeout=req_timeout,
+                ) as response:
+                    if response.status == 200:
+                        html = await response.text(errors="ignore")
+                        if self._rate_limiter:
+                            self._rate_limiter.record_success(domain)
+                    elif response.status in (404, 410):
+                        return self._fail_result(url, store_name)
+                    else:
+                        if self._rate_limiter:
+                            self._rate_limiter.record_error(domain, response.status)
+                        if response.status in (403, 429):
+                            _DOMAIN_AIOHTTP_FAILS[domain] = _DOMAIN_AIOHTTP_FAILS.get(domain, 0) + 1
+            except asyncio.TimeoutError:
+                logger.debug(f"timeout: {url}")
+            except (aiohttp.ClientError, OSError) as e:
+                logger.debug(f"aiohttp error {url}: {type(e).__name__}")
 
         # ── Phase 2: Sync fallbacks in thread pool (non-blocking) ────────
         if not html or (_HAS_ANTI_BAN and looks_like_bot_challenge(html)):
+            if html and _HAS_ANTI_BAN and looks_like_bot_challenge(html):
+                _DOMAIN_AIOHTTP_FAILS[domain] = _DOMAIN_AIOHTTP_FAILS.get(domain, 0) + 1
+                html = None
             if _HAS_ANTI_BAN:
                 try:
                     loop = asyncio.get_running_loop()
@@ -329,7 +341,21 @@ class AdvancedScraper:
         # ── Phase 3: Extract price (SAR-first) ──────────────────────────
         price = self.price_extractor.extract_price(html, url)
 
-        # ── Phase 4: AI Fallback ─────────────────────────────────────────
+        # ── Phase 4a: AI Selector fallback (cached per domain) ───────────
+        ai_name = ""
+        ai_image = ""
+        if not price or price <= 0:
+            try:
+                from engines.ai_selector_generator import extract_with_ai_selectors
+                ai_data = extract_with_ai_selectors(html, domain)
+                if ai_data.get("price"):
+                    price = ai_data["price"]
+                ai_name = ai_data.get("name", "") or ""
+                ai_image = ai_data.get("image", "") or ""
+            except Exception as e:
+                logger.debug(f"AI selector fallback error: {e}")
+
+        # ── Phase 4b: AI text-extraction fallback (last resort) ──────────
         if not price or price <= 0:
             try:
                 text_for_ai = BeautifulSoup(html, "html.parser").get_text()[:3000]
@@ -346,21 +372,26 @@ class AdvancedScraper:
 
         title_tag = soup.find("title")
         raw_name = (
-            title_tag.get_text(strip=True) if title_tag
-            else url.split("/")[-1].replace("-", " ")
+            ai_name if ai_name else (
+                title_tag.get_text(strip=True) if title_tag
+                else url.split("/")[-1].replace("-", " ")
+            )
         )
         product_name = _ai_clean_product_name(raw_name)
 
         image_url = ""
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content", "").startswith("http"):
-            image_url = og_img["content"]
-        else:
-            for img_sel in ("img.product-image", "img[class*='product']"):
-                el = soup.select_one(img_sel)
-                if el and el.get("src"):
-                    image_url = urljoin(url, el["src"])
-                    break
+        if ai_image and ai_image.startswith(("http", "//")):
+            image_url = urljoin(url, ai_image)
+        if not image_url:
+            og_img = soup.find("meta", property="og:image")
+            if og_img and og_img.get("content", "").startswith("http"):
+                image_url = og_img["content"]
+            else:
+                for img_sel in ("img.product-image", "img[class*='product']"):
+                    el = soup.select_one(img_sel)
+                    if el and el.get("src"):
+                        image_url = urljoin(url, el["src"])
+                        break
 
         return {
             "url": url,
@@ -416,7 +447,7 @@ async def run_advanced_price_scraping(
     store_filter: str = "",
     limit: int = 2000,
     progress_cb=None,
-    max_parallel_stores: int = 25,
+    max_parallel_stores: int = 4,
     flush_every: int = 20,
 ) -> Dict[str, Any]:
     """
@@ -503,7 +534,7 @@ async def run_advanced_price_scraping(
         except Exception as _cb_err:
             logger.debug("progress_cb error: %s", _cb_err)
 
-    scraper = AdvancedScraper(max_concurrent=12)
+    scraper = AdvancedScraper(max_concurrent=3)
     store_semaphore = asyncio.Semaphore(max_parallel_stores)
 
     async def _scrape_one_store(store: str, urls: List[str]) -> None:
