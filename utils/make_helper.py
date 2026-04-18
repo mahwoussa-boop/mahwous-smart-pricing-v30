@@ -90,6 +90,17 @@ def _clean_pid(raw) -> str:
         return s
 
 
+def _pid_as_int(raw) -> Optional[int]:
+    """product_id كرقم صحيح لموديول Salla UpdateProduct (select field)."""
+    s = _clean_pid(raw)
+    if not s:
+        return None
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
+
 # ── استخراج رقم المنتج No. من الكتالوج (Primary Key في سلة/زد) ───────────
 def _extract_no(row_or_dict) -> str:
     """
@@ -218,9 +229,12 @@ def send_single_product(product: Dict) -> Dict:
 
     if not product_no:
         logger.warning("⚠️ NO فارغ عند إرسال «%s» — سيُرسل product_id بديلاً", name[:50])
+    pid_int = _pid_as_int(product_no or product_id)
+    if pid_int is None:
+        return {"success": False, "message": f"❌ رقم المنتج NO غير صالح للإرسال إلى سلة: «{name}»"}
     _prod = {
         "NO":          product_no or product_id,     # ← Primary Key Make (fallback صلب)
-        "product_id":  product_id,
+        "product_id":  pid_int,                       # ← integer لموديول Salla
         "name":        name,
         "price":       float(price),
         "section":     product.get("section", "update"),
@@ -301,11 +315,17 @@ def send_price_updates(products: List[Dict]) -> Dict:
             skipped += 1
             continue
 
+        pid_int = _pid_as_int(product_no or product_id)
+        if pid_int is None:
+            logger.warning("⚠️ تخطي «%s» — product_id غير رقمي", name[:50])
+            skipped += 1
+            continue
+
         if not product_no:
             logger.warning("⚠️ NO فارغ في الدفعة عند «%s»", name[:50])
         valid_products.append({
             "NO":          product_no or product_id,      # ← Primary Key Make (fallback صلب)
-            "product_id":  product_id,
+            "product_id":  pid_int,                        # ← integer لموديول Salla
             "name":        name,
             "price":       float(price),
             "section":     p.get("section", "update"),
@@ -556,8 +576,8 @@ def send_batch_smart(products: list, batch_type: str = "update",
 def verify_webhook_connection() -> Dict:
     test_price_payload = {
         "products": [{
-            "NO":         "test-001",
-            "product_id": "test-001",
+            "NO":         "1",
+            "product_id": 1,
             "name":       "اختبار الاتصال",
             "price":      1.0,
             "section":    "test",
