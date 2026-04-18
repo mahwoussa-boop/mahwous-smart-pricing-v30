@@ -1080,6 +1080,7 @@ def _cb_send_make(
     our_name: str, comp_name: str,
     our_price: float, comp_price: float, diff: float,
     decision: str, comp_src: str, pid: str, comp_url: str,
+    no: str = "",
 ) -> None:
     """
     Callback: إرسال تحديث سعر واحد إلى Make.com عبر on_click.
@@ -1095,6 +1096,7 @@ def _cb_send_make(
 
     # FIX: Transparency & Reversibility
     _mk_res = send_single_product({
+        "NO":         no or pid,
         "product_id": pid,
         "name": our_name,
         "price": float(_tp),
@@ -1609,10 +1611,29 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
             else ""
         )
 
+        _no_val_disp = str(
+            row.get("No.", "") or row.get("NO", "") or row.get("no", "")
+            or row.get("No", "") or row.get("رقم_المنتج", "") or ""
+        ).strip()
+        try:
+            _fv = float(_no_val_disp)
+            _no_val_disp = str(int(_fv)) if _fv == int(_fv) else _no_val_disp
+        except (ValueError, TypeError):
+            pass
+        if _no_val_disp in ("nan", "None", "NaN"):
+            _no_val_disp = ""
+        _no_badge = (
+            f'<span style="background:#2a1a3a;color:#ce93d8;padding:1px 6px;'
+            f'border-radius:4px;font-size:.7rem;font-weight:700">'
+            f'#️⃣ NO: {html.escape(_no_val_disp)}</span>'
+            if _no_val_disp else ""
+        )
+
         st.markdown(f"""
         <div style="display:flex;justify-content:space-between;align-items:center;
                     padding:3px 12px;font-size:.8rem;flex-wrap:wrap;gap:4px;">
           <span>🏷️ <b>{brand}</b> {size} {ptype}</span>
+          {_no_badge}
           {_comp_badge}
           <span>تطابق: <b style="color:{match_color}">{match_pct:.0f}%</b></span>
           {risk_html}
@@ -1646,6 +1667,20 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
             if _pid_cb in ("nan", "None", "NaN", ""):
                 _pid_cb = ""
 
+            # رقم المنتج No. من كتالوج متجرنا (Primary Key في Make/سلة)
+            _no_raw = (
+                row.get("No.", "") or row.get("NO", "") or row.get("no", "")
+                or row.get("No", "") or row.get("رقم_المنتج", "")
+                or row.get("رقم المنتج", "") or ""
+            )
+            try:
+                _fv_no = float(_no_raw)
+                _no_cb = str(int(_fv_no)) if _fv_no == int(_fv_no) else str(_no_raw)
+            except (ValueError, TypeError):
+                _no_cb = str(_no_raw).strip()
+            if _no_cb in ("nan", "None", "NaN", ""):
+                _no_cb = ""
+
             _comp_url_make = (_comp_url_v or str(row.get("رابط_المنافس", "") or "")).strip()
 
             act_col1, act_col2, act_col3, _act_sp = st.columns([2.5, 2.5, 2, 4])
@@ -1669,6 +1704,7 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
                         prefix, idx, our_name, comp_name,
                         our_price, comp_price, diff,
                         decision, comp_src, _pid_cb, _comp_url_make,
+                        _no_cb,
                     ),
                 )
             with act_col3:
