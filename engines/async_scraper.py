@@ -163,6 +163,7 @@ class Progress:
     urls_total: int = 0
     urls_processed: int = 0
     rows_in_csv: int = 0
+    rows_saved_run: int = 0  # run-scoped: rows saved in THIS run only (not historical CSV)
     fetch_exceptions: int = 0
     success_rate_pct: float = 0.0
     current_store: str = ""
@@ -186,7 +187,14 @@ class Progress:
     def load(cls, path: str = PROGRESS_FILE) -> "Progress":
         try:
             with open(path, encoding="utf-8") as f:
-                return cls(**json.load(f))
+                data = json.load(f) or {}
+            # Backward/forward compatible load: drop unknown keys so older
+            # JSON files (missing rows_saved_run) and newer files (with extra
+            # keys) both deserialise safely.
+            import dataclasses as _dc
+            _known = {f.name for f in _dc.fields(cls)}
+            filtered = {k: v for k, v in data.items() if k in _known}
+            return cls(**filtered)
         except Exception:
             return cls()
 
@@ -231,9 +239,25 @@ def _derive_terminal_phase(rows: int, errors: int, urls_processed: int) -> str:
 
 
 def _finalize_progress_phase(progress) -> str:
-    """يضبط progress.phase للحالة النهائية المشتقة ويعيدها."""
+    """
+    يضبط progress.phase للحالة النهائية المشتقة ويعيدها.
+
+    يعتمد على rows_saved_run (منتجات هذا التشغيل فقط) وليس rows_in_csv
+    (الذي يمثّل المجموع التاريخي التراكمي في CSV). هذا يمنع اعتبار تشغيل
+    فاشل ناجحاً لمجرّد وجود بيانات تاريخية.
+    """
+    # Prefer explicit run-scoped counter; fall back to sum(stores_results)
+    # (also run-scoped because Progress is instantiated fresh per run); only
+    # as last resort use rows_in_csv for maximum backward-compat.
+    run_rows = int(getattr(progress, "rows_saved_run", 0) or 0)
+    if run_rows <= 0:
+        try:
+            sr = getattr(progress, "stores_results", {}) or {}
+            run_rows = sum(int(v or 0) for v in sr.values())
+        except Exception:
+            run_rows = 0
     phase = _derive_terminal_phase(
-        getattr(progress, "rows_in_csv", 0),
+        run_rows,
         getattr(progress, "fetch_exceptions", 0),
         getattr(progress, "urls_processed", 0),
     )
@@ -893,6 +917,7 @@ async def scrape_one_store(
                 )
                 if row:
                     rows.append(row)
+                    progress.rows_saved_run = int(getattr(progress, "rows_saved_run", 0) or 0) + 1
                     if output_queue is not None:
                         # Streaming mode: forward immediately to caller.
                         # asyncio.Queue(maxsize=200) provides natural backpressure —
@@ -1204,6 +1229,8 @@ def run_single_store(
 
     n = _merge_rows_to_csv(rows, domain)
     progress.running      = False
+    # Run-scoped authoritative count for single-store mode
+    progress.rows_saved_run = len(rows)
     _finalize_progress_phase(progress)
     progress.finished_at  = datetime.now().isoformat()
     progress.stores_done  = 1
@@ -1403,6 +1430,14 @@ async def run_scraper(
 
     # ── Finalise ─────────────────────────────────────────────────────────────
     progress.running     = False
+    # Reconcile run-scoped count from per-store results (authoritative for
+    # sequential+parallel multi-store runs).
+    try:
+        progress.rows_saved_run = sum(
+            int(v or 0) for v in (progress.stores_results or {}).values()
+        )
+    except Exception:
+        pass
     _finalize_progress_phase(progress)
     progress.finished_at = datetime.now().isoformat()
     progress.save()
