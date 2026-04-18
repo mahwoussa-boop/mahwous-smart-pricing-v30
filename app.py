@@ -4766,7 +4766,8 @@ elif page == "🕷️ كشط المنافسين":
                 0 if st.session_state.get("sc_all_products", True)
                 else int(st.session_state.get("sc_max_prod", 0) or 0)
             )
-            concurrency = int(st.session_state.get("sc_concurrency", 8))
+            concurrency = int(st.session_state.get("sc_concurrency", 3))
+            concurrency = max(1, min(concurrency, 4))  # auto-clamp to 2-4 safe range
 
             log_fh = open(_LOG_FILE, "w", encoding="utf-8")
             # Parallelism: run every registered competitor at the same time.
@@ -4916,10 +4917,10 @@ elif page == "🕷️ كشط المنافسين":
         with _sc_c3:
             st.number_input(
                 "طلبات متزامنة",
-                2, 30, 8,
+                1, 8, 3,
                 step=1,
                 key="sc_concurrency",
-                help="زيادة الرقم = أسرع لكن احتمال حظر أكبر. موصى به: 6–10",
+                help="تلقائي 2–4 لتجنّب 403 من Cloudflare. لا تتخطَّ 4 إلا إذا كان عندك بروكسيات.",
                 disabled=_is_alive,
             )
 
@@ -4989,7 +4990,8 @@ elif page == "🕷️ كشط المنافسين":
                     0 if st.session_state.get("sc_all_products", True)
                     else int(st.session_state.get("sc_max_prod", 0) or 0)
                 )
-                _cc = int(st.session_state.get("sc_concurrency", 8))
+                _cc = int(st.session_state.get("sc_concurrency", 3))
+                _cc = max(1, min(_cc, 4))  # auto-clamp to 2-4 safe range
                 try:
                     ok = _trigger_now(max_products=_mp, concurrency=_cc)
                     if ok:
