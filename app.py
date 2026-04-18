@@ -5052,6 +5052,39 @@ elif page == "🕷️ كشط المنافسين":
     _finished    = str(_prog.get("finished_at", ""))
     _started     = str(_prog.get("started_at", ""))
 
+    # ── توحيد عداد المنتجات مع تفاصيل المتاجر (منع تعارض KPI) ────────────
+    try:
+        _state_map_top = _load_scraper_state_map()
+    except Exception:
+        _state_map_top = {}
+    try:
+        _csv_counts_top = _load_csv_rows_by_store(_OUTPUT_CSV)
+    except Exception:
+        _csv_counts_top = {}
+    _sum_store_results = 0
+    try:
+        for _d_all in [ (s.replace("https://","").replace("http://","").rstrip("/").split("/")[0])
+                         for s in _load_stores() ]:
+            _cands = [
+                _stores_res.get(_d_all),
+                (_state_map_top.get(_d_all, {}) or {}).get("rows_saved"),
+                _read_live_store_progress(_d_all).get("rows_saved"),
+                _csv_counts_top.get(_d_all),
+            ]
+            _best = 0
+            for _c in _cands:
+                try:
+                    if _c is not None:
+                        _best = max(_best, int(_c))
+                except Exception:
+                    pass
+            _sum_store_results += _best
+    except Exception:
+        _sum_store_results = 0
+    # الرقم الموحّد: الأكبر من (CSV counter) و (مجموع تفاصيل المتاجر)
+    _rows_unified = max(_rows, _sum_store_results)
+    _rows = _rows_unified
+
     if not _os_scraper.path.exists(_PROGRESS_FILE) and not _is_alive:
         # لم يبدأ أي كشط بعد
         if _stores_count > 0:
@@ -5192,9 +5225,25 @@ elif page == "🕷️ كشط المنافسين":
                 unsafe_allow_html=True,
             )
 
+        # ── تشخيص: اكتمل بنجاح لكن 0 منتجات + أخطاء مرتفعة ───────────────
+        if (not _is_alive) and _phase == "completed" and _rows == 0 and _errors > 0:
+            _urls_proc = int(_prog.get("urls_processed", 0) or 0)
+            _err_ratio = (_errors / max(_urls_proc, 1)) * 100 if _urls_proc else 100.0
+            st.error(
+                f"⚠️ انتهى الكشط دون حفظ أي منتج — رُصد **{_errors}** خطأ "
+                f"(≈ {_err_ratio:.0f}% من المحاولات).\n\n"
+                "الأسباب الشائعة:\n"
+                "• الموقع يحجب الطلبات (Cloudflare/403/429)  "
+                "• خريطة الموقع (sitemap) فارغة أو محمية  "
+                "• مهلة (timeout) شبكة  "
+                "• صفحات لا تحتوي JSON-LD/بيانات منتج قابلة للاستخراج.\n\n"
+                "الخطوات المقترحة: قلّل «طلبات متزامنة» إلى 2–4، تحقق من الرابط، "
+                "راجع سجل التشغيل أدناه."
+            )
+
         # ── سجل الأخطاء ──────────────────────────────────────────────────
         if _last_err:
-            with st.expander("⚠️ آخر خطأ مسجل", expanded=False):
+            with st.expander(f"⚠️ آخر خطأ مسجل ({_errors} حادث)", expanded=False):
                 st.error(_last_err)
 
         # ── سجل stderr ───────────────────────────────────────────────────
@@ -5253,6 +5302,77 @@ elif page == "🕷️ كشط المنافسين":
             st.dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
         else:
             st.info("لا توجد منتجات لهذا المنافس.")
+
+        # ── زر: إرسال المنتجات المكشوطة للتحليل ──────────────────────────
+        if st.button(
+            "📤 إرسال المنتجات المكشوطة للتحليل",
+            key="btn_send_scraped_to_analysis",
+            type="primary",
+            use_container_width=True,
+            help="ينقل كل المنتجات المكشوطة إلى لوحة التحكم للمقارنة والتحليل",
+        ):
+            try:
+                _full_df = get_competitor_products_df("")  # كل المنافسين
+                if _full_df is None or _full_df.empty:
+                    # fallback: CSV
+                    try:
+                        if _os_scraper.path.exists(_OUTPUT_CSV):
+                            _full_df = pd.read_csv(
+                                _OUTPUT_CSV, encoding="utf-8-sig", low_memory=False
+                            )
+                    except Exception:
+                        _full_df = None
+
+                if _full_df is None or _full_df.empty:
+                    st.warning("⚠️ لا توجد منتجات مكشوطة بعد — ابدأ الكشط أولاً.")
+                else:
+                    _rename_map = {
+                        "product_name": "المنتج", "name": "المنتج",
+                        "price":        "السعر",
+                        "image_url":    "صورة_المنافس",
+                        "product_url":  "رابط_المنافس",
+                        "brand":        "الماركة",
+                    }
+                    _df_norm = _full_df.rename(
+                        columns={k: v for k, v in _rename_map.items() if k in _full_df.columns}
+                    ).copy()
+
+                    # العمود الذي يُعرّف المنافس
+                    _comp_col = (
+                        "competitor" if "competitor" in _df_norm.columns
+                        else ("store" if "store" in _df_norm.columns else None)
+                    )
+
+                    _comp_dfs: dict = {}
+                    if _comp_col is None:
+                        _comp_dfs["كل المنتجات"] = _df_norm
+                    else:
+                        for _comp, _g in _df_norm.groupby(_comp_col):
+                            if not _comp or str(_comp).lower() == "nan":
+                                continue
+                            _gdf = _g.copy()
+                            _gdf["المنافس"]       = _comp
+                            _gdf["منتج_المنافس"] = _gdf.get("المنتج", "")
+                            _gdf["سعر_المنافس"]  = _gdf.get("السعر", 0)
+                            _comp_dfs[str(_comp)] = _gdf
+
+                    if not _comp_dfs:
+                        st.warning("⚠️ تعذر تجهيز البيانات للتحليل.")
+                    else:
+                        st.session_state["comp_dfs"]            = _comp_dfs
+                        st.session_state["_use_auto_scraper"]   = True
+                        st.session_state["_nav_pending"]        = "📊 لوحة التحكم"
+                        st.session_state["nav_flash"]           = (
+                            f"✅ أُرسل {len(_df_norm):,} منتج من "
+                            f"{len(_comp_dfs)} منافس للتحليل"
+                        )
+                        st.success(
+                            f"✅ تم تجهيز {len(_df_norm):,} منتج من "
+                            f"{len(_comp_dfs)} منافس — جاري الانتقال للوحة التحكم..."
+                        )
+                        st.rerun()
+            except Exception as _send_err:
+                st.error(f"❌ فشل الإرسال: {_send_err}")
     else:
         st.info("📭 قاعدة البيانات المحلية فارغة. ابدأ الكشط لجلب البيانات.")
 
