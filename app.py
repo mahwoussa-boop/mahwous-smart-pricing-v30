@@ -1108,7 +1108,7 @@ def _cb_send_make(
         "comp_url": comp_url or "",
     })
     _mk_status = int(_mk_res.get("status_code") or 0)
-    _ok = bool(_mk_res.get("success")) and _mk_status in (200, 201, 202, 204)
+    _ok = bool(_mk_res.get("success"))
 
     _hk = f"{prefix}_{our_name}_{idx}"
     if _ok:
