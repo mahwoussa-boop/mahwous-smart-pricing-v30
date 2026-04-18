@@ -18,9 +18,12 @@ v25.0 additions:
 
 import requests
 import json
+import logging
 import os
 import time
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger("MakeHelper")
 
 
 # ── Webhook URLs ───────────────────────────────────────────────────────────
@@ -213,8 +216,10 @@ def send_single_product(product: Dict) -> Dict:
     if price <= 0:
         return {"success": False, "message": f"❌ السعر غير صحيح: {price}"}
 
+    if not product_no:
+        logger.warning("⚠️ NO فارغ عند إرسال «%s» — سيُرسل product_id بديلاً", name[:50])
     _prod = {
-        "NO":          product_no,                   # ← Primary Key Make
+        "NO":          product_no or product_id,     # ← Primary Key Make (fallback صلب)
         "product_id":  product_id,
         "name":        name,
         "price":       float(price),
@@ -296,8 +301,10 @@ def send_price_updates(products: List[Dict]) -> Dict:
             skipped += 1
             continue
 
+        if not product_no:
+            logger.warning("⚠️ NO فارغ في الدفعة عند «%s»", name[:50])
         valid_products.append({
-            "NO":          product_no,                    # ← Primary Key Make
+            "NO":          product_no or product_id,      # ← Primary Key Make (fallback صلب)
             "product_id":  product_id,
             "name":        name,
             "price":       float(price),
@@ -317,6 +324,9 @@ def send_price_updates(products: List[Dict]) -> Dict:
         }
 
     payload = {"products": valid_products}
+    _no_count = sum(1 for p in valid_products if p.get("NO"))
+    logger.info("📤 إرسال %d منتج إلى Make — مع NO: %d/%d",
+                len(valid_products), _no_count, len(valid_products))
     result = _post_to_webhook(WEBHOOK_UPDATE_PRICES, payload)
 
     if result["success"]:
