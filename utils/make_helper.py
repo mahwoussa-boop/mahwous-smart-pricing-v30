@@ -227,11 +227,10 @@ def send_single_product(product: Dict) -> Dict:
     if price <= 0:
         return {"success": False, "message": f"❌ السعر غير صحيح: {price}"}
 
-    if not product_no:
-        logger.warning("⚠️ NO فارغ عند إرسال «%s» — سيُرسل product_id بديلاً", name[:50])
     pid_int = _pid_as_int(product_no or product_id)
     if pid_int is None:
-        return {"success": False, "message": f"❌ رقم المنتج NO غير صالح للإرسال إلى سلة: «{name}»"}
+        logger.warning("⚠️ NO/product_id غير رقمي للمنتج «%s» — سيُرسل كنص", name[:50])
+        pid_int = product_no or product_id or ""
     _prod = {
         "NO":          product_no or product_id,     # ← Primary Key Make (fallback صلب)
         "product_id":  pid_int,                       # ← integer لموديول Salla
