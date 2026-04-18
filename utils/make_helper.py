@@ -461,7 +461,12 @@ def send_missing_products(products: List[Dict]) -> Dict:
             "سعر التكلفة":     int(round(_safe_float(p.get("cost_price", p.get("سعر التكلفة", 0))))),
             "السعر المخفض":    int(round(_safe_float(p.get("sale_price",  p.get("السعر المخفض", 0))))),
             "الوصف":           str(p.get("الوصف", p.get("description", ""))).strip(),
+            "صورة المنتج":     str(p.get("image_url", p.get("صورة المنتج", ""))).strip(),
+            "brand_id":        int(_safe_float(p.get("brand_id", 0))) or None,
+            "category_id":     int(_safe_float(p.get("category_id", 0))) or None,
         }
+        # تنظيف: إزالة الحقول الفارغة None
+        item = {k: v for k, v in item.items() if v not in (None, "")}
 
         result = _post_to_webhook(WEBHOOK_NEW_PRODUCTS, {"data": [item]})
         if result["success"]:
@@ -616,3 +621,149 @@ def verify_webhook_connection() -> Dict:
         },
         "all_connected": r1["success"] and r2["success"],
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  تصدير ملفات سلة للرفع اليدوي (بديل عن Webhook)
+# ══════════════════════════════════════════════════════════════════════════
+
+# أعمدة ملف استيراد المنتجات في سلة (من قالب «منتج جديد.csv»)
+SALLA_PRODUCT_COLUMNS = [
+    "النوع ", "أسم المنتج", "تصنيف المنتج", "صورة المنتج", "وصف صورة المنتج",
+    "نوع المنتج", "سعر المنتج", "الوصف", "هل يتطلب شحن؟", "رمز المنتج sku",
+    "سعر التكلفة", "السعر المخفض", "تاريخ بداية التخفيض", "تاريخ نهاية التخفيض",
+    "اقصي كمية لكل عميل", "إخفاء خيار تحديد الكمية", "اضافة صورة عند الطلب",
+    "الوزن", "وحدة الوزن", "الماركة", "العنوان الترويجي", "تثبيت المنتج",
+    "الباركود", "السعرات الحرارية", "MPN", "GTIN", "خاضع للضريبة ؟",
+    "سبب عدم الخضوع للضريبة",
+]
+
+# أعمدة ملف استيراد الماركات في سلة (من قالب «ماركات مهووس.csv»)
+SALLA_BRAND_COLUMNS = [
+    "اسم الماركة", "وصف مختصر عن الماركة", "صورة شعار الماركة",
+    "(إختياري) صورة البانر", "(Page Title) عنوان صفحة العلامة التجارية",
+    "(SEO Page URL) رابط صفحة العلامة التجارية",
+    "(Page Description) وصف صفحة العلامة التجارية",
+]
+
+
+def export_missing_products_to_salla_csv(products: List[Dict], output_path: str) -> Dict:
+    """
+    تصدير المنتجات المفقودة إلى ملف CSV بصيغة قالب استيراد منتجات سلة.
+    للرفع اليدوي في لوحة تحكم سلة → إدارة المنتجات → استيراد.
+
+    السعر = سعر المنافس − 1 | الوزن = 1 | الكمية الافتراضية = 100
+    """
+    import csv
+
+    if not products:
+        return {"success": False, "message": "❌ لا توجد منتجات للتصدير", "path": ""}
+
+    rows = []
+    for p in products:
+        name = str(p.get("name", p.get("المنتج", p.get("منتج_المنافس", "")))).strip()
+        comp_price = _safe_float(
+            p.get("سعر_المنافس", 0) or p.get("comp_price", 0) or p.get("competitor_price", 0)
+        )
+        price = max(int(round(comp_price - 1)), 1) if comp_price > 0 else int(
+            round(_safe_float(p.get("price", 0) or p.get("السعر", 0)))
+        )
+        if not name or price <= 0:
+            continue
+
+        row = {col: "" for col in SALLA_PRODUCT_COLUMNS}
+        row["النوع "]              = "منتج"
+        row["أسم المنتج"]          = name
+        row["تصنيف المنتج"]        = str(p.get("category_name", p.get("التصنيف", "")))
+        row["صورة المنتج"]         = str(p.get("image_url", p.get("صورة المنتج", "")))
+        row["وصف صورة المنتج"]     = f"زجاجة {name}"
+        row["نوع المنتج"]          = "منتج جاهز"
+        row["سعر المنتج"]          = price
+        row["الوصف"]               = str(p.get("الوصف", p.get("description", "")))
+        row["هل يتطلب شحن؟"]       = "نعم"
+        row["رمز المنتج sku"]      = str(p.get("sku", p.get("رمز المنتج sku", "")))
+        row["سعر التكلفة"]         = int(round(_safe_float(p.get("cost_price", 0))))
+        row["السعر المخفض"]        = int(round(_safe_float(p.get("sale_price", 0))))
+        row["الوزن"]               = 1
+        row["وحدة الوزن"]          = "كجم"
+        row["الماركة"]             = str(p.get("brand", p.get("الماركة", "")))
+        row["إخفاء خيار تحديد الكمية"] = "لا"
+        row["تثبيت المنتج"]        = "لا"
+        row["خاضع للضريبة ؟"]      = "نعم"
+        rows.append(row)
+
+    if not rows:
+        return {"success": False, "message": "❌ لا توجد منتجات صالحة للتصدير", "path": ""}
+
+    try:
+        with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=SALLA_PRODUCT_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        return {
+            "success": True,
+            "message": f"✅ تم تصدير {len(rows)} منتج إلى ملف سلة",
+            "path": output_path,
+            "count": len(rows),
+        }
+    except Exception as e:
+        return {"success": False, "message": f"❌ فشل التصدير: {e}", "path": ""}
+
+
+def export_missing_brands_to_salla_csv(
+    brands: List[Dict], existing_brands: List[str], output_path: str
+) -> Dict:
+    """
+    تصدير الماركات المفقودة إلى ملف CSV بصيغة قالب استيراد ماركات سلة.
+    للرفع اليدوي → لوحة سلة → الماركات → استيراد.
+
+    brands: قائمة dicts فيها 'name' و 'description' و 'logo_url' (اختيارية)
+    existing_brands: قائمة أسماء الماركات الموجودة (للاستثناء)
+    """
+    import csv
+
+    if not brands:
+        return {"success": False, "message": "❌ لا توجد ماركات للتصدير", "path": ""}
+
+    existing_norm = {str(b).strip().lower() for b in (existing_brands or []) if b}
+    rows = []
+    seen = set()
+
+    for b in brands:
+        name = str(b.get("name", b.get("brand", b.get("الماركة", "")))).strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in existing_norm or key in seen:
+            continue
+        seen.add(key)
+
+        row = {col: "" for col in SALLA_BRAND_COLUMNS}
+        row["اسم الماركة"]                                      = name
+        row["وصف مختصر عن الماركة"]                             = str(
+            b.get("description", f"ماركة {name} - متوفرة في مهووس للعطور")
+        )
+        row["صورة شعار الماركة"]                                = str(b.get("logo_url", ""))
+        row["(Page Title) عنوان صفحة العلامة التجارية"]         = f"{name} | عطور فاخرة - مهووس"
+        row["(SEO Page URL) رابط صفحة العلامة التجارية"]        = f"ماركة-{name.replace(' ', '-')}"
+        row["(Page Description) وصف صفحة العلامة التجارية"]     = (
+            f"اكتشف تشكيلة {name} الفاخرة في مهووس للعطور. عطور أصلية بأفضل الأسعار."
+        )
+        rows.append(row)
+
+    if not rows:
+        return {"success": False, "message": "ℹ️ كل الماركات موجودة — لا شيء للتصدير", "path": ""}
+
+    try:
+        with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=SALLA_BRAND_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        return {
+            "success": True,
+            "message": f"✅ تم تصدير {len(rows)} ماركة مفقودة",
+            "path": output_path,
+            "count": len(rows),
+        }
+    except Exception as e:
+        return {"success": False, "message": f"❌ فشل التصدير: {e}", "path": ""}
