@@ -1135,10 +1135,10 @@ def _cb_send_make(
         )
         st.rerun()  # FIX: Smart Workflow & AI Tracking
     else:
+        _err_detail = _mk_res.get("message", "خطأ غير معروف")
         st.session_state[f"_act_{prefix}_{idx}"] = (
-            "error", f"❌ فشل الإرسال إلى Make ({_mk_status or 'NO_HTTP'}) — لم يتم تعليم المنتج كمعالج."
+            "error", f"❌ فشل الإرسال إلى Make — {_err_detail}"
         )
-        st.error(f"❌ فشل الإرسال إلى Make: {_mk_res.get('message', 'خطأ غير معروف')}")  # FIX: Transparency & Reversibility
 
 
 def _cb_exclude(
