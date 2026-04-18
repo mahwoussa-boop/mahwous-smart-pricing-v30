@@ -375,6 +375,57 @@ def get_job_progress(job_id):
     return None
 
 
+def any_running_job(stale_after_seconds: int = 3600):
+    """
+    Returns a dict with {job_id, processed, total, updated_at} for the most
+    recent analysis job whose status == 'running' AND whose updated_at is
+    within ``stale_after_seconds``. Returns None if no fresh running job.
+    Acts as a DB-level mutex to prevent duplicate analysis starts across
+    concurrent clicks, reruns, or replicas.
+    """
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT job_id, processed, total, updated_at, started_at "
+            "FROM job_progress WHERE status='running' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            from datetime import datetime as _dt
+            _upd = d.get("updated_at") or d.get("started_at") or ""
+            if _upd:
+                t = _dt.strptime(str(_upd)[:19], "%Y-%m-%d %H:%M:%S")
+                if (_dt.now() - t).total_seconds() > stale_after_seconds:
+                    return None  # stale -> treat as no running job
+        except Exception:
+            pass
+        return d
+    except Exception:
+        return None
+
+
+def release_stale_running_jobs(stale_after_seconds: int = 3600) -> int:
+    """Marks stuck 'running' rows (not updated recently) as 'stopped' so the
+    UI mutex does not deadlock. Returns number of rows updated."""
+    try:
+        with sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30) as conn:
+            conn.execute("PRAGMA busy_timeout=30000;")
+            cur = conn.execute(
+                "UPDATE job_progress SET status='stopped' "
+                "WHERE status='running' AND "
+                "(strftime('%s','now') - strftime('%s', COALESCE(updated_at, started_at))) > ?",
+                (int(stale_after_seconds),),
+            )
+            conn.commit()
+            return cur.rowcount or 0
+    except Exception:
+        return 0
+
+
 def get_last_job():
     try:
         conn = get_db()
