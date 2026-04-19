@@ -47,13 +47,24 @@ def load(store_url: str) -> Dict:
         return {"store_url": store_url, "fetched_at": 0, "urls": {}}
 
 
-def save(store_url: str, urls: Dict[str, str]) -> str:
+def save(
+    store_url: str,
+    urls: Dict[str, str],
+    failures: Dict[str, int] | None = None,
+) -> str:
+    """
+    Persist cache. `failures` (optional) tracks per-URL consecutive fetch
+    failures so we can retry new+failed URLs instead of silently skipping them
+    — and eventually abandon them after MAX_FAIL_COUNT attempts to avoid
+    hammering broken pages forever. Backward-compatible: omitted/empty = {}.
+    """
     os.makedirs(CACHE_DIR, exist_ok=True)
     p = _path(store_url)
     payload = {
         "store_url": store_url,
         "fetched_at": int(time.time()),
         "urls": urls,
+        "failures": dict(failures or {}),
     }
     with open(p, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -87,19 +98,40 @@ def diff(old_urls: Dict[str, str], new_entries: Iterable) -> Tuple[List[str], Li
     return added, modified, unchanged
 
 
+MAX_FAIL_COUNT = 3  # Phase 2: abandon after N consecutive failures
+
+
 def merge_after_scrape(
     store_url: str,
     new_entries: Iterable,
     successfully_scraped_urls: Iterable[str] = (),
+    attempted_but_failed_urls: Iterable[str] = (),
+    max_fail_count: int = MAX_FAIL_COUNT,
 ) -> Dict[str, str]:
     """
     يدمج لقطة Sitemap الجديدة مع الكاش القديم.
-    - لكل URL تم كشطه بنجاح: نُحدّث lastmod من Sitemap.
-    - URLs لم تُكشط (بسبب فشل أو لأنها unchanged): نحتفظ بـ lastmod القديم.
+
+    السلوك:
+      - نجح الكشط            → حدّث lastmod، مسح عدّاد الفشل.
+      - فُشل الكشط (attempted_but_failed):
+          * عدّاد الفشل < N   → خزّن lastmod="" (يجبر تصنيفه "modified"
+                                في الجولة التالية فيُعاد محاولته).
+          * عدّاد الفشل ≥ N   → اقبل lastmod السايت-ماب واعتبره ميؤوساً منه
+                                (لمنع حلقة لا نهائية على صفحة معطوبة).
+      - لم يُكشط أصلاً (unchanged أو مفلتر): أبقِ lastmod القديم، أو سجّل
+        الجديد بـ lastmod السايت-ماب إن كان غير موجود.
+
+    حافة p/4 المغطّاة: رابط جديد فشل لأول مرة لم يعد يُحفظ بـ lastmod
+    السايت-ماب (السلوك القديم كان يُصنّفه "unchanged" في الجولة التالية
+    ويُتخطى للأبد).
     """
-    old = load(store_url).get("urls", {})
+    data = load(store_url)
+    old = data.get("urls", {}) or {}
+    failures: Dict[str, int] = dict(data.get("failures", {}) or {})
     success = set(successfully_scraped_urls or [])
-    merged = dict(old)  # احتفظ بالقديم
+    failed = set(attempted_but_failed_urls or [])
+    merged = dict(old)
+
     for e in new_entries:
         if hasattr(e, "url"):
             url = e.url
@@ -109,11 +141,24 @@ def merge_after_scrape(
             lm = e.get("lastmod", "") or ""
         if not url:
             continue
+
         if url in success:
-            merged[url] = lm  # حدّث
+            merged[url] = lm
+            failures.pop(url, None)
+        elif url in failed:
+            cnt = failures.get(url, 0) + 1
+            if cnt >= max_fail_count:
+                # ميؤوس منه: اقبل lastmod السايت-ماب ليُصنَّف unchanged
+                # فلا نُعيد محاولته إلا إذا تغيّر lastmod.
+                merged[url] = lm
+                failures.pop(url, None)
+            else:
+                merged[url] = ""  # يُصنَّف "modified" في الجولة التالية
+                failures[url] = cnt
         elif url not in merged:
-            merged[url] = lm  # سجّل ولو فشل (للمحاولة لاحقاً)
-    save(store_url, merged)
+            merged[url] = lm
+
+    save(store_url, merged, failures=failures)
     return merged
 
 

@@ -1486,6 +1486,160 @@ def _normalize_for_store(s: str) -> str:
     return _re.sub(r"\s+", " ", t).strip().lower()
 
 
+import re as _re_schema
+
+_GENDER_MAP = {
+    "رجالي": "رجالي", "رجال": "رجالي", "رجل": "رجالي",
+    "men": "رجالي", "man": "رجالي", "male": "رجالي", "m": "رجالي",
+    "نسائي": "نسائي", "نساء": "نسائي", "امرأة": "نسائي",
+    "women": "نسائي", "woman": "نسائي", "female": "نسائي", "w": "نسائي",
+    "أطفال": "أطفال", "اطفال": "أطفال", "طفل": "أطفال",
+    "kids": "أطفال", "kid": "أطفال", "children": "أطفال",
+    "child": "أطفال", "baby": "أطفال", "boys": "أطفال", "girls": "أطفال",
+    "للجنسين": "للجنسين", "مشترك": "للجنسين",
+    "unisex": "للجنسين", "both": "للجنسين", "all": "للجنسين",
+}
+
+_SIZE_PREFIX_RE = _re_schema.compile(
+    r"^(?:المقاس|مقاس|الحجم|حجم|size|Size|SIZE)\s*[:：]\s*", _re_schema.IGNORECASE
+)
+_BRAND_PREFIX_RE = _re_schema.compile(
+    r"^(?:الماركة|العلامة|ماركة|brand|Brand|BRAND)\s*[:：]\s*", _re_schema.IGNORECASE
+)
+_WS_RE = _re_schema.compile(r"\s+")
+_CTRL_RE = _re_schema.compile(r"[\x00-\x1f\x7f]")
+
+
+def _norm_text(s: str) -> str:
+    """Strip control chars, collapse whitespace."""
+    s = _CTRL_RE.sub(" ", s)
+    s = _WS_RE.sub(" ", s).strip()
+    return s
+
+
+def _norm_gender(s: str) -> str:
+    """Map free-form gender strings to canonical Arabic labels."""
+    if not s:
+        return "للجنسين"
+    key = _norm_text(s).lower()
+    if key in _GENDER_MAP:
+        return _GENDER_MAP[key]
+    for k, v in _GENDER_MAP.items():
+        if k in key:
+            return v
+    return "للجنسين"
+
+
+def _norm_size(s: str) -> str:
+    s = _norm_text(s)
+    s = _SIZE_PREFIX_RE.sub("", s)
+    return s.strip()
+
+
+def _norm_brand(s: str) -> str:
+    s = _norm_text(s)
+    s = _BRAND_PREFIX_RE.sub("", s)
+    return s.strip()
+
+
+def _canonical_url(url: str) -> str:
+    """
+    Canonicalize a product URL for intra-store dedup:
+      - lowercase scheme + host
+      - strip query string and fragment
+      - strip trailing slash
+    Same logical product page under different tracking params collapses
+    to one key.
+    """
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        p = urlsplit(url.strip())
+        cleaned = urlunsplit((
+            p.scheme.lower(), p.netloc.lower(), p.path.rstrip("/"), "", ""
+        ))
+        return cleaned
+    except Exception:
+        return url.strip()
+
+
+def dedup_rows_by_url(rows: list[dict]) -> list[dict]:
+    """
+    Intra-batch dedup: keep the LAST row seen per canonical product URL.
+    Rows without a URL pass through unchanged (cannot be safely collapsed).
+    """
+    seen: dict[str, int] = {}
+    out: list[dict | None] = list(rows)
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            continue
+        u = _canonical_url(str(r.get("product_url") or r.get("url") or ""))
+        if not u:
+            continue
+        if u in seen:
+            out[seen[u]] = None  # drop earlier duplicate
+        seen[u] = i
+    return [r for r in out if r is not None]
+
+
+def normalize_scraped_row_for_db(
+    row: dict,
+    competitor_domain: str = "",
+) -> dict | None:
+    """
+    Phase 2 — canonical scraper-row → DB-row normalizer.
+
+    Single transformation point between the scraper's loose row schema
+    (mixed English/legacy keys) and the `competitor_products_store` table's
+    expected schema (Arabic name/price keys + English auxiliary columns).
+
+    Accepts any of:  المنتج | product_name | name
+                     السعر  | price
+                     image_url | image
+                     product_url | url
+                     brand, size, gender
+
+    Returns None when the row is unusable so callers can filter cleanly
+    instead of inserting polluted rows into the analysis engine:
+      * missing or too-short name
+      * non-numeric or non-positive price
+    """
+    if not isinstance(row, dict):
+        return None
+
+    name = _norm_text(str(
+        row.get("المنتج")
+        or row.get("product_name")
+        or row.get("name")
+        or ""
+    ))
+    if len(name) < 2:
+        return None
+
+    raw_price = row.get("السعر", None)
+    if raw_price is None:
+        raw_price = row.get("price", 0)
+    try:
+        price = float(
+            str(raw_price or 0).replace(",", "").replace("﷼", "").replace("SAR", "").strip()
+        )
+    except (ValueError, TypeError):
+        return None
+    if price <= 0:
+        return None
+
+    return {
+        "المنتج":      name,
+        "السعر":       price,
+        "image_url":   _norm_text(str(row.get("image_url") or row.get("image") or "")),
+        "product_url": _norm_text(str(row.get("product_url") or row.get("url") or "")),
+        "brand":       _norm_brand(str(row.get("brand") or "")),
+        "size":        _norm_size(str(row.get("size") or "")),
+        "gender":      _norm_gender(str(row.get("gender") or "")),
+    }
+
+
 def upsert_competitor_products(
     competitor: str,
     products: list[dict],
@@ -1500,6 +1654,11 @@ def upsert_competitor_products(
     conn = get_db()
     inserted = updated = 0
     today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Phase 3: intra-batch dedup by canonical product URL (within the same
+    # competitor). Prevents wasted UPDATE/INSERT cycles when a store's
+    # sitemap + product-listing scrape both emit the same page.
+    products = dedup_rows_by_url(list(products))
 
     # Phase 4: Atomic transaction — prevents race conditions during high-volume scraping
     try:
