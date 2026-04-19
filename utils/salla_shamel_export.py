@@ -574,7 +574,12 @@ def build_salla_shamel_dataframe(
         # FIX: extract SKU from input row if available (e.g. magic factory)
         out["رمز المنتج sku"]            = _safe_str(r.get("رمز المنتج sku", ""))
         out["سعر التكلفة"]               = ""
-        out["السعر المخفض"]              = ""
+        # السعر المخفض = سعر المنافس − 1 ريال
+        try:
+            _p = float(str(price).replace(",", "")) if price not in ("", None) else 0.0
+            out["السعر المخفض"] = str(round(_p - 1, 2)) if _p > 1 else ""
+        except (ValueError, TypeError):
+            out["السعر المخفض"] = ""
         out["تاريخ بداية التخفيض"]       = ""
         out["تاريخ نهاية التخفيض"]       = ""
         out["اقصي كمية لكل عميل"]        = 100  # FIX: Salla Strict CSV Validation
