@@ -373,11 +373,26 @@ def _extract_price(row: dict) -> str:
     return ""
 
 
+_CDN_CGI_IMAGE_RE = re.compile(r"/cdn-cgi/image/[^/]+/", re.I)
+
+
+def _sanitize_image_url(url: str) -> str:
+    """يزيل تحويلات Cloudflare Image Resizing (cdn-cgi/image/...,...)
+    لأن الفواصل داخلها تكسر استيراد سلة الذي يَفصِل الصور بـ ','."""
+    if not url:
+        return ""
+    cleaned = _CDN_CGI_IMAGE_RE.sub("/", url, count=1)
+    # احتياط: لو ما زال يحتوي فواصل، خذ أول جزء قبل أول فاصلة فقط
+    if "," in cleaned:
+        cleaned = cleaned.split(",", 1)[0]
+    return cleaned.strip()
+
+
 def _extract_image(row: dict) -> str:
     for k in ("صورة_المنافس", "صورة المنتج", "image_url", "صورة", "الصورة"):
         v = _safe_str(row.get(k, ""))
         if v and v.lower().startswith("http"):
-            return v
+            return _sanitize_image_url(v)
     return ""
 
 
