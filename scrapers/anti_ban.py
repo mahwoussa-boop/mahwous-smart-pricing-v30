@@ -417,6 +417,31 @@ def get_rate_limiter() -> AdaptiveRateLimiter:
     return _rate_limiter
 
 
+# ── Phase 1 (2026-04-19): per-domain concurrency cap ───────────────────────
+# The AdaptiveRateLimiter above already applies per-domain *delay* and backoff,
+# but N workers that clear `rl.wait(domain)` inside the same event-loop tick
+# can still burst-fire on the same origin — the classic Cloudflare 429 trigger
+# on large sitemapindex fan-outs. We add a second, independent gate: a
+# per-domain asyncio.Semaphore limiting how many requests to a single host
+# may be *in flight* concurrently. Tunable via DOMAIN_CONCURRENCY env var.
+_DOMAIN_CONCURRENCY_DEFAULT = int(os.environ.get("DOMAIN_CONCURRENCY", "4"))
+_DOMAIN_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
+_DOMAIN_SEM_LOCK = threading.Lock()
+
+
+def get_domain_semaphore(domain: str) -> asyncio.Semaphore:
+    """Return (and lazily create) a per-domain concurrency semaphore."""
+    sem = _DOMAIN_SEMAPHORES.get(domain)
+    if sem is not None:
+        return sem
+    with _DOMAIN_SEM_LOCK:
+        sem = _DOMAIN_SEMAPHORES.get(domain)
+        if sem is None:
+            sem = asyncio.Semaphore(_DOMAIN_CONCURRENCY_DEFAULT)
+            _DOMAIN_SEMAPHORES[domain] = sem
+    return sem
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  5. fetch_with_retry — now Retry-After aware + optional proxy (v3.0)
 # ══════════════════════════════════════════════════════════════════════════
@@ -448,6 +473,7 @@ async def fetch_with_retry(
     """
     domain = urlparse(url).netloc
     rl = get_rate_limiter()
+    dom_sem = get_domain_semaphore(domain)
 
     for attempt in range(max_retries):
         headers = get_browser_headers(referer=referer or f"https://{domain}/", domain=domain)
@@ -463,7 +489,10 @@ async def fetch_with_retry(
             if proxy:
                 request_kwargs["proxy"] = proxy
 
-            resp = await session.get(url, **request_kwargs)
+            # Phase 1: per-domain concurrency gate — prevents in-flight bursts
+            # even when N workers all clear rl.wait() simultaneously.
+            async with dom_sem:
+                resp = await session.get(url, **request_kwargs)
 
             if resp.status == 200:
                 rl.record_success(domain)
