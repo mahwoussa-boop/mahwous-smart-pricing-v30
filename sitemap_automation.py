@@ -19,6 +19,19 @@ from engines.ai_scraper_v27 import scrape_product_ai, clean_product_name_ai
 from engines.selenium_scraper_v30 import scrape_product_v30
 from utils.db_manager import upsert_competitor_products
 from scrapers.anti_ban import get_browser_headers
+from utils import sitemap_cache as _sm_cache
+
+# مسار ملف التقدم — يُقرأ من الواجهة لعرض شريط التقدم الحي
+_PROGRESS_PATH = os.path.join(os.environ.get("DATA_DIR", "data"), "sitemap_auto_progress.json")
+
+
+def _write_progress(payload: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(_PROGRESS_PATH), exist_ok=True)
+        with open(_PROGRESS_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 # إعداد السجل
 logging.basicConfig(
@@ -107,31 +120,56 @@ async def _fetch_and_scrape_product(session, product_url, store_name):
         "sku": "",
     }
 
-async def process_store_sitemap(session, store_name, store_url, sitemap_url):
-    """جلب المنتجات من sitemap وكشطها باستخدام محرك v27 الهجين"""
-    logger.info(f"🚀 بدء معالجة المتجر: {store_name} ({store_url})")
-    
+async def process_store_sitemap(session, store_name, store_url, sitemap_url, incremental: bool = True, progress_cb=None):
+    """جلب المنتجات من sitemap وكشطها باستخدام محرك v27 الهجين.
+
+    incremental=True: يكشط فقط المنتجات الجديدة أو التي تغيّر lastmod الخاص بها
+    منذ آخر تشغيل (يعتمد على utils.sitemap_cache).
+    """
+    logger.info(f"🚀 بدء معالجة المتجر: {store_name} ({store_url})  incremental={incremental}")
+
     try:
         # 1. جلب الروابط من Sitemap
         entries = await _fetch_and_parse_sitemap(session, sitemap_url)
         if not entries:
             logger.warning(f"⚠️ لم يتم العثور على روابط في sitemap لـ {store_name}")
             return 0
-        
+
         # 2. تصفية روابط المنتجات
         product_entries = _filter_product_entries(entries, store_url)
         if not product_entries:
             logger.warning(f"⚠️ لم يتم العثور على منتجات بعد التصفية لـ {store_name}")
             return 0
-            
+
         logger.info(f"✅ تم العثور على {len(product_entries)} منتج في {store_name}")
+
+        # 2.5 — وضع التحديث التزايدي: استبعاد ما لم يتغيّر
+        if incremental:
+            old_cache = _sm_cache.load(store_url).get("urls", {})
+            added, modified, unchanged = _sm_cache.diff(old_cache, product_entries)
+            target_urls = set(added) | set(modified)
+            if old_cache and target_urls:
+                logger.info(
+                    f"📊 {store_name}: تزايدي → جديد {len(added)} | تعديل {len(modified)} | "
+                    f"بدون تغيير {len(unchanged)}"
+                )
+                product_entries = [e for e in product_entries if e.url in target_urls]
+            elif not old_cache:
+                logger.info(f"🆕 {store_name}: لا يوجد كاش سابق — سيتم كشط الكل ({len(product_entries)})")
+            else:
+                logger.info(f"✅ {store_name}: لا يوجد تغيير منذ آخر تشغيل")
+                # حدّث الكاش بنفس البيانات (لتسجيل fetched_at الجديد)
+                _sm_cache.merge_after_scrape(store_url, product_entries, [])
+                return 0
         
         # 3. كشط كل المنتجات على دفعات متوازية
         db_products = []
         successful_scrapes = 0
+        successful_urls: list[str] = []
         concurrency = max(1, min(int(os.environ.get("SITEMAP_V30_CONCURRENCY", "10")), 10))
         max_products = int(os.environ.get("SITEMAP_MAX_PRODUCTS", "0"))
         target_entries = product_entries[:max_products] if max_products > 0 else product_entries
+        total_target = len(target_entries)
 
         for start in range(0, len(target_entries), concurrency):
             batch = target_entries[start:start + concurrency]
@@ -168,6 +206,7 @@ async def process_store_sitemap(session, store_name, store_url, sitemap_url):
                 rows_to_save.append(row)
                 if row["price"] > 0:
                     successful_scrapes += 1
+                    successful_urls.append(row["product_url"])
 
             if rows_to_save:
                 res = upsert_competitor_products(store_name, rows_to_save, name_key="name", price_key="price")
@@ -175,7 +214,18 @@ async def process_store_sitemap(session, store_name, store_url, sitemap_url):
                     f"💾 {store_name}: حفظ دفعة {len(rows_to_save)} منتج | أسعار فعلية حتى الآن: {successful_scrapes}/{len(db_products)} | inserted={res.get('inserted', 0)} updated={res.get('updated', 0)}"
                 )
 
-        # 4. تخزين البيانات في قاعدة البيانات
+            if progress_cb:
+                try:
+                    progress_cb(store_name, len(db_products), total_target, successful_scrapes)
+                except Exception:
+                    pass
+
+        # 4. تحديث كاش Sitemap مع lastmod للمنتجات التي نجحت
+        try:
+            _sm_cache.merge_after_scrape(store_url, product_entries, successful_urls)
+        except Exception as _ce:
+            logger.warning(f"⚠️ تعذّر حفظ كاش Sitemap لـ {store_name}: {_ce}")
+
         if db_products:
             logger.info(f"✅ {store_name}: اكتمل كشط {len(db_products)} منتج | أسعار فعلية: {successful_scrapes}")
             return len(db_products)
@@ -218,16 +268,52 @@ def _load_competitors() -> list:
     return entries
 
 
-async def run_automation():
-    """تشغيل الأتمتة لجميع المنافسين المسجلين"""
+async def run_automation(incremental: bool = True):
+    """تشغيل الأتمتة لجميع المنافسين المسجلين.
+
+    incremental=True (الافتراضي): يكشط فقط ما تغيّر منذ آخر تشغيل.
+    """
     entries = _load_competitors()
     if not entries:
+        _write_progress({"running": False, "phase": "error", "message": "لا يوجد منافسون"})
         return 0
+
+    started_at = datetime.now().isoformat(timespec="seconds")
+    _write_progress({
+        "running": True,
+        "phase": "starting",
+        "started_at": started_at,
+        "incremental": incremental,
+        "total_stores": len(entries),
+        "store_index": 0,
+        "current_store": "",
+        "products_done": 0,
+        "products_total": 0,
+        "successful": 0,
+        "totals_per_store": {},
+    })
 
     connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=120, connect=15)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         results = []
+        totals_per_store: dict[str, int] = {}
+
+        def _cb(store, done, total, ok):
+            _write_progress({
+                "running": True,
+                "phase": "scraping",
+                "started_at": started_at,
+                "incremental": incremental,
+                "total_stores": len(entries),
+                "store_index": len(results) + 1,
+                "current_store": store,
+                "products_done": done,
+                "products_total": total,
+                "successful": ok,
+                "totals_per_store": totals_per_store,
+            })
+
         for entry in entries:
             try:
                 count = await process_store_sitemap(
@@ -235,15 +321,34 @@ async def run_automation():
                     entry["name"],
                     entry["store_url"],
                     entry["sitemap_url"],
+                    incremental=incremental,
+                    progress_cb=_cb,
                 )
                 results.append(count or 0)
+                totals_per_store[entry["name"]] = count or 0
             except Exception as e:
                 logger.error(f"❌ خطأ في {entry['name']}: {e}")
                 results.append(0)
+                totals_per_store[entry["name"]] = 0
 
         total_saved = sum(results)
         logger.info(f"🏁 انتهت الأتمتة. إجمالي المنتجات المكتشفة: {total_saved}")
+        _write_progress({
+            "running": False,
+            "phase": "completed",
+            "started_at": started_at,
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+            "incremental": incremental,
+            "total_stores": len(entries),
+            "products_done": total_saved,
+            "totals_per_store": totals_per_store,
+        })
         return total_saved
 
+
 if __name__ == "__main__":
-    asyncio.run(run_automation())
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--full", action="store_true", help="كشط كامل (تجاهل الكاش التزايدي)")
+    args = ap.parse_args()
+    asyncio.run(run_automation(incremental=not args.full))
