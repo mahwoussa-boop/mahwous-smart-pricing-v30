@@ -601,6 +601,27 @@ def build_salla_shamel_dataframe(
 
     df = pd.DataFrame(rows, columns=SALLA_SHAMEL_COLUMNS)
     assert len(df.columns) == 40, f"عدد الأعمدة {len(df.columns)} ≠ 40"
+
+    # ── بوابة جودة إلزامية: وصف مهووس صالح + رابط صورة حقيقي ──────────
+    try:
+        from utils.product_gate import is_mahwous_description, is_real_image_url
+        keep_mask = df.apply(
+            lambda r: bool(is_mahwous_description(r.get("الوصف", "")))
+                      and bool(is_real_image_url(r.get("صورة المنتج", ""))),
+            axis=1,
+        )
+        rejected_count = int((~keep_mask).sum())
+        if rejected_count:
+            try:
+                st.warning(
+                    f"⚠️ تم استبعاد {rejected_count} منتج من ملف سلة لغياب وصف مهووس صالح أو رابط صورة حقيقي."
+                )
+            except Exception:
+                pass
+        df = df.loc[keep_mask].reset_index(drop=True)
+    except Exception:
+        pass
+
     return df, found_in_cat
 
 

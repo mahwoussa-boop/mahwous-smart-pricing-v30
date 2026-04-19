@@ -168,8 +168,174 @@ def init_db():
         action TEXT DEFAULT 'hidden'
     )""")
 
+    # ─── Single Source of Truth: product_state ─────────────────────────────
+    # كل منتج له حالة واحدة فقط في أي لحظة. مفتاح الهوية ثابت (product_key).
+    # status ∈ {NEW, MISSING, REVIEW, DUPLICATE, MATCHED, DONE, NEEDS_ATTENTION}
+    c.execute("""CREATE TABLE IF NOT EXISTS product_state (
+        product_key TEXT PRIMARY KEY,
+        product_name TEXT,
+        store TEXT,
+        url TEXT,
+        status TEXT NOT NULL DEFAULT 'NEW',
+        confidence REAL DEFAULT 0,
+        duplicate_of TEXT,
+        last_decision_by TEXT DEFAULT 'auto',
+        payload_json TEXT DEFAULT '{}',
+        created_at TEXT,
+        updated_at TEXT
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pstate_status ON product_state(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pstate_updated ON product_state(updated_at)")
+
+    # ─── Audit Log: every status transition is recorded (Undo support) ─────
+    c.execute("""CREATE TABLE IF NOT EXISTS product_transitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_key TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT,
+        changed_by TEXT,
+        reason TEXT,
+        timestamp TEXT
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ptrans_key ON product_transitions(product_key)")
+
     conn.commit()
     conn.close()
+
+
+# ─── Single Source of Truth API ────────────────────────────────────────────
+def upsert_product_state(product_key, name="", store="", url="",
+                         status="NEW", confidence=0.0, duplicate_of=None,
+                         decided_by="auto", payload=None, reason=""):
+    """
+    Atomic upsert. If status changes, logs a transition for full audit + undo.
+    Returns the new status.
+    """
+    import json as _json
+    payload_json = _json.dumps(payload or {}, ensure_ascii=False)
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT status FROM product_state WHERE product_key=?", (product_key,))
+        row = c.fetchone()
+        old_status = row["status"] if row else None
+        now = _ts()
+        if row is None:
+            c.execute("""INSERT INTO product_state
+                (product_key, product_name, store, url, status, confidence,
+                 duplicate_of, last_decision_by, payload_json, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (product_key, name, store, url, status, confidence,
+                 duplicate_of, decided_by, payload_json, now, now))
+        else:
+            c.execute("""UPDATE product_state SET
+                product_name=COALESCE(NULLIF(?, ''), product_name),
+                store=COALESCE(NULLIF(?, ''), store),
+                url=COALESCE(NULLIF(?, ''), url),
+                status=?, confidence=?, duplicate_of=?,
+                last_decision_by=?, payload_json=?, updated_at=?
+                WHERE product_key=?""",
+                (name, store, url, status, confidence, duplicate_of,
+                 decided_by, payload_json, now, product_key))
+        if old_status != status:
+            c.execute("""INSERT INTO product_transitions
+                (product_key, from_status, to_status, changed_by, reason, timestamp)
+                VALUES (?,?,?,?,?,?)""",
+                (product_key, old_status, status, decided_by, reason, now))
+        conn.commit()
+        return status
+    finally:
+        conn.close()
+
+
+def get_product_state(product_key):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM product_state WHERE product_key=?",
+                           (product_key,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_products_by_status(status, limit=1000):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM product_state WHERE status=? ORDER BY updated_at DESC LIMIT ?",
+            (status, limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def undo_last_transition(product_key, decided_by="user"):
+    """Revert the product to its previous status. Returns the restored status, or None."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """SELECT from_status FROM product_transitions
+               WHERE product_key=? AND from_status IS NOT NULL
+               ORDER BY id DESC LIMIT 1""",
+            (product_key,)
+        ).fetchone()
+        if not row or not row["from_status"]:
+            return None
+        prev = row["from_status"]
+        now = _ts()
+        cur = conn.execute("SELECT status FROM product_state WHERE product_key=?",
+                           (product_key,)).fetchone()
+        cur_status = cur["status"] if cur else None
+        conn.execute("UPDATE product_state SET status=?, last_decision_by=?, updated_at=? WHERE product_key=?",
+                     (prev, decided_by, now, product_key))
+        conn.execute("""INSERT INTO product_transitions
+            (product_key, from_status, to_status, changed_by, reason, timestamp)
+            VALUES (?,?,?,?,?,?)""",
+            (product_key, cur_status, prev, decided_by, "undo", now))
+        conn.commit()
+        return prev
+    finally:
+        conn.close()
+
+
+def get_transitions(product_key, limit=20):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM product_transitions WHERE product_key=? ORDER BY id DESC LIMIT ?",
+            (product_key, limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def stale_products(hours=24, status="NEW"):
+    """Products stuck in a status longer than `hours` — for the safety-net sweep."""
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM product_state WHERE status=? AND updated_at < ?",
+            (status, cutoff)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def state_health_counts():
+    """Returns counts per status — for the health panel."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM product_state GROUP BY status"
+        ).fetchall()
+        return {r["status"]: r["n"] for r in rows}
+    finally:
+        conn.close()
 
 
 # ─── أحداث ────────────────────────────────

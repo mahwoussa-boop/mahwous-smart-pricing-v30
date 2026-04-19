@@ -364,7 +364,21 @@ def send_new_products(products: List[Dict]) -> Dict:
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات للإرسال"}
 
-    sent, skipped, errors = 0, 0, []
+    # ── بوابة إلزامية: وصف مهووس + رابط صورة حقيقي ────────────────────
+    try:
+        from utils.product_gate import validate_and_enrich
+        products, _gate_rejected = validate_and_enrich(products, auto_generate_desc=True)
+        gate_skipped = len(_gate_rejected)
+        if gate_skipped:
+            logger.warning("🚫 بوابة الجودة استبعدت %d منتج (وصف/صورة مفقود)", gate_skipped)
+    except Exception as _e:
+        logger.error("فشل تطبيق بوابة الجودة: %s", _e)
+        gate_skipped = 0
+    if not products:
+        return {"success": False,
+                "message": f"❌ لا توجد منتجات صالحة — تم رفض {gate_skipped} لغياب وصف مهووس أو صورة حقيقية"}
+
+    sent, skipped, errors = 0, gate_skipped, []
 
     for p in products:
         name  = str(p.get("name", p.get("أسم المنتج", ""))).strip()
@@ -431,7 +445,21 @@ def send_missing_products(products: List[Dict]) -> Dict:
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات مفقودة للإرسال"}
 
-    sent, skipped, errors = 0, 0, []
+    # ── بوابة إلزامية: وصف مهووس + رابط صورة حقيقي ────────────────────
+    try:
+        from utils.product_gate import validate_and_enrich
+        products, _gate_rejected = validate_and_enrich(products, auto_generate_desc=True)
+        gate_skipped = len(_gate_rejected)
+        if gate_skipped:
+            logger.warning("🚫 بوابة الجودة استبعدت %d منتج مفقود (وصف/صورة مفقود)", gate_skipped)
+    except Exception as _e:
+        logger.error("فشل تطبيق بوابة الجودة: %s", _e)
+        gate_skipped = 0
+    if not products:
+        return {"success": False,
+                "message": f"❌ لا توجد منتجات مفقودة صالحة — رفض {gate_skipped} لغياب وصف مهووس أو صورة حقيقية"}
+
+    sent, skipped, errors = 0, gate_skipped, []
 
     for p in products:
         name  = str(p.get("name", p.get("المنتج", p.get("منتج_المنافس", "")))).strip()
@@ -657,6 +685,21 @@ def export_missing_products_to_salla_csv(products: List[Dict], output_path: str)
 
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات للتصدير", "path": ""}
+
+    # ── بوابة إلزامية: وصف مهووس + صورة حقيقية ────────────────────────
+    try:
+        from utils.product_gate import validate_and_enrich
+        products, _gate_rejected = validate_and_enrich(list(products), auto_generate_desc=True)
+        _gate_skipped = len(_gate_rejected)
+        if _gate_skipped:
+            logger.warning("🚫 بوابة التصدير: رفض %d منتج (وصف/صورة مفقود)", _gate_skipped)
+    except Exception as _e:
+        logger.error("فشل بوابة التصدير: %s", _e)
+        _gate_skipped = 0
+    if not products:
+        return {"success": False,
+                "message": f"❌ لا منتجات صالحة للتصدير — رُفض {_gate_skipped} لغياب وصف مهووس أو صورة حقيقية",
+                "path": ""}
 
     rows = []
     for p in products:
