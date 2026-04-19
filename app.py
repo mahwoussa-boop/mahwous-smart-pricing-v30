@@ -3798,7 +3798,7 @@ elif page == "🔍 منتجات مفقودة":
                             if st.button("⏭️ تأجيل", key=f"unc_skip_later_{_ui}",
                                          use_container_width=True,
                                          help="إبقاؤه في القائمة للمراجعة لاحقاً"):
-                                pass
+                                st.toast(f"⏭️ تم تأجيل «{_u_name[:30]}» — سيبقى في قائمة المراجعة", icon="⏭️")
                         st.markdown('<hr style="border:none;border-top:1px solid #1a2a44;margin:6px 0">', unsafe_allow_html=True)
 
                     if _to_remove:
