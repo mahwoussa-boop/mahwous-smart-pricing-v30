@@ -148,7 +148,7 @@ def extract(html: str) -> Dict[str, Any]:
     Empty dict {} when no structured data found.
     Try JSON-LD first (richest), then OG/meta.
     """
-    if not html or len(html) < 200:
+    if not html or len(html) < 50:
         return {}
     data = _extract_from_jsonld(html)
     if data.get("price"):

@@ -515,6 +515,19 @@ async def fetch_product(
     http_status_counters: Dict[str, int] | None = None,
 ) -> dict | None:
     async with semaphore:
+        # Phase 3: robots.txt احترام (fail-open عند الأخطاء)
+        try:
+            from utils.robots_cache import can_fetch as _robots_can_fetch
+            if not await _robots_can_fetch(session, url):
+                if http_status_counters is not None:
+                    http_status_counters["robots_blocked"] = (
+                        http_status_counters.get("robots_blocked", 0) + 1
+                    )
+                logger.debug("robots.txt disallowed: %s", url)
+                return None
+        except Exception as _re:
+            logger.debug("robots check error %s: %s", url, _re)
+
         json_url = url if url.endswith(".json") else url.rstrip("/") + ".json"
 
         # Sticky-per-store proxy selection (None if pool empty → direct).
@@ -645,7 +658,37 @@ async def fetch_product(
         if not html:
             return None
 
-        # ── JSON-LD + meta ───────────────────────────────────────────────
+        # ── Phase 2 Item 4: canonical JSON-LD extractor FIRST ────────────
+        # engines.json_ld_extractor.extract() enforces an explicit non-SAR
+        # currency blocklist (USD/EUR/AED/KWD/…) and prefers sale_price over
+        # list price — a signal the existing extract_meta_bundle / _walk
+        # paths don't apply consistently. When it yields a valid price we
+        # trust it and return immediately. On miss, the existing two
+        # JSON-LD/meta paths below still run as fallback (zero regression).
+        try:
+            from engines.json_ld_extractor import extract as _ld_first
+            _ld_data = _ld_first(html)
+            if (
+                _ld_data
+                and _ld_data.get("price")
+                and (_ld_data.get("name") or _url_looks_like_product_page(url))
+            ):
+                row = extract_product(
+                    {
+                        "name":  _ld_data.get("name", "") or "",
+                        "price": _ld_data["price"],
+                        "image": _ld_data.get("image", "") or "",
+                        "url":   url,
+                        "brand": "",
+                    },
+                    store_url,
+                )
+                if _has_valid_price(row):
+                    return row
+        except Exception as _ld_exc:
+            logger.debug("json-ld first-extractor error %s: %s", url, _ld_exc)
+
+        # ── JSON-LD + meta (legacy bundle, kept as fallback) ─────────────
         try:
             from utils.competitor_product_scraper import extract_meta_bundle
 
@@ -843,7 +886,7 @@ async def scrape_one_store(
     try:
         from engines.sitemap_resolve import (
             SitemapDiscoveryError,
-            resolve_product_urls,
+            resolve_product_entries,
         )
     except ImportError:
         logger.error("تعذّر تحميل engines.sitemap_resolve")
@@ -851,6 +894,17 @@ async def scrape_one_store(
         _bump_skip(progress, "import_error")
         progress.save()
         return []
+
+    # Phase 1 (2026-04-19): smart lastmod-based incremental scraping.
+    # utils.sitemap_cache persists {url -> lastmod} per store; we skip URLs
+    # whose lastmod is unchanged since the last successful scrape.
+    try:
+        from utils import sitemap_cache as _sitemap_cache
+        _SITEMAP_CACHE_AVAILABLE = True
+    except ImportError:
+        _sitemap_cache = None  # type: ignore
+        _SITEMAP_CACHE_AVAILABLE = False
+        logger.warning("⚠️ utils.sitemap_cache غير متاح — كشط كامل بدون تحديث ذكي")
 
     own_session = external_session is None
     connector: aiohttp.TCPConnector | None = None
@@ -876,9 +930,11 @@ async def scrape_one_store(
         progress.save()
 
         logger.info(f"🗺️ {domain} — يحلل Sitemap عبر anti-ban على نفس الجلسة…")
+        # Phase 1: always return entries (url + lastmod) so we can diff vs cache.
+        all_entries: list = []
         try:
-            all_urls = await asyncio.wait_for(
-                resolve_product_urls(store_url, session),
+            all_entries = await asyncio.wait_for(
+                resolve_product_entries(store_url, session),
                 timeout=400,
             )
         except asyncio.TimeoutError:
@@ -898,9 +954,69 @@ async def scrape_one_store(
             progress.save()
             return []
 
+        all_urls: List[str] = [e.url for e in all_entries]
+
         # Record discovered count BEFORE the empty-check — evidence that
         # sitemap resolution did (or did not) yield URLs for this domain.
         progress.urls_discovered += int(len(all_urls or []))
+
+        # ── Phase 1: smart incremental skip via lastmod cache ────────────
+        # Safety rails:
+        #   - Only skip if cache is non-empty (first run → full scrape).
+        #   - Require ≥60% lastmod coverage from the sitemap; below that,
+        #     we can't trust the skip decision (would miss real price changes).
+        #   - Skip is disabled for forced runs (UI single-store / max_products).
+        if (
+            _SITEMAP_CACHE_AVAILABLE
+            and not _force_run
+            and all_entries
+        ):
+            try:
+                _old_cache = _sitemap_cache.load(store_url).get("urls", {}) or {}
+                _with_lastmod = sum(
+                    1 for _e in all_entries if (getattr(_e, "lastmod", "") or "").strip()
+                )
+                _coverage = _with_lastmod / max(len(all_entries), 1)
+                _cache_populated = len(_old_cache) > 0
+                _MIN_COVERAGE = float(os.environ.get("SITEMAP_LASTMOD_MIN_COVERAGE", "0.6"))
+
+                if _cache_populated and _coverage >= _MIN_COVERAGE:
+                    added, modified, unchanged = _sitemap_cache.diff(_old_cache, all_entries)
+                    if unchanged:
+                        # dict.fromkeys preserves first-seen order and dedups.
+                        _target = list(dict.fromkeys(list(added) + list(modified)))
+                        logger.info(
+                            "🧠 %s — تحديث ذكي: %d جديد + %d معدّل، تخطي %d بدون تغيير "
+                            "(تغطية lastmod %.0f%%)",
+                            domain, len(added), len(modified), len(unchanged),
+                            _coverage * 100,
+                        )
+                        _bump_skip(progress, "unchanged_lastmod", len(unchanged))
+                        all_urls = _target
+                elif _cache_populated:
+                    logger.info(
+                        "⚠️ %s — تغطية lastmod ضعيفة (%.0f%% < %.0f%%) — كشط كامل احتياطاً",
+                        domain, _coverage * 100, _MIN_COVERAGE * 100,
+                    )
+            except Exception as _cache_exc:
+                logger.debug("sitemap_cache diff failed for %s: %s", domain, _cache_exc)
+
+        # Phase 1: if smart-skip filtered everything out, nothing to do —
+        # don't fall into the empty-sitemap Shopify fallback path.
+        if not all_urls and all_entries:
+            logger.info(
+                "✅ %s — لا تغييرات منذ آخر كشط (كل الروابط بـ lastmod مطابق)",
+                domain,
+            )
+            # Refresh cache timestamp so status reflects the check.
+            if _SITEMAP_CACHE_AVAILABLE:
+                try:
+                    _sitemap_cache.merge_after_scrape(store_url, all_entries, set())
+                except Exception:
+                    pass
+            state.mark_done(domain, 0)
+            progress.save()
+            return []
 
         if not all_urls:
             logger.warning(f"⚠️ {domain} — لا روابط في Sitemap، يحاول /products.json (Shopify API)...")
@@ -1112,16 +1228,18 @@ async def scrape_one_store(
                 _new_in_batch = rows[_pre_count:]
                 if _new_in_batch:
                     try:
-                        from utils.db_manager import upsert_competitor_products
-                        _db_rows = [{
-                            "المنتج":      r.get("name", ""),
-                            "السعر":       r.get("price", 0),
-                            "image_url":   r.get("image", ""),
-                            "product_url": r.get("url", ""),
-                            "brand":       r.get("brand", ""),
-                            "size":        "",
-                            "gender":      "للجنسين",
-                        } for r in _new_in_batch if r.get("name")]
+                        # Phase 2 Item 5: use canonical normalizer — drops rows
+                        # with missing name / invalid price instead of polluting
+                        # the analysis table with zeros and empty strings.
+                        from utils.db_manager import (
+                            upsert_competitor_products,
+                            normalize_scraped_row_for_db,
+                        )
+                        _db_rows = [
+                            nr
+                            for r in _new_in_batch
+                            if (nr := normalize_scraped_row_for_db(r, domain)) is not None
+                        ]
                         if _db_rows:
                             upsert_competitor_products(domain, _db_rows)
                     except Exception as _db_exc:
@@ -1164,6 +1282,25 @@ async def scrape_one_store(
 
     if not _force_run:
         state.mark_done(domain, len(rows))
+
+    # Phase 1 + 2 Bug-0: persist lastmod cache for next run's smart-skip.
+    # Successful URLs → refresh lastmod. URLs we *attempted* but failed are
+    # passed separately so merge_after_scrape can force a retry next round
+    # (up to MAX_FAIL_COUNT) instead of the old silent-skip behavior.
+    if _SITEMAP_CACHE_AVAILABLE and all_entries:
+        try:
+            _successful_urls = {r.get("url") for r in rows if r and r.get("url")}
+            # Attempted = URLs in all_urls (post smart-skip filter); failed = attempted - success.
+            _attempted_urls = set(all_urls or [])
+            _failed_urls = _attempted_urls - _successful_urls
+            _sitemap_cache.merge_after_scrape(
+                store_url,
+                all_entries,
+                _successful_urls,
+                attempted_but_failed_urls=_failed_urls,
+            )
+        except Exception as _cache_exc:
+            logger.debug("sitemap_cache merge failed for %s: %s", domain, _cache_exc)
 
     # Merge counts from the rate-limiter (which also sees 403/429 responses
     # handled internally by fetch_with_retry) so the UI diagnostic reflects
@@ -1390,9 +1527,19 @@ def _merge_rows_to_csv(new_rows: List[dict], domain: str) -> int:
     combined.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
     
     # v26.0 — Persistent Store Sync
+    # Phase 2 Item 5: route through canonical normalizer for consistency
+    # with the per-batch upsert path (drops name-less / zero-price rows).
     try:
-        from utils.db_manager import upsert_competitor_products
-        upsert_competitor_products(domain, new_rows, name_key="name", price_key="price")
+        from utils.db_manager import (
+            upsert_competitor_products,
+            normalize_scraped_row_for_db,
+        )
+        _normalized = [
+            nr for r in new_rows
+            if (nr := normalize_scraped_row_for_db(r, domain)) is not None
+        ]
+        if _normalized:
+            upsert_competitor_products(domain, _normalized)
     except Exception as e:
         logger.warning(f"⚠️ فشل مزامنة قاعدة البيانات لـ {domain}: {e}")
         

@@ -148,10 +148,17 @@ class PriceExtractor:
                     logger.debug("JSON-LD parse error %s: %s", url, e)
 
             # ── Strategy 5: Inline JS patterns ───────────────────────────
+            # Phase 2 Item 6: unify USD exclusion — if a script explicitly
+            # declares a non-SAR priceCurrency (caught and skipped by
+            # Strategy 4), we must not then harvest its "price":... via
+            # regex below and treat it as SAR.
             for script in soup.find_all("script"):
                 txt = script.string or ""
                 if len(txt) > 200_000:
                     continue
+                _cur_m = re.search(r'"priceCurrency"\s*:\s*"([^"]+)"', txt)
+                if _cur_m and _cur_m.group(1).upper() not in ("SAR", ""):
+                    continue  # foreign currency declared — skip entire script
                 for pattern in (
                     r'"price"\s*:\s*["\']?(\d+(?:\.\d+)?)',
                     r'"sale_price"\s*:\s*["\']?(\d+(?:\.\d+)?)',
