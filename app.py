@@ -3876,6 +3876,71 @@ elif page == "🔍 منتجات مفقودة":
 
             st.caption(f"{len(filtered)} منتج — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
+            # ── 🤖 فحص المكررات (الموزّع الذكي) ───────────────────────────
+            with st.expander("🤖 فحص المكررات بالذكاء الاصطناعي", expanded=False):
+                st.caption(
+                    "يفحص المنتجات المفقودة عبر 3 طبقات (مفتاح ثابت + تشابه ضبابي + تحقق AI). "
+                    "كل منتج يُؤكَّد كمكرر يُرحَّل تلقائياً إلى « ⚠️ تحت المراجعة » مع سجل تدقيق كامل."
+                )
+                if st.button("🔁 ابدأ فحص المكررات", key="miss_dup_scan", type="primary"):
+                    try:
+                        from engines.duplicate_detector import detect as _dup_detect
+                        from engines.smart_router import ingest_product as _smart_ingest
+                        from utils.product_key import make_product_key as _mk_key
+                        # كتالوج البحث = كل صفوف التحليل (المنتج عندنا)
+                        _adf = st.session_state.get("analysis_df")
+                        _catalog = []
+                        if _adf is not None and not _adf.empty and "المنتج" in _adf.columns:
+                            for _, _r in _adf.iterrows():
+                                _catalog.append({
+                                    "name":  str(_r.get("المنتج", "")),
+                                    "store": "mahwous",
+                                    "url":   "",
+                                })
+                        _existing = set()
+                        _moved = 0; _kept = 0; _errs = 0
+                        with st.spinner("🤖 جاري الفحص…"):
+                            for _i, _row in filtered.iterrows():
+                                try:
+                                    _nm  = str(_row.get("منتج_المنافس", ""))
+                                    _cmp = str(_row.get("المنافس", ""))
+                                    _url = competitor_product_url_from_row(_row) or ""
+                                    _key = _mk_key(_nm, _cmp, _url)
+                                    _verdict = _dup_detect(
+                                        {"name": _nm, "store": _cmp, "url": _url},
+                                        _catalog, existing_keys=_existing,
+                                    )
+                                    _existing.add(_key)
+                                    # سجّل في الموزّع الذكي (مصدر الحقيقة الموحّد)
+                                    _smart_ingest(
+                                        {"name": _nm, "store": _cmp, "url": _url,
+                                         "price": safe_float(_row.get("سعر_المنافس", 0))},
+                                        _catalog, existing_keys=_existing,
+                                        decided_by="duplicate_scan",
+                                    )
+                                    if _verdict.decision == "DUPLICATE":
+                                        # رحّل المكرر إلى « تحت المراجعة »
+                                        _hk = f"missing_{_nm}_{_i}"
+                                        st.session_state.hidden_products.add(_hk)
+                                        save_hidden_product(_hk, _nm, "moved_to_review_duplicate")
+                                        log_decision(_nm, "missing", "review",
+                                                     f"مكرر ({_verdict.confidence:.0f}%): {_verdict.reason}",
+                                                     0, safe_float(_row.get("سعر_المنافس", 0)),
+                                                     0, _cmp)
+                                        _moved += 1
+                                    else:
+                                        _kept += 1
+                                except Exception:
+                                    _errs += 1
+                        st.success(
+                            f"✅ تم الفحص: {_moved} منتج رُحّل إلى « تحت المراجعة » | "
+                            f"{_kept} منتج بقي في المفقودة | أخطاء: {_errs}"
+                        )
+                        if _moved > 0:
+                            st.rerun()
+                    except Exception as _e_dup:
+                        st.error(f"❌ تعذّر الفحص: {_e_dup}")
+
             # ── عرض المنتجات ──────────────────────────────────────────────
             PAGE_SIZE = 20
             total_p = len(filtered)
@@ -4155,6 +4220,27 @@ elif page == "⚠️ تحت المراجعة":
     st.header("⚠️ منتجات تحت المراجعة — مطابقة غير مؤكدة")
     db_log("review", "view")
 
+    # ── 📊 لوحة صحة المنظومة + شبكة الأمان (24 ساعة) ───────────────
+    with st.expander("📊 صحة المنظومة الذكية", expanded=False):
+        try:
+            from utils.db_manager import state_health_counts, stale_products
+            from engines.smart_router import safety_sweep
+            _h = state_health_counts() or {}
+            _c1, _c2, _c3, _c4, _c5 = st.columns(5)
+            _c1.metric("✅ مطابق",   _h.get("MATCHED", 0))
+            _c2.metric("🔍 مفقود",  _h.get("MISSING", 0))
+            _c3.metric("⚠️ مراجعة",  _h.get("REVIEW", 0))
+            _c4.metric("♻️ مكرر",   _h.get("DUPLICATE", 0))
+            _c5.metric("🔔 انتباه", _h.get("NEEDS_ATTENTION", 0))
+            _stuck = len(stale_products(hours=24, status="MISSING")) + \
+                     len(stale_products(hours=24, status="NEW"))
+            st.caption(f"⏳ {_stuck} منتج ثابت > 24 ساعة بلا قرار")
+            if st.button("🛡️ تشغيل شبكة الأمان (نقل الثابت > 24 ساعة)", key="safety_sweep_btn"):
+                _moved_sn = safety_sweep(hours=24)
+                st.success(f"✅ شبكة الأمان: {_moved_sn} منتج نُقل إلى « 🔔 يحتاج انتباه »")
+        except Exception as _e_health:
+            st.caption(f"(لوحة الصحة غير متاحة: {_e_health})")
+
     if st.session_state.results and "review" in st.session_state.results:
         df = st.session_state.results["review"]
         if df is not None and not df.empty:
@@ -4346,6 +4432,50 @@ elif page == "⚠️ تحت المراجعة":
                                        old_price=our_price,
                                        notes="تجاهل من تحت المراجعة")
                         st.rerun()
+
+                # ── صف ثانٍ: إعادة تحليل + تراجع (الموزّع الذكي) ─────────
+                bg, bh = st.columns(2)
+                with bg:
+                    if st.button("🔁 إعادة تحليل", key=f"rv_reanalyze_{idx}",
+                                 use_container_width=True,
+                                 help="يعيد تشغيل المحرك الذكي ويوزّع المنتج إلى البطاقة الصحيحة"):
+                        try:
+                            from engines.duplicate_detector import detect as _d_detect
+                            from engines.smart_router import reroute_after_reanalysis as _d_reroute
+                            from utils.product_key import make_product_key as _d_key
+                            _adf2 = st.session_state.get("analysis_df")
+                            _cat2 = []
+                            if _adf2 is not None and not _adf2.empty and "المنتج" in _adf2.columns:
+                                for _, _rr2 in _adf2.iterrows():
+                                    _cat2.append({"name": str(_rr2.get("المنتج","")), "store":"mahwous","url":""})
+                            _pk2 = _d_key(comp_name, comp_name_s, "")
+                            _v2 = _d_detect({"name": comp_name, "store": comp_name_s, "url":""}, _cat2)
+                            _d_reroute(_pk2, _v2, decided_by="reanalysis_button")
+                            _target_label = {
+                                "MATCHED":"✅ مطابق", "REVIEW":"⚠️ تحت المراجعة",
+                                "MISSING":"🔍 مفقود", "DUPLICATE":"♻️ مكرر → تحت المراجعة",
+                            }.get(_v2.decision, _v2.decision)
+                            st.success(f"🔁 إعادة التحليل: {_target_label} ({_v2.confidence:.0f}%) — {_v2.reason}")
+                            log_decision(our_name,"review", _v2.decision.lower(),
+                                         f"إعادة تحليل: {_v2.reason}",
+                                         our_price, comp_price, diff, comp_name_s)
+                        except Exception as _e_re:
+                            st.error(f"❌ تعذّرت إعادة التحليل: {_e_re}")
+                with bh:
+                    if st.button("↩️ تراجع", key=f"rv_undo_{idx}",
+                                 use_container_width=True,
+                                 help="يُلغي آخر قرار على هذا المنتج"):
+                        try:
+                            from utils.db_manager import undo_last_transition as _undo
+                            from utils.product_key import make_product_key as _d_key2
+                            _pk3 = _d_key2(comp_name, comp_name_s, "")
+                            _prev = _undo(_pk3, decided_by="user_undo")
+                            if _prev:
+                                st.success(f"↩️ تم التراجع — الحالة الحالية: {_prev}")
+                            else:
+                                st.info("لا يوجد قرار سابق للتراجع عنه")
+                        except Exception as _e_un:
+                            st.error(f"❌ تعذّر التراجع: {_e_un}")
 
                 st.markdown('<hr style="border:none;border-top:1px solid #0d1a2e;margin:6px 0">',
                             unsafe_allow_html=True)
@@ -5997,6 +6127,50 @@ elif page == "🕷️ كشط المنافسين":
             _col_rename = {"product_name": "المنتج", "competitor": "المنافس", "price": "السعر (ر.س)", "brand": "الماركة", "updated_at": "آخر تحديث"}
             _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
             st.dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
+
+            # ── 🧹 تنظيف الصفوف الفاسدة (اسم=ID + سعر=0) ───────────────
+            with st.expander("🧹 تنظيف البيانات الفاسدة", expanded=False):
+                st.caption(
+                    "يحذف الصفوف التي فشل كشطها: السعر = 0 والاسم على شكل ID "
+                    "(مثل « منتج P12345 » أو هاش عشوائي). آمن ولا يلمس البيانات الصحيحة."
+                )
+                if st.button("🗑️ احذف الصفوف الفاسدة الآن", key="btn_clean_corrupt",
+                             type="secondary", use_container_width=True):
+                    try:
+                        from utils.db_manager import get_db, trigger_gcs_sync
+                        _conn = get_db()
+                        _cur = _conn.cursor()
+                        _n_before = _cur.execute(
+                            "SELECT COUNT(*) FROM competitor_products_store"
+                        ).fetchone()[0]
+                        _cur.execute("""
+                            DELETE FROM competitor_products_store
+                            WHERE (price IS NULL OR price <= 0)
+                              AND (
+                                product_name LIKE 'منتج P%'
+                                OR product_name GLOB 'P[0-9]*'
+                                OR product_name GLOB 'P[A-Za-z0-9]*[Pp]ng'
+                                OR product_name GLOB 'P[A-Za-z0-9]*[Jj]pg'
+                                OR product_name GLOB 'منتج P[A-Za-z0-9]*[Pp]ng'
+                              )
+                        """)
+                        _deleted = _cur.rowcount
+                        _conn.commit()
+                        _n_after = _cur.execute(
+                            "SELECT COUNT(*) FROM competitor_products_store"
+                        ).fetchone()[0]
+                        _conn.close()
+                        try:
+                            trigger_gcs_sync(force=True)
+                        except Exception:
+                            pass
+                        st.success(
+                            f"✅ تم حذف {_deleted} صف فاسد | "
+                            f"قبل: {_n_before} → بعد: {_n_after}"
+                        )
+                        st.rerun()
+                    except Exception as _e_clean:
+                        st.error(f"❌ تعذّر التنظيف: {_e_clean}")
         else:
             st.info("لا توجد منتجات لهذا المنافس.")
 
