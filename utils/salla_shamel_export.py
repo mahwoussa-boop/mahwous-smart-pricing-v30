@@ -352,10 +352,23 @@ def _extract_gender(row: dict) -> str:
     return "للجنسين"
 
 
+_SIZE_RE = re.compile(r"(\d{1,4})\s*(?:مل|ملي|ml|ML|mL)\b", re.I)
+
+
 def _extract_size(row: dict) -> str:
-    for k in ("الحجم", "size", "Size"):
+    # 1) من حقل الحجم المخصّص
+    for k in ("الحجم", "size", "Size", "حجم"):
         v = _safe_str(row.get(k, ""))
-        m = re.search(r"(\d+)\s*ml", v, re.I)
+        m = _SIZE_RE.search(v)
+        if m:
+            return m.group(1)
+        # رقم خام في حقل الحجم (مثل "100")
+        if v.isdigit() and 1 <= int(v) <= 9999:
+            return v
+    # 2) من اسم المنتج كـ fallback
+    for k in ("منتج_المنافس", "أسم المنتج", "اسم المنتج", "المنتج", "name", "title"):
+        v = _safe_str(row.get(k, ""))
+        m = _SIZE_RE.search(v)
         if m:
             return m.group(1)
     return "100"
