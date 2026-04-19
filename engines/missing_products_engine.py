@@ -188,6 +188,9 @@ def detect_missing(comp_df: pd.DataFrame, catalog: pd.DataFrame,
         )
 
     # AI verify للمشكوكين
+    # FIX: لا نُسقط المنتجات المشكوكة صامتاً. عند توفر AI نستخدمه للتحقق،
+    # وإلا نُبقيها بدرجة ثقة "uncertain" حتى لا نفقد الفرص (المنافس فعلاً
+    # يعرضها وكتالوجنا لا يطابق بشكل قاطع).
     if use_ai and uncertain and _call_gemini:
         for idx, row, score in uncertain:
             if _ai_is_missing(row["اسم_المنتج"], catalog, score):
@@ -198,6 +201,17 @@ def detect_missing(comp_df: pd.DataFrame, catalog: pd.DataFrame,
                         competitor=row["المنافس"], url=row["الرابط"],
                         image=row["الصورة"], key=k, confidence="ai_verified",
                     )
+    elif uncertain:
+        # AI غير متاح: احتفظ بالمشكوكين كـ "uncertain" بدل إسقاطهم
+        for idx, row, score in uncertain:
+            k = _hash_key(row["اسم_المنتج"])
+            if k in seen_keys:
+                continue
+            seen_keys[k] = MissingProduct(
+                name=row["اسم_المنتج"], price=float(row["السعر"] or 0),
+                competitor=row["المنافس"], url=row["الرابط"],
+                image=row["الصورة"], key=k, confidence="uncertain",
+            )
 
     logger.info("✅ مفقودات نهائية: %d (مشكوك %d)", len(seen_keys), len(uncertain))
     return list(seen_keys.values())
@@ -219,9 +233,19 @@ def _ai_is_missing(name: str, catalog: pd.DataFrame, score: float) -> bool:
     )
     try:
         ans = (_call_gemini(prompt, temperature=0.1, max_tokens=10) or "").strip()
-        return ans.startswith("لا") or "no" in ans.lower()
+        # FIX: "no" كانت تطابق أي كلمة تحتويها (مثل "not sure").
+        # نستخدم مطابقة دقيقة: الإجابة تبدأ بـ لا/no، ونتعامل مع الشك كمفقود
+        # للحفاظ على الفرص (better to review than lose).
+        low = ans.lower().strip(" .!،")
+        if ans.startswith("لا") or low == "no" or low.startswith("no "):
+            return True  # لا يطابق → مفقود
+        if ans.startswith("نعم") or low == "yes" or low.startswith("yes "):
+            return False  # يطابق → موجود
+        # غير واضح → اعتبره مفقوداً (لا تُسقط الفرصة)
+        return True
     except Exception:
-        return False
+        # فشل AI → اعتبره مفقوداً (حفاظاً على الفرص)
+        return True
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -388,8 +412,15 @@ def build_missing_exports(
         category = resolve_category(mp.name, categories) if use_ai else ""
         description = generate_description(mp.name, brand_name) if generate_descriptions else ""
 
+        _name_lower = (mp.name or "").lower()
+        if re.search(r"tester|تستر|عينة|sample", _name_lower):
+            _availability = "تستر"
+        else:
+            _availability = ""
+
         products_rows.append({
             "أسم المنتج":          mp.name,
+            "نوع_متاح":            _availability,
             "الحالة":              "نشط",
             "تصنيف المنتج":        category,
             "صورة المنتج":         mp.image,

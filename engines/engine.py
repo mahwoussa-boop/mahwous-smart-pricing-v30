@@ -2554,18 +2554,32 @@ def find_missing_products(our_df, comp_dfs):
 
             # ── حساب درجة الثقة ──────────────────────────────
             # score = أعلى نسبة تشابه مع منتجاتنا (كلما انخفضت = مفقود مؤكد أكثر)
+            # FIX: إعادة ترتيب الفروع ومنع التصنيف الخاطئ لـ "green" عند score مرتفع.
+            # الـ else النهائي كان يحوّل أي منتج ≥68% إلى "green" (مفقود مؤكد)،
+            # مما ضخّم عدد المفقودات بشكل خاطئ. الآن نصنّف:
+            #   - variant "similar" أو _has_similar (⚠️) → red/yellow
+            #   - score ≥68% بلا دلالة مفقود → yellow (ليس مؤكد)
+            #   - score < 55 بلا شبيه/variant → green (مؤكد)
+            #   - 55 ≤ score < 68 → yellow (محتمل)
             _has_similar = bool(reason and "⚠️" in reason)
             _has_var     = bool(variant)
-            if score < 40 and not _has_var and not _has_similar:
-                _conf_level = "green"    # مفقود مؤكد — جاهز للإرسال
-            elif score < 55 and not _has_similar:
-                _conf_level = "green"    # مفقود مؤكد
-            elif _has_similar or (score >= 55 and score < 68):
+            _var_type    = (variant or {}).get("type", "")
+
+            if _has_var and _var_type == "similar":
+                _conf_level = "red"      # مشكوك — متشابه جداً مع منتج عندنا
+            elif _has_similar:
+                _conf_level = "yellow"   # ملاحظة تحذير → محتمل
+            elif score < 55 and not _has_var:
+                _conf_level = "green"    # مفقود مؤكد — فرق واضح عن كل كتالوجنا
+            elif score < 68:
                 _conf_level = "yellow"   # مفقود محتمل — يحتاج تحقق
-            elif _has_var and variant.get("type") == "similar":
-                _conf_level = "red"      # مشكوك فيه — محظور الإرسال
+            elif _has_var:
+                # نوع متاح (تستر/أساسي) موجود عندنا — ليس مفقوداً مؤكداً
+                _conf_level = "yellow"
             else:
-                _conf_level = "green"
+                # score ≥ 68% بدون variant/similar: تشابه عالٍ
+                # = فرصة مفقودة محتملة لكن ليست "مؤكدة"
+                _conf_level = "yellow"
 
             _img_url = _extract_image_url_from_cell(row.get(img_col)) if img_col else ""
             if not _img_url:
