@@ -199,6 +199,27 @@ def init_db():
     )""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_ptrans_key ON product_transitions(product_key)")
 
+    # ─── Phase 0: competitor intake ledger ─────────────────────────────────
+    # Enforces "no product lost without a terminal state" for all matching
+    # pipelines. See observability/ledger.py for the state vocabulary.
+    c.execute("""CREATE TABLE IF NOT EXISTS competitor_intake_ledger (
+        run_id        TEXT NOT NULL,
+        comp_id       TEXT NOT NULL,
+        competitor    TEXT NOT NULL,
+        product_name  TEXT,
+        raw_payload   TEXT DEFAULT '{}',
+        state         TEXT NOT NULL DEFAULT 'INGESTED',
+        reason_code   TEXT,
+        last_score    REAL,
+        error_class   TEXT,
+        error_excerpt TEXT,
+        ingested_at   TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        PRIMARY KEY (run_id, comp_id)
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cil_state ON competitor_intake_ledger(state)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cil_run   ON competitor_intake_ledger(run_id)")
+
     conn.commit()
     conn.close()
 
