@@ -155,20 +155,61 @@ class MissingProduct:
 
 
 def detect_missing(comp_df: pd.DataFrame, catalog: pd.DataFrame,
-                   use_ai: bool = True) -> List[MissingProduct]:
-    """يصنّف كل منتج منافس: موجود / مشكوك (AI) / مفقود."""
+                   use_ai: bool = True, ledger=None) -> List[MissingProduct]:
+    """
+    يصنّف كل منتج منافس: موجود / مشكوك (AI) / مفقود.
+
+    Phase 0: when a ``ledger`` (observability.CompetitorIntakeLedger) is
+    provided, every row is ingested up-front and transitioned to a terminal
+    ledger state (CONFIRMED_MATCH / CONFIRMED_MISSING / RETRY_PENDING) so the
+    invariant holds without changing any existing detection logic.
+    """
+    from observability.ledger import (
+        NullLedger, CONFIRMED_MATCH, CONFIRMED_MISSING, RETRY_PENDING,
+    )
+    _led = ledger if ledger is not None else NullLedger()
+
     catalog_norms = catalog["_norm"].tolist()
     seen_keys: Dict[str, MissingProduct] = {}
     uncertain: List[Tuple[int, pd.Series, float]] = []
+    # Phase 0: idx → (comp_id, confidence_tag) so ambiguous rows can be
+    # settled in the AI-verify pass without a second scan.
+    row_ids: Dict[int, str] = {}
 
     for idx, row in comp_df.iterrows():
         q = row["_norm"]
         if not q:
+            # Phase 0: empty-normalized rows still exist as scraped products.
+            # Record them so the invariant isn't silently broken.
+            try:
+                nm = str(row.get("اسم_المنتج", "")).strip()
+                if nm:
+                    cid = _led.mark_ingested(
+                        str(row.get("المنافس", "")), nm,
+                        url=str(row.get("الرابط", "")),
+                    )
+                    _led.mark_state(cid, "REJECTED_STRUCTURAL",
+                                    reason_code="empty_normalized_name")
+            except Exception:
+                pass
             continue
+
+        # Ingest BEFORE any classification.
+        cid = _led.mark_ingested(
+            str(row.get("المنافس", "")),
+            str(row.get("اسم_المنتج", "")),
+            url=str(row.get("الرابط", "")),
+            raw={"price": float(row.get("السعر") or 0)},
+        )
+        row_ids[int(idx)] = cid
+
         m = rf_process.extractOne(q, catalog_norms, scorer=fuzz.token_set_ratio)
         score = m[1] if m else 0.0
 
         if score >= EXISTS_THRESHOLD:
+            _led.mark_state(cid, CONFIRMED_MATCH,
+                            reason_code="exists_in_catalog",
+                            last_score=float(score))
             continue                                          # موجود عندنا
         if UNCERTAIN_LOWER <= score < EXISTS_THRESHOLD:
             uncertain.append((idx, row, score))
@@ -176,16 +217,25 @@ def detect_missing(comp_df: pd.DataFrame, catalog: pd.DataFrame,
         # مفقود مؤكد
         k = _hash_key(row["اسم_المنتج"])
         if k in seen_keys:
+            # Duplicate within competitors: keep the higher price but make
+            # sure the ledger still sees this row as CONFIRMED_MISSING so the
+            # invariant counts it.
             if float(row["السعر"] or 0) > seen_keys[k].price:
                 seen_keys[k].price = float(row["السعر"] or 0)
                 seen_keys[k].competitor = row["المنافس"]
                 seen_keys[k].url = row["الرابط"]
+            _led.mark_state(cid, CONFIRMED_MISSING,
+                            reason_code="duplicate_missing",
+                            last_score=float(score))
             continue
         seen_keys[k] = MissingProduct(
             name=row["اسم_المنتج"], price=float(row["السعر"] or 0),
             competitor=row["المنافس"], url=row["الرابط"],
             image=row["الصورة"], key=k, confidence="sure_missing",
         )
+        _led.mark_state(cid, CONFIRMED_MISSING,
+                        reason_code="sure_missing",
+                        last_score=float(score))
 
     # AI verify للمشكوكين
     # FIX: لا نُسقط المنتجات المشكوكة صامتاً. عند توفر AI نستخدمه للتحقق،
@@ -193,6 +243,7 @@ def detect_missing(comp_df: pd.DataFrame, catalog: pd.DataFrame,
     # يعرضها وكتالوجنا لا يطابق بشكل قاطع).
     if use_ai and uncertain and _call_gemini:
         for idx, row, score in uncertain:
+            cid = row_ids.get(int(idx), "")
             if _ai_is_missing(row["اسم_المنتج"], catalog, score):
                 k = _hash_key(row["اسم_المنتج"])
                 if k not in seen_keys:
@@ -201,17 +252,32 @@ def detect_missing(comp_df: pd.DataFrame, catalog: pd.DataFrame,
                         competitor=row["المنافس"], url=row["الرابط"],
                         image=row["الصورة"], key=k, confidence="ai_verified",
                     )
+                if cid:
+                    _led.mark_state(cid, CONFIRMED_MISSING,
+                                    reason_code="ai_verified_missing",
+                                    last_score=float(score))
+            else:
+                if cid:
+                    _led.mark_state(cid, CONFIRMED_MATCH,
+                                    reason_code="ai_verified_exists",
+                                    last_score=float(score))
     elif uncertain:
-        # AI غير متاح: احتفظ بالمشكوكين كـ "uncertain" بدل إسقاطهم
+        # AI غير متاح: احتفظ بالمشكوكين كـ "uncertain" بدل إسقاطهم.
+        # Phase 0: these become RETRY_PENDING in the ledger, not a silent
+        # "uncertain" limbo — Phase 4 will drive them to a terminal state.
         for idx, row, score in uncertain:
             k = _hash_key(row["اسم_المنتج"])
-            if k in seen_keys:
-                continue
-            seen_keys[k] = MissingProduct(
-                name=row["اسم_المنتج"], price=float(row["السعر"] or 0),
-                competitor=row["المنافس"], url=row["الرابط"],
-                image=row["الصورة"], key=k, confidence="uncertain",
-            )
+            cid = row_ids.get(int(idx), "")
+            if k not in seen_keys:
+                seen_keys[k] = MissingProduct(
+                    name=row["اسم_المنتج"], price=float(row["السعر"] or 0),
+                    competitor=row["المنافس"], url=row["الرابط"],
+                    image=row["الصورة"], key=k, confidence="uncertain",
+                )
+            if cid:
+                _led.mark_state(cid, RETRY_PENDING,
+                                reason_code="ai_unavailable",
+                                last_score=float(score))
 
     logger.info("✅ مفقودات نهائية: %d (مشكوك %d)", len(seen_keys), len(uncertain))
     return list(seen_keys.values())
