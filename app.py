@@ -3212,7 +3212,6 @@ elif page == "🔍 منتجات مفقودة":
                             competitor_paths=[_save(f) for f in _smart_cmp],
                             brands_path=_save(_smart_br),
                             categories_path=_save(_smart_cats),
-                            output_dir="data/exports",
                             use_ai=_use_ai,
                             generate_descriptions=_gen_desc,
                         )
