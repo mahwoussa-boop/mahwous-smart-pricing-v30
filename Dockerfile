@@ -11,12 +11,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CHROME_BIN=/usr/bin/chromium \
     CHROME_PATH=/usr/lib/chromium/
 
-# Install build dependencies + curl for healthcheck + Chromium for Selenium
+# Install build dependencies + curl for healthcheck + Chromium for Selenium + nginx as cache-busting proxy
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libffi-dev \
     curl \
+    nginx \
     chromium \
     chromium-driver \
     && rm -rf /var/lib/apt/lists/*
