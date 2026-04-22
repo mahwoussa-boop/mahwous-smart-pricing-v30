@@ -11,3 +11,12 @@ maxUploadSize = 200
 headless = true
 enableCORS = false
 enableXsrfProtection = false
+# Prevent Cloud Run from serving stale static JS after redeployment.
+# "none" disables the file watcher (not needed in Cloud Run containers).
+fileWatcherType = "none"
+
+[browser]
+# Force the browser to always check for a fresh version of the app.
+# This prevents the "Failed to fetch dynamically imported module" error
+# that occurs when the browser caches stale JS chunk hashes after redeployment.
+gatherUsageStats = false
