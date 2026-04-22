@@ -224,10 +224,7 @@ st.markdown(get_styles(), unsafe_allow_html=True)
 # إخفاء روابط التنقل التلقائية (app, magic factory, scraper advanced) من أعلى الشريط الجانبي
 st.markdown("<style>[data-testid='stSidebarNav'] {display: none;}</style>", unsafe_allow_html=True)
 st.markdown(get_sidebar_toggle_js(), unsafe_allow_html=True)
-# NOTE: The "Failed to fetch dynamically imported module" (HTTP 429 / stale chunk)
-# error is fixed at the nginx proxy layer in docker_entrypoint.py — NOT here.
-# st.markdown(<script>) is never executed by the browser because React's
-# dangerouslySetInnerHTML does not run injected scripts for security reasons.
+# Cache-busting is handled by nginx in docker_entrypoint.py — not here.
 _debug_log("H1", "app.py:set_page_config", "App bootstrap reached", {"app_title": APP_TITLE})
 
 # ── فحص ذاتي عند الإقلاع (يعمل مرة واحدة فقط لكل جلسة) ────────────────
