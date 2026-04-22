@@ -216,6 +216,16 @@ def render():
         st.markdown("## 📁 رفع الملفات")
         st.markdown("---")
         st.markdown("#### 🏪 كتالوج المتجر الأساسي")
+
+        # Safe Upload Guard: warn the user before uploading large catalog files
+        # to prevent Axios 429 / Too Many Requests errors from the hosting firewall
+        st.info(
+            "⚠️ **تنبيه حجم الملف:** إذا كان كتالوجك يحتوي على أكثر من **2,000 منتج**، "
+            "يُنصح بشدة بتقسيمه إلى دفعات أصغر قبل الرفع. "
+            "الملفات الكبيرة قد تتسبب في خطأ **Axios 429 / Too Many Requests** "
+            "الذي ينتج عن تجاوز حد معدل الطلبات على الخادم وليس خطأً في ملفك."
+        )
+
         store_file = st.file_uploader(
             "ارفع ملف متجرك (Excel/CSV)",
             type=["xlsx", "xls", "csv"],
@@ -224,6 +234,16 @@ def render():
         )
         st.markdown("---")
         st.markdown("#### 🏆 ملفات المنافسين")
+
+        # Safe Upload Guard: warn the user to upload competitor files in small batches
+        # to avoid triggering the server-side firewall rate limiter (HTTP 429)
+        st.warning(
+            "🛡️ **رفع آمن للملفات:** ارفع ملفات المنافسين على دفعات **3 إلى 5 ملفات** "
+            "كحد أقصى في كل مرة لتجنب حظر جدار الحماية على الخادم. "
+            "إذا كان لديك قوائم كبيرة، فإن **الكشف التلقائي** من صفحة كشف المنافسين "
+            "هو الخيار الأفضل والأكثر أماناً."
+        )
+
         comp_files = st.file_uploader(
             "ارفع ملف منافس أو أكثر",
             type=["xlsx", "xls", "csv"],
@@ -267,6 +287,15 @@ def render():
                 store_df = None
             else:
                 st.success(f"✅ تم تحميل الكتالوج: {len(store_df):,} منتج، {len(store_df.columns)} عمود")
+
+                # Row count guard: alert the user if the catalog exceeds the safe threshold
+                if len(store_df) > 2500:
+                    st.warning(
+                        "⚠️ **حجم الملف كبير جداً** وقد يسبب بطء أو انقطاع في الاتصال "
+                        f"(خطأ 429). الملف يحتوي على **{len(store_df):,}** منتج. "
+                        "يُنصح مستقبلاً بتقسيم الملف إلى دفعات لا تتجاوز 2,000 منتج لكل دفعة."
+                    )
+
                 st.dataframe(store_df.head(5), use_container_width=True, hide_index=True)
                 store_col_map = _render_column_map_ui(store_df, "store")
                 if store_col_map.get("name"):
@@ -277,9 +306,24 @@ def render():
     if comp_files:
         with st.expander(f"🏆 معاينة ملفات المنافسين ({len(comp_files)} ملف)", expanded=False):
             for cf in comp_files:
-                comp_df, err = read_file(cf)
-                if err:
-                    st.warning(f"⚠️ {cf.name}: {err}")
+                try:
+                    comp_df, err = read_file(cf)
+                    if err:
+                        # Display a user-friendly Arabic error with rate-limit guidance
+                        st.error(
+                            f"❌ **{cf.name}:** فشل تحميل الملف. "
+                            "قد يكون الخادم قد حظر الطلب مؤقتاً بسبب حجم الملفات، "
+                            "يرجى الانتظار دقيقتين والمحاولة بملفات أصغر أو دفعات أقل."
+                        )
+                        continue
+                except Exception as read_exc:
+                    # Catch any unexpected connection/IO error during file reading
+                    st.error(
+                        f"❌ **{cf.name}:** حدث خطأ غير متوقع أثناء قراءة الملف. "
+                        "قد يكون الخادم قد حظر الطلب مؤقتاً بسبب حجم الملفات، "
+                        "يرجى الانتظار دقيقتين والمحاولة بملفات أصغر أو دفعات أقل. "
+                        f"(التفاصيل: {read_exc})"
+                    )
                     continue
                 # استخدام اسم الملف كمعرف للمنافس
                 comp_name = cf.name.replace(".xlsx", "").replace(".xls", "").replace(".csv", "")
