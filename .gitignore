@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+.streamlit/secrets.toml
+.claude/settings.local.json
+
+# Secrets — NEVER commit
+.env
+.env.local
+*.pem
+*.key
+service-account*.json
+gcp-key*.json
+
+# Local data — not committed (use Railway/GCS)
+data/*
+*.csv
+*.json
+# Exception: keep competitors bootstrap file in repo
+!data/competitors_list_v30.json
+!.claude/launch.json
+!.env.example
+!data/.gitkeep
+
+# Runtime scraper state
+scraper.pid
+scraper_progress.json
+scraper_state.json
+scraper_stderr.log
+_sc_live_*.json
+_sc_result_*.json
