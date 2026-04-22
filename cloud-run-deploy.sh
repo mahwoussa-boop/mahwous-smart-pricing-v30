@@ -34,7 +34,12 @@ MEMORY="${MEMORY:-4Gi}"
 CPU="${CPU:-2}"
 TIMEOUT="${TIMEOUT:-3600}"
 MAX_INSTANCES="${MAX_INSTANCES:-10}"
-MIN_INSTANCES="${MIN_INSTANCES:-0}"
+# Keep at least 1 instance always running.
+# MIN_INSTANCES=0 allows Cloud Run to scale to zero, which causes a cold start
+# on the next request. During cold start the old revision may still serve some
+# requests while the new one boots, mixing old and new JS chunk hashes and
+# producing "TypeError: Failed to fetch dynamically imported module".
+MIN_INSTANCES="${MIN_INSTANCES:-1}"
 PLATFORM="managed"
 
 print_header() {
