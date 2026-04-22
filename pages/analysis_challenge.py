@@ -251,6 +251,19 @@ def render():
             key="challenge_comp_files",
             help="يمكن رفع ملفات متعددة لمنافسين مختلفين",
         )
+
+        # Hard limit gatekeeper: block more than 5 competitor files at once.
+        # Uploading 6+ files simultaneously causes Axios to fire parallel chunk
+        # requests that the hosting firewall (Nginx/Cloud Run) interprets as a
+        # DDoS burst and returns HTTP 429 (Too Many Requests) before Python ever
+        # receives the payload. Stopping here prevents that network-level block.
+        if comp_files and len(comp_files) > 5:
+            st.error(
+                "🛑 عذراً، لتجنب حظر الخادم (الخطأ 429)، "
+                "يُرجى تحديد 5 ملفات كحد أقصى في الدفعة الواحدة."
+            )
+            st.stop()
+
         st.markdown("---")
         st.markdown("#### ⚡ تشغيل التحليل")
         run_btn = st.button(
@@ -281,7 +294,21 @@ def render():
 
     if store_file:
         with st.expander("🏪 معاينة كتالوج المتجر", expanded=False):
-            store_df, err = read_file(store_file)
+            # Safety wrapper: large catalog files (7500+ rows) can cause the
+            # hosting firewall to drop the connection mid-upload (HTTP 429).
+            # Catching broad exceptions here surfaces a friendly Arabic message
+            # instead of an unhandled traceback.
+            try:
+                store_df, err = read_file(store_file)
+            except Exception as catalog_exc:
+                st.error(
+                    "❌ تعذّر قراءة ملف الكتالوج. قد يكون الخادم قد قاطع الاتصال "
+                    "بسبب حجم الملف الكبير (الخطأ 429). يُرجى تقسيم الكتالوج إلى "
+                    "دفعات لا تتجاوز 2,000 منتج والمحاولة مجدداً. "
+                    f"(التفاصيل: {catalog_exc})"
+                )
+                store_df = None
+                err = None   # prevent double-error block below
             if err:
                 st.error(f"❌ خطأ في قراءة ملف المتجر: {err}")
                 store_df = None
