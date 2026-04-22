@@ -1,48 +1,42 @@
 #!/usr/bin/env python3
 """
-تشغيل Streamlit على Railway.
-Railway قد يضع STREAMLIT_SERVER_PORT على النص الحرفي '$PORT' — نزيله ثم نمرّر المنفذ رقماً.
+docker_entrypoint.py — نقطة دخول الحاوية لمهووس v30
 
-قبل تشغيل Streamlit يُعيد هذا الملف بناء مجلد /data من متغيرات البيئة.
-هذا يُتيح إرسال ملفات البيانات لـ Railway دون رفعها لـ GitHub.
+Architecture:
+  Cloud Run (PORT=8080)
+      ↓
+  nginx (listens on $PORT, adds Cache-Control: no-store to HTML)
+      ↓
+  Streamlit (listens on 127.0.0.1:8501, internal only)
 
-═══════════════════════════════════════════════════════════════
- طريقة 1: Base64 (للملفات < 64 KB)
-═══════════════════════════════════════════════════════════════
-  CATEGORIES_CSV_B64   → محتوى categories.csv   مُشفَّر Base64
-  OUR_CATALOG_CSV_B64  → محتوى our_catalog.csv  مُشفَّر Base64
-  COMPETITORS_JSON_B64 → محتوى competitors_list.json مُشفَّر Base64
+WHY nginx?
+  After every Cloud Run redeployment, Streamlit re-hashes its JS bundles
+  (e.g. index.ByklcDol.js → index.DLPgdyUk.js).  If the browser has the
+  OLD HTML cached it tries to load old chunk URLs that no longer exist:
+      TypeError: Failed to fetch dynamically imported module
+  The fix is simple: tell the browser NEVER to cache the HTML entry-point.
+  nginx intercepts the Streamlit HTML response and adds:
+      Cache-Control: no-cache, no-store, must-revalidate
+  So every page open fetches fresh HTML with the current JS hashes.
 
-  توليد القيمة محلياً:
-    PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("data\\categories.csv"))
-    Linux/Mac:  base64 -w0 data/categories.csv
-
-═══════════════════════════════════════════════════════════════
- طريقة 2: URL عام مؤقت (للملفات الكبيرة مثل brands.csv ≈ 400KB)
-═══════════════════════════════════════════════════════════════
-  BRANDS_CSV_URL → رابط مباشر لملف brands.csv (Google Drive / Dropbox / S3)
-  SALLA_BRANDS_URL     → رابط "ماركات مهووس.csv"
-  SALLA_CATEGORIES_URL → رابط "تصنيفات مهووس.csv"
-
-  كيف تحصل على الرابط؟
-    - Google Drive: شارك الملف (Anyone with link) ← انسخ الـ file_id
-      ثم الرابط: https://drive.google.com/uc?export=download&id=<file_id>
-    - Dropbox:     شارك الملف، غيّر ?dl=0 إلى ?dl=1 في نهاية الرابط
-
-═══════════════════════════════════════════════════════════════
- طريقة 3: Railway Volume (الأفضل للملفات الثابتة الكبيرة)
-═══════════════════════════════════════════════════════════════
-  أنشئ Volume في Railway ← Mount path = /data
-  ارفع الملفات مرة واحدة عبر: railway run -- bash
-  ثم: cp /local/brands.csv /data/brands.csv
+  st.markdown("<script>") cannot fix this — React's dangerouslySetInnerHTML
+  does not execute injected <script> tags, and the error fires before Python
+  even starts running.
 """
 import os
+import signal
+import subprocess
+import sys
+import time
 import base64
 from pathlib import Path
 from urllib.request import urlretrieve
 
 
-# ── Base64: مناسب لـ < 64KB ────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  Data-restoration helpers (unchanged from original)
+# ══════════════════════════════════════════════════════════════════════════════
+
 _B64_FILES = {
     "CATEGORIES_CSV_B64":    "categories.csv",
     "OUR_CATALOG_CSV_B64":   "our_catalog.csv",
@@ -51,7 +45,6 @@ _B64_FILES = {
     "SALLA_CATEGORIES_B64":  "تصنيفات مهووس.csv",
 }
 
-# ── URL: مناسب للملفات الكبيرة (brands.csv ≈ 400KB) ─────────────────────────
 _URL_FILES = {
     "BRANDS_CSV_URL":        "brands.csv",
     "SALLA_BRANDS_URL":      "ماركات مهووس.csv",
@@ -62,14 +55,11 @@ _URL_FILES = {
 
 
 def _default_data_dir() -> str:
-    """المسار الافتراضي الآمن داخل التطبيق بدلاً من الاعتماد على /data."""
     return str((Path(__file__).resolve().parent / "data").resolve())
-
 
 
 def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
-
 
 
 def _resolve_startup_data_dir() -> str:
@@ -86,20 +76,9 @@ def _resolve_startup_data_dir() -> str:
         return fallback
 
 
-
 def _restore_data_files() -> None:
-    """
-    يستعيد الملفات من متغيرات البيئة (Base64 أو URL) إلى DATA_DIR.
-    آمن: يتخطى الملفات الموجودة مسبقاً (لا يُعيد الكتابة).
-
-    ملاحظة Cloud Run:
-    تنزيل الملفات عبر الشبكة قبل بدء Streamlit قد يمنع الحاوية من الاستماع
-    على PORT=8080 في الوقت المناسب. لذلك تنزيلات URL أصبحت اختيارية
-    ولا تعمل إلا عند تفعيل RESTORE_URL_FILES_ON_STARTUP=1 صراحة.
-    """
     data_dir = _resolve_startup_data_dir()
 
-    # ── Base64 ────────────────────────────────────────────────────────────
     for env_key, filename in _B64_FILES.items():
         b64_val = (os.environ.get(env_key) or "").strip()
         if not b64_val:
@@ -116,7 +95,6 @@ def _restore_data_files() -> None:
         except Exception as e:
             print(f"[entrypoint] ❌ فشل Base64 {env_key}: {e}")
 
-    # ── URL ───────────────────────────────────────────────────────────────
     if not _env_truthy("RESTORE_URL_FILES_ON_STARTUP"):
         if any((os.environ.get(k) or "").strip() for k in _URL_FILES):
             print("[entrypoint] ℹ️ تم تجاهل تنزيلات URL عند الإقلاع. فعّل RESTORE_URL_FILES_ON_STARTUP=1 إذا أردت استعادتها قبل البدء.")
@@ -139,8 +117,12 @@ def _restore_data_files() -> None:
             print(f"[entrypoint] ❌ فشل تحميل {env_key}: {e}")
 
 
-def _port() -> int:
-    # Cloud Run injects PORT=8080; use that as default instead of 8501
+# ══════════════════════════════════════════════════════════════════════════════
+#  Port helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _cloud_port() -> int:
+    """External port Cloud Run exposes (default 8080)."""
     raw = (os.environ.get("PORT") or "").strip() or "8080"
     try:
         p = int(raw)
@@ -157,22 +139,205 @@ def _strip_broken_streamlit_server_env() -> None:
             os.environ.pop(key, None)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  nginx configuration generator
+# ══════════════════════════════════════════════════════════════════════════════
+
+_NGINX_CONF_TEMPLATE = """\
+# Auto-generated by docker_entrypoint.py — do not edit manually.
+# Proxy: Cloud Run :{ext_port} → Streamlit 127.0.0.1:{st_port}
+# Purpose: add Cache-Control: no-store to HTML so browsers always fetch
+#          fresh HTML after a redeployment (fixes "Failed to fetch
+#          dynamically imported module" / stale JS chunk hash errors).
+
+worker_processes 1;
+pid /tmp/nginx_mahwous.pid;
+error_log /tmp/nginx_mahwous_error.log warn;
+
+events {{
+    worker_connections 512;
+    use epoll;
+}}
+
+http {{
+    access_log /tmp/nginx_mahwous_access.log;
+
+    # Allow large file uploads (match Streamlit's maxUploadSize = 200 MB)
+    client_max_body_size 210m;
+
+    # WebSocket connection upgrade map
+    map $http_upgrade $connection_upgrade {{
+        default upgrade;
+        ''      close;
+    }}
+
+    upstream streamlit_backend {{
+        server 127.0.0.1:{st_port};
+        keepalive 32;
+    }}
+
+    server {{
+        listen {ext_port};
+
+        # ── HTML entry-point: NEVER cache ─────────────────────────────────
+        # This is the root cause of "Failed to fetch dynamically imported
+        # module". If the browser caches the HTML it will reference old JS
+        # chunk hashes after redeployment. Telling it no-store fixes this.
+        location = / {{
+            proxy_pass         http://streamlit_backend;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade           $http_upgrade;
+            proxy_set_header   Connection        $connection_upgrade;
+            proxy_read_timeout 300s;
+
+            # Cache-busting headers on the HTML response only
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+            add_header Pragma        "no-cache"                            always;
+            add_header Expires       "0"                                   always;
+        }}
+
+        # ── Streamlit WebSocket stream ─────────────────────────────────────
+        location /_stcore/stream {{
+            proxy_pass          http://streamlit_backend;
+            proxy_http_version  1.1;
+            proxy_set_header    Upgrade    $http_upgrade;
+            proxy_set_header    Connection "upgrade";
+            proxy_set_header    Host       $host;
+            proxy_read_timeout  86400s;
+            proxy_send_timeout  86400s;
+        }}
+
+        # ── Health check (Cloud Run probes this) ───────────────────────────
+        location /_stcore/health {{
+            proxy_pass         http://streamlit_backend;
+            proxy_set_header   Host $host;
+            proxy_read_timeout 10s;
+        }}
+
+        # ── Everything else (static JS/CSS assets, API calls) ─────────────
+        location / {{
+            proxy_pass         http://streamlit_backend;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade           $http_upgrade;
+            proxy_set_header   Connection        $connection_upgrade;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+        }}
+    }}
+}}
+"""
+
+_NGINX_CONF_PATH = "/tmp/mahwous_nginx.conf"
+
+
+def _write_nginx_conf(ext_port: int, st_port: int) -> None:
+    conf = _NGINX_CONF_TEMPLATE.format(ext_port=ext_port, st_port=st_port)
+    with open(_NGINX_CONF_PATH, "w") as fh:
+        fh.write(conf)
+    print(f"[entrypoint] ✅ nginx config written → {_NGINX_CONF_PATH}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Streamlit readiness probe
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _wait_for_streamlit(port: int, timeout: int = 60) -> bool:
+    """Poll /_stcore/health until Streamlit is up or timeout expires."""
+    import urllib.request
+    url = f"http://127.0.0.1:{port}/_stcore/health"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as r:
+                if r.status == 200:
+                    print(f"[entrypoint] ✅ Streamlit ready on :{port}")
+                    return True
+        except Exception:
+            pass
+        time.sleep(1)
+    print(f"[entrypoint] ⚠️ Streamlit did not respond within {timeout}s — starting nginx anyway")
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Main
+# ══════════════════════════════════════════════════════════════════════════════
+
 def main() -> None:
-    # ── خطوة 1: استعادة ملفات /data ─────────────────────────────────────
+    # Step 1: restore data files from env vars
     _restore_data_files()
 
-    # ── خطوة 2: تشغيل Streamlit ─────────────────────────────────────────
-    p = _port()
+    ext_port   = _cloud_port()   # 8080 — what Cloud Run exposes
+    st_port    = 8501            # internal only, never exposed
+
     _strip_broken_streamlit_server_env()
-    os.execvp(
-        "streamlit",
+
+    # Step 2: write nginx proxy config
+    _write_nginx_conf(ext_port, st_port)
+
+    # Step 3: start Streamlit on the internal port (127.0.0.1 only)
+    print(f"[entrypoint] 🚀 Starting Streamlit on 127.0.0.1:{st_port} ...")
+    streamlit_proc = subprocess.Popen(
         [
             "streamlit", "run", "app.py",
-            "--server.port", str(p),
-            "--server.address", "0.0.0.0",
-            "--server.headless", "true",
+            "--server.port",    str(st_port),
+            "--server.address", "127.0.0.1",
+            "--server.headless","true",
         ],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
+
+    # Step 4: wait for Streamlit to be ready before accepting traffic
+    _wait_for_streamlit(st_port, timeout=90)
+
+    # Step 5: start nginx in the foreground (daemon off) to handle ext_port
+    print(f"[entrypoint] 🌐 Starting nginx on :{ext_port} (proxy → Streamlit :{st_port}) ...")
+    nginx_proc = subprocess.Popen(
+        ["nginx", "-c", _NGINX_CONF_PATH, "-g", "daemon off;"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
+
+    # Step 6: forward OS signals to both children
+    def _forward_signal(signum, frame):
+        for proc in (streamlit_proc, nginx_proc):
+            try:
+                proc.send_signal(signum)
+            except Exception:
+                pass
+
+    signal.signal(signal.SIGTERM, _forward_signal)
+    signal.signal(signal.SIGINT,  _forward_signal)
+
+    # Step 7: supervise — restart neither, just exit if either dies
+    try:
+        while True:
+            st_rc  = streamlit_proc.poll()
+            ng_rc  = nginx_proc.poll()
+
+            if st_rc is not None:
+                print(f"[entrypoint] ❌ Streamlit exited (rc={st_rc}) — shutting down")
+                nginx_proc.terminate()
+                sys.exit(st_rc)
+
+            if ng_rc is not None:
+                print(f"[entrypoint] ❌ nginx exited (rc={ng_rc}) — shutting down")
+                streamlit_proc.terminate()
+                sys.exit(ng_rc)
+
+            time.sleep(2)
+
+    except KeyboardInterrupt:
+        print("[entrypoint] 🛑 Interrupted — stopping both processes")
+        streamlit_proc.terminate()
+        nginx_proc.terminate()
+        streamlit_proc.wait()
+        nginx_proc.wait()
 
 
 if __name__ == "__main__":
