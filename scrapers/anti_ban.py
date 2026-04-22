@@ -225,45 +225,10 @@ class ProxyRotator:
 
     @staticmethod
     def _load_from_env() -> List[str]:
-        # Cloud Run friendly: support several env var aliases. The list form
-        # wins when both are set.
-        raw_list = (
-            os.environ.get("SCRAPER_PROXIES", "")
-            or os.environ.get("SCRAPER_PROXY_LIST", "")
-        ).strip()
-        proxies: List[str] = []
-        if raw_list:
-            proxies.extend(p.strip() for p in raw_list.split(",") if p.strip())
-        # Single-proxy aliases (one OR both may be set); de-dup while preserving order.
-        single = (
-            os.environ.get("SCRAPER_HTTPS_PROXY", "")
-            or os.environ.get("SCRAPER_HTTP_PROXY", "")
-        ).strip()
-        if single and single not in proxies:
-            proxies.append(single)
-        return proxies
-
-    def get_proxy_for_domain(self, domain: str) -> Optional[str]:
-        """
-        Sticky-per-store selection. Rationale: sites that use session cookies
-        or per-IP rate windows punish IP-hopping within a single store. A
-        deterministic hash(domain) -> proxy keeps a full store crawl on the
-        same egress while different stores still fan out across the pool.
-        Falls back to healthy round-robin when the hashed proxy is failed.
-        """
-        with self._lock:
-            healthy = [p for p in self._proxies if p not in self._failed]
-            if not healthy:
-                if not self._proxies:
-                    return None
-                # All proxies failed — reset & retry
-                self._failed.clear()
-                healthy = list(self._proxies)
-            if not domain:
-                self._index = (self._index + 1) % len(healthy)
-                return healthy[self._index]
-            idx = hash(domain) % len(healthy)
-            return healthy[idx]
+        raw = os.environ.get("SCRAPER_PROXIES", "").strip()
+        if not raw:
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
 
     def get_proxy(self, domain: str = "") -> Optional[str]:
         """
@@ -308,23 +273,7 @@ class AdaptiveRateLimiter:
             "consecutive_ok": 0,
             "backing_off":    False,
             "backoff_until":  0.0,
-            # Observability: per-domain HTTP block counters surfaced to the
-            # dashboard via get_block_counts() so the "HTTP block dominant"
-            # hint is accurate instead of falling back to "JSON-LD missing".
-            "n_403": 0,
-            "n_429": 0,
-            "n_5xx": 0,
         })
-
-    def get_block_counts(self, domain: str) -> dict:
-        s = self._state.get(domain)
-        if not s:
-            return {"403": 0, "429": 0, "5xx": 0}
-        return {
-            "403": int(s.get("n_403", 0)),
-            "429": int(s.get("n_429", 0)),
-            "5xx": int(s.get("n_5xx", 0)),
-        }
 
     async def wait(self, domain: str) -> None:
         s = self._state[domain]
@@ -364,14 +313,6 @@ class AdaptiveRateLimiter:
         """
         s = self._state[domain]
         s["consecutive_ok"] = 0
-
-        # Observability counters
-        if status == 429:
-            s["n_429"] = int(s.get("n_429", 0)) + 1
-        elif status == 403:
-            s["n_403"] = int(s.get("n_403", 0)) + 1
-        elif status in (500, 502, 503, 504):
-            s["n_5xx"] = int(s.get("n_5xx", 0)) + 1
 
         if status == 429:
             if retry_after and 0 < retry_after <= MAX_RETRY_AFTER_SECS:
@@ -417,31 +358,6 @@ def get_rate_limiter() -> AdaptiveRateLimiter:
     return _rate_limiter
 
 
-# ── Phase 1 (2026-04-19): per-domain concurrency cap ───────────────────────
-# The AdaptiveRateLimiter above already applies per-domain *delay* and backoff,
-# but N workers that clear `rl.wait(domain)` inside the same event-loop tick
-# can still burst-fire on the same origin — the classic Cloudflare 429 trigger
-# on large sitemapindex fan-outs. We add a second, independent gate: a
-# per-domain asyncio.Semaphore limiting how many requests to a single host
-# may be *in flight* concurrently. Tunable via DOMAIN_CONCURRENCY env var.
-_DOMAIN_CONCURRENCY_DEFAULT = int(os.environ.get("DOMAIN_CONCURRENCY", "4"))
-_DOMAIN_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
-_DOMAIN_SEM_LOCK = threading.Lock()
-
-
-def get_domain_semaphore(domain: str) -> asyncio.Semaphore:
-    """Return (and lazily create) a per-domain concurrency semaphore."""
-    sem = _DOMAIN_SEMAPHORES.get(domain)
-    if sem is not None:
-        return sem
-    with _DOMAIN_SEM_LOCK:
-        sem = _DOMAIN_SEMAPHORES.get(domain)
-        if sem is None:
-            sem = asyncio.Semaphore(_DOMAIN_CONCURRENCY_DEFAULT)
-            _DOMAIN_SEMAPHORES[domain] = sem
-    return sem
-
-
 # ══════════════════════════════════════════════════════════════════════════
 #  5. fetch_with_retry — now Retry-After aware + optional proxy (v3.0)
 # ══════════════════════════════════════════════════════════════════════════
@@ -473,7 +389,6 @@ async def fetch_with_retry(
     """
     domain = urlparse(url).netloc
     rl = get_rate_limiter()
-    dom_sem = get_domain_semaphore(domain)
 
     for attempt in range(max_retries):
         headers = get_browser_headers(referer=referer or f"https://{domain}/", domain=domain)
@@ -489,10 +404,7 @@ async def fetch_with_retry(
             if proxy:
                 request_kwargs["proxy"] = proxy
 
-            # Phase 1: per-domain concurrency gate — prevents in-flight bursts
-            # even when N workers all clear rl.wait() simultaneously.
-            async with dom_sem:
-                resp = await session.get(url, **request_kwargs)
+            resp = await session.get(url, **request_kwargs)
 
             if resp.status == 200:
                 rl.record_success(domain)
@@ -576,13 +488,7 @@ def _get_cffi_session():
             if _CFFI_SESSION is None:
                 try:
                     from curl_cffi import requests as cffi_requests
-                    # Try newest Chrome impersonation, fall back gracefully
-                    for imp in ("chrome131", "chrome124", "chrome120", "chrome110"):
-                        try:
-                            _CFFI_SESSION = cffi_requests.Session(impersonate=imp)
-                            break
-                        except Exception:
-                            continue
+                    _CFFI_SESSION = cffi_requests.Session(impersonate="chrome110")
                 except ImportError:
                     pass
     return _CFFI_SESSION

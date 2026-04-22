@@ -1,30 +1,20 @@
 {
-  "running": false,
-  "started_at": "2026-04-18T18:35:32.564135",
-  "finished_at": "2026-04-18T18:36:37.066172",
-  "last_updated": "2026-04-18 18:36:37",
-  "phase": "failed",
-  "pid": 1836,
-  "stores_total": 1,
-  "stores_done": 1,
-  "urls_total": 8636,
-  "urls_processed": 50,
+  "running": true,
+  "phase": "discovering",
+  "pid": 9868,
+  "started_at": "2026-04-16 23:44:14",
+  "last_updated": "2026-04-16 23:44:14",
+  "stores_total": 18,
+  "stores_done": 0,
+  "urls_total": 0,
+  "urls_processed": 0,
   "rows_in_csv": 0,
-  "rows_saved_run": 0,
-  "fetch_exceptions": 50,
+  "fetch_exceptions": 0,
   "success_rate_pct": 0.0,
-  "current_store": "alkhabeershop.com",
-  "store_urls_done": 50,
-  "store_urls_total": 8636,
+  "current_store": "",
+  "store_urls_done": 0,
+  "store_urls_total": 0,
+  "stores_results": {},
   "last_error": "",
-  "stores_results": {
-    "alkhabeershop.com": 0
-  },
-  "stores_http_errors": {
-    "alkhabeershop.com": {
-      "403": 4,
-      "429": 0,
-      "5xx": 0
-    }
-  }
+  "finished_at": ""
 }

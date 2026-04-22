@@ -9,7 +9,6 @@ engines/ai_scraper_v27.py — المحرك الهجين v27
 """
 
 import logging
-import json
 import re
 from typing import Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
@@ -27,58 +26,9 @@ def extract_price_ai(html_content: str, product_name: str = "") -> Tuple[float, 
     """
     if not html_content:
         return 0.0, "no_content"
-
+    
     soup = BeautifulSoup(html_content, 'html.parser')
-
-    # ─── الاستراتيجية 0: JSON-LD + OpenGraph (الأعلى موثوقية) ─────────
-    # أغلب متاجر سلة/زد تضع السعر في <script type="application/ld+json">
-    # أو في وسوم <meta property="product:price:amount" /> ضمن HTML الأولي.
-    try:
-        # (أ) JSON-LD: ابحث عن offers.price (يفضَّل السعر الحالي/المخفّض)
-        for s in soup.find_all('script', type='application/ld+json'):
-            raw = s.string or s.get_text() or ''
-            if not raw.strip():
-                continue
-            try:
-                data = json.loads(raw)
-            except Exception:
-                try:
-                    data = json.loads(re.sub(r',\s*([}\]])', r'\1', raw))
-                except Exception:
-                    continue
-
-            def _walk(obj):
-                # يُعيد أول قيمة price صالحة يجدها
-                if isinstance(obj, dict):
-                    for k, v in obj.items():
-                        if k.lower() == 'price':
-                            p = _extract_number_from_text(str(v))
-                            if p and 10 < p < 100000:
-                                return p
-                        r = _walk(v)
-                        if r:
-                            return r
-                elif isinstance(obj, list):
-                    for v in obj:
-                        r = _walk(v)
-                        if r:
-                            return r
-                return None
-
-            p = _walk(data)
-            if p:
-                return p, 'json_ld'
-
-        # (ب) OpenGraph meta: product:sale_price ثم product:price
-        for prop in ('product:sale_price:amount', 'product:price:amount', 'og:price:amount'):
-            m = soup.find('meta', attrs={'property': prop}) or soup.find('meta', attrs={'name': prop})
-            if m and m.get('content'):
-                p = _extract_number_from_text(m['content'])
-                if p and 10 < p < 100000:
-                    return p, 'og_' + prop.replace(':', '_')
-    except Exception as e:
-        logger.debug(f"خطأ JSON-LD/OG: {e}")
-
+    
     # ─── الاستراتيجية 1: البحث عن عناصر HTML محددة ────────────────────
     price_selectors = [
         ('span[class*="price"]', 'class_price_span'),

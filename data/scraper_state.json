@@ -1,16 +1,72 @@
 {
+  "saeedsalah.com": {
+    "store_url": "https://saeedsalah.com/",
+    "domain": "saeedsalah.com",
+    "status": "done",
+    "last_page": 0,
+    "last_url_index": 2600,
+    "urls_done": 2600,
+    "urls_total": 2631,
+    "rows_saved": 43,
+    "started_at": "2026-04-13T16:15:01.060052",
+    "finished_at": "2026-04-13T16:54:17.949518",
+    "error": "",
+    "last_checkpoint_at": "2026-04-13T16:54:17.949518"
+  },
+  "vanilla.sa": {
+    "store_url": "https://vanilla.sa/",
+    "domain": "vanilla.sa",
+    "status": "done",
+    "last_page": 0,
+    "last_url_index": 14000,
+    "urls_done": 14000,
+    "urls_total": 14190,
+    "rows_saved": 0,
+    "started_at": "2026-04-13T16:54:18.304642",
+    "finished_at": "2026-04-13T19:21:06.956117",
+    "error": "",
+    "last_checkpoint_at": "2026-04-13T19:21:06.957118"
+  },
+  "sara-makeup.com": {
+    "store_url": "https://sara-makeup.com/",
+    "domain": "sara-makeup.com",
+    "status": "done",
+    "last_page": 0,
+    "last_url_index": 4400,
+    "urls_done": 4400,
+    "urls_total": 4581,
+    "rows_saved": 0,
+    "started_at": "2026-04-13T19:21:07.039232",
+    "finished_at": "2026-04-13T20:15:11.033170",
+    "error": "",
+    "last_checkpoint_at": "2026-04-13T20:15:11.033170"
+  },
   "alkhabeershop.com": {
     "store_url": "https://alkhabeershop.com/",
     "domain": "alkhabeershop.com",
+    "status": "done",
+    "last_page": 0,
+    "last_url_index": 8600,
+    "urls_done": 8600,
+    "urls_total": 8620,
+    "rows_saved": 0,
+    "started_at": "2026-04-13T20:15:11.056239",
+    "finished_at": "2026-04-13T21:59:52.778838",
+    "error": "",
+    "last_checkpoint_at": "2026-04-13T21:59:52.778838"
+  },
+  "goldenscent.com": {
+    "store_url": "https://www.goldenscent.com/",
+    "domain": "goldenscent.com",
     "status": "running",
     "last_page": 0,
-    "last_url_index": 0,
-    "urls_done": 0,
-    "urls_total": 8636,
+    "last_url_index": 14400,
+    "urls_done": 14400,
+    "urls_total": 24726,
     "rows_saved": 0,
-    "started_at": "2026-04-18T18:21:59.826598",
+    "started_at": "2026-04-13T21:59:52.857490",
     "finished_at": "",
     "error": "",
-    "last_checkpoint_at": "2026-04-18T18:35:36.273319"
+    "last_checkpoint_at": "2026-04-13T18:16:40.936358"
   }
 }

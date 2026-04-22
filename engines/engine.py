@@ -2097,28 +2097,14 @@ def match_single_product(
 # ═══════════════════════════════════════════════════════
 #  التحليل الكامل — v21 الهجين الفائق السرعة
 # ═══════════════════════════════════════════════════════
-def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True,
-                      ledger=None):
+def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True):
     """
     1. بناء CompIndex لكل منافس (تطبيع مسبق)
     2. لكل منتجنا → search vectorized
     3. score≥97 → تلقائي | 62-96 → AI batch | <62 → مراجعة
 
     يُرجع: (DataFrame النتائج, audit_stats)
-
-    Phase 0: if ``ledger`` is provided (observability.CompetitorIntakeLedger),
-    every competitor row is recorded at ingest, every match-decision site
-    writes a terminal state, and ``audit_stats["ledger"]`` reports the
-    end-of-run counters + invariant check.
     """
-    import traceback as _tb
-    from observability.ledger import (
-        NullLedger, state_from_status, ingest_comp_df,
-        make_comp_id, CONFIRMED_MATCH, REJECTED_STRUCTURAL,
-        REJECTED_LOW_CONFIDENCE, ERROR,
-    )
-    _led = ledger if ledger is not None else NullLedger()
-
     results = []
     audit_stats = {
         "total_input": int(len(our_df)) if our_df is not None else 0,
@@ -2145,8 +2131,6 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True,
 
     # ── بناء الفهارس المسبقة ──
     indices = {}
-    # Phase 0: remember (competitor, url) → comp_id so transition sites can
-    # reconstruct the id from the cand dict without piggy-backing on CompIndex.
     for cname, cdf in comp_dfs.items():
         ccol = _name_col_for_analysis(cdf)
         icol = _fcol_optional(cdf, [
@@ -2162,25 +2146,6 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True,
             "رابط المنتج", "الرابط", "رابط", "product_url", "link", "url", "URL",
         ])
         indices[cname] = CompIndex(cdf, ccol, icol, cname, img_col=c_img, url_col=c_url)
-        # Phase 0: ingest every competitor row before any filter runs.
-        try:
-            ingest_comp_df(_led, cname, cdf, ccol, url_col=c_url or "")
-        except Exception as _ie:
-            # Never let instrumentation break the run; just log and continue.
-            import logging as _lg
-            _lg.getLogger("engines.engine").warning(
-                "ledger ingest error for %s: %s", cname, _ie,
-            )
-
-    def _cand_comp_id(cand):
-        """Rebuild the ledger comp_id for a candidate returned by CompIndex."""
-        if not cand:
-            return None
-        return make_comp_id(
-            cand.get("competitor", ""),
-            cand.get("name", ""),
-            cand.get("product_url", "") or "",
-        )
 
     total   = len(our_df)
     pending = []
@@ -2213,38 +2178,16 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True,
                               best_fallback, "⚠️ تحت المراجعة", "ai_uncertain",
                               all_cands=it["all_cands"],
                               our_img=it.get("our_img", ""), our_url=it.get("our_url", ""))
-                    _cid = _cand_comp_id(best_fallback)
-                    if _cid:
-                        _led.mark_state(_cid, CONFIRMED_MATCH,
-                                        reason_code="under_review",
-                                        last_score=float(best_fallback.get("score") or 0) if best_fallback else None)
                 else:
                     best = it["candidates"][ci]
                     rr = _row(it["product"], it["our_price"], it["our_id"],
                               it["brand"], it["size"], it["ptype"], it["gender"],
                               best, src="gemini", all_cands=it["all_cands"],
                               our_img=it.get("our_img", ""), our_url=it.get("our_url", ""))
-                    _cid = _cand_comp_id(best)
-                    if _cid:
-                        _led.mark_state(_cid, CONFIRMED_MATCH,
-                                        reason_code="ai_match",
-                                        last_score=float(best.get("score") or 0))
                 if rr is not None:
                     results.append(rr)
-            except Exception as _flush_exc:
-                # Phase 0: never drop silently. Record an error row in the
-                # ledger so the invariant still balances and the run report
-                # shows where the loss would have happened.
-                _best = it["candidates"][0] if it.get("candidates") else None
-                _cid = _cand_comp_id(_best)
-                _led.mark_error(
-                    _cid, "flush_row_error",
-                    _tb.format_exc()[:300] if hasattr(_tb, "format_exc") else str(_flush_exc),
-                )
-                import logging as _lg
-                _lg.getLogger("engines.engine").error(
-                    "flush row error (comp_id=%s): %s", _cid, _flush_exc,
-                )
+            except Exception:
+                # خطأ في منتج واحد → تخطيه وأكمل
                 continue
         pending.clear()
         # ✅ إصلاح #2: حذف time.sleep(0.5) — مخالف لقواعد Streamlit Main Thread
@@ -2316,9 +2259,6 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True,
                     مصدر_المطابقة="no_candidates",
                 )
             )
-            # Phase 0: no competitor matched our product at all — there is no
-            # comp row to mark here; the sweep will handle untouched comp rows
-            # at end-of-run. Nothing to do on the ledger side for this branch.
             if progress_callback:
                 progress_callback((i + 1) / total, results)
             continue
@@ -2338,11 +2278,6 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True,
                     مصدر_المطابقة="below_match_threshold",
                 )
             )
-            _cid = _cand_comp_id(best0)
-            if _cid:
-                _led.mark_state(_cid, REJECTED_LOW_CONFIDENCE,
-                                reason_code="below_match_threshold",
-                                last_score=float(best0.get("score") or 0))
             if progress_callback:
                 progress_callback((i + 1) / total, results)
             continue
@@ -2353,11 +2288,6 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True,
                               our_img=our_img, our_url=our_url)
             if row_result is not None:   # ← فلتر None
                 results.append(row_result)
-                _cid = _cand_comp_id(best0)
-                if _cid:
-                    _led.mark_state(_cid, CONFIRMED_MATCH,
-                                    reason_code="auto_match",
-                                    last_score=float(best0.get("score") or 0))
         else:
             pending.append(dict(
                 product=product, our_price=our_price, our_id=our_id,
@@ -2373,26 +2303,6 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None, use_ai=True,
             progress_callback((i + 1) / total, results)
 
     _flush()
-
-    # ── Phase 0: end-of-run ledger sweep + invariant check ───────────────
-    try:
-        swept = _led.sweep_untransitioned(
-            default_state=REJECTED_LOW_CONFIDENCE,
-            reason_code="not_selected_in_batch",
-        )
-        ok, report = _led.check_invariant()
-        audit_stats["ledger"] = report
-        audit_stats["ledger_sweep_count"] = swept
-        if not ok:
-            import logging as _lg
-            _lg.getLogger("engines.engine").error(
-                "pipeline invariant FAILED: %s", report,
-            )
-    except Exception as _le:
-        import logging as _lg
-        _lg.getLogger("engines.engine").warning(
-            "ledger finalize error (non-fatal): %s", _le,
-        )
 
     # ── تنظيف الذاكرة بعد المعالجة الثقيلة ──────────────────────────────
     _out = pd.DataFrame(results)
@@ -2644,32 +2554,18 @@ def find_missing_products(our_df, comp_dfs):
 
             # ── حساب درجة الثقة ──────────────────────────────
             # score = أعلى نسبة تشابه مع منتجاتنا (كلما انخفضت = مفقود مؤكد أكثر)
-            # FIX: إعادة ترتيب الفروع ومنع التصنيف الخاطئ لـ "green" عند score مرتفع.
-            # الـ else النهائي كان يحوّل أي منتج ≥68% إلى "green" (مفقود مؤكد)،
-            # مما ضخّم عدد المفقودات بشكل خاطئ. الآن نصنّف:
-            #   - variant "similar" أو _has_similar (⚠️) → red/yellow
-            #   - score ≥68% بلا دلالة مفقود → yellow (ليس مؤكد)
-            #   - score < 55 بلا شبيه/variant → green (مؤكد)
-            #   - 55 ≤ score < 68 → yellow (محتمل)
             _has_similar = bool(reason and "⚠️" in reason)
             _has_var     = bool(variant)
-            _var_type    = (variant or {}).get("type", "")
-
-            if _has_var and _var_type == "similar":
-                _conf_level = "red"      # مشكوك — متشابه جداً مع منتج عندنا
-            elif _has_similar:
-                _conf_level = "yellow"   # ملاحظة تحذير → محتمل
-            elif score < 55 and not _has_var:
-                _conf_level = "green"    # مفقود مؤكد — فرق واضح عن كل كتالوجنا
-            elif score < 68:
+            if score < 40 and not _has_var and not _has_similar:
+                _conf_level = "green"    # مفقود مؤكد — جاهز للإرسال
+            elif score < 55 and not _has_similar:
+                _conf_level = "green"    # مفقود مؤكد
+            elif _has_similar or (score >= 55 and score < 68):
                 _conf_level = "yellow"   # مفقود محتمل — يحتاج تحقق
-            elif _has_var:
-                # نوع متاح (تستر/أساسي) موجود عندنا — ليس مفقوداً مؤكداً
-                _conf_level = "yellow"
+            elif _has_var and variant.get("type") == "similar":
+                _conf_level = "red"      # مشكوك فيه — محظور الإرسال
             else:
-                # score ≥ 68% بدون variant/similar: تشابه عالٍ
-                # = فرصة مفقودة محتملة لكن ليست "مؤكدة"
-                _conf_level = "yellow"
+                _conf_level = "green"
 
             _img_url = _extract_image_url_from_cell(row.get(img_col)) if img_col else ""
             if not _img_url:
