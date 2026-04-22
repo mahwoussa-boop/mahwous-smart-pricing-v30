@@ -224,64 +224,10 @@ st.markdown(get_styles(), unsafe_allow_html=True)
 # إخفاء روابط التنقل التلقائية (app, magic factory, scraper advanced) من أعلى الشريط الجانبي
 st.markdown("<style>[data-testid='stSidebarNav'] {display: none;}</style>", unsafe_allow_html=True)
 st.markdown(get_sidebar_toggle_js(), unsafe_allow_html=True)
-
-# ── Chunk-Error Auto-Reload Guard ────────────────────────────────────────────
-# After every Cloud Run redeployment, Streamlit re-hashes its JS bundles.
-# If the browser has the OLD page cached, it tries to lazy-load JS files that
-# no longer exist → TypeError: Failed to fetch dynamically imported module.
-# This snippet catches both synchronous errors and unhandled Promise rejections,
-# clears all browser caches, and forces a hard reload (max 3 attempts to avoid
-# infinite loops). The counter is stored in sessionStorage so it resets on tab close.
-st.markdown("""
-<script>
-(function () {
-    var _KEY = '__mhws_chunk_reload';
-    var _count = parseInt(sessionStorage.getItem(_KEY) || '0', 10);
-
-    function _isChunkError(msg) {
-        return typeof msg === 'string' &&
-               msg.indexOf('Failed to fetch dynamically imported module') !== -1;
-    }
-
-    function _doReload() {
-        if (_count >= 3) {
-            // Give up after 3 attempts — don't loop forever
-            sessionStorage.removeItem(_KEY);
-            return;
-        }
-        sessionStorage.setItem(_KEY, String(_count + 1));
-        if (window.caches) {
-            // Purge all Service Worker caches before reloading
-            caches.keys()
-                .then(function (names) {
-                    return Promise.all(names.map(function (n) { return caches.delete(n); }));
-                })
-                .then(function () { window.location.reload(true); })
-                .catch(function ()  { window.location.reload(true); });
-        } else {
-            window.location.reload(true);
-        }
-    }
-
-    // Synchronous script / resource errors (fires in capture phase)
-    window.addEventListener('error', function (e) {
-        if (_isChunkError(e && e.message)) { _doReload(); }
-    }, true);
-
-    // Async / dynamic import() promise rejections
-    window.addEventListener('unhandledrejection', function (e) {
-        var msg = e && e.reason && (e.reason.message || String(e.reason));
-        if (_isChunkError(msg)) { _doReload(); }
-    });
-
-    // Reset counter after a fully successful load
-    window.addEventListener('load', function () {
-        sessionStorage.removeItem(_KEY);
-    });
-}());
-</script>
-""", unsafe_allow_html=True)
-
+# NOTE: The "Failed to fetch dynamically imported module" (HTTP 429 / stale chunk)
+# error is fixed at the nginx proxy layer in docker_entrypoint.py — NOT here.
+# st.markdown(<script>) is never executed by the browser because React's
+# dangerouslySetInnerHTML does not run injected scripts for security reasons.
 _debug_log("H1", "app.py:set_page_config", "App bootstrap reached", {"app_title": APP_TITLE})
 
 # ── فحص ذاتي عند الإقلاع (يعمل مرة واحدة فقط لكل جلسة) ────────────────
