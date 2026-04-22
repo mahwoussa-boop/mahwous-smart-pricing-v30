@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
 
-# ═══════════════════════════════════════════════════════════════
-# Google Cloud Run Deployment Script
-# نشر آمن لتطبيق Mahwous Smart Pricing على Google Cloud Run
-# هذا السكربت يجبر التنفيذ من مجلد المستودع نفسه حتى لا يتكرر
-# خطأ `gcloud run deploy --source .` من مجلد المنزل ~
-# ═══════════════════════════════════════════════════════════════
+# نشر آمن لتطبيق Mahwous Smart Pricing على Google Cloud Run باستخدام صورة Docker.
+# لا يكتب الأسرار في المستودع، بل يقرأها من البيئة وقت التنفيذ فقط.
 
 set -euo pipefail
 
-# الألوان للطباعة
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -18,11 +13,6 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-# ═══════════════════════════════════════════════════════════════
-# الإعدادات القابلة للتخصيص
-# يمكن تمريرها كمتغيرات بيئة قبل التشغيل
-# ═══════════════════════════════════════════════════════════════
 
 DEFAULT_PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
 PROJECT_ID="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-$DEFAULT_PROJECT_ID}}"
@@ -35,7 +25,14 @@ CPU="${CPU:-2}"
 TIMEOUT="${TIMEOUT:-3600}"
 MAX_INSTANCES="${MAX_INSTANCES:-10}"
 MIN_INSTANCES="${MIN_INSTANCES:-0}"
+CONCURRENCY="${CONCURRENCY:-80}"
+DATA_DIR="${DATA_DIR:-/app/data}"
+GCS_DB_BLOB_NAME="${GCS_DB_BLOB_NAME:-vision2030/pricing_v30.db}"
+GCS_SYNC_COOLDOWN="${GCS_SYNC_COOLDOWN:-60}"
 PLATFORM="managed"
+SKIP_BUILD="${SKIP_BUILD:-false}"
+SKIP_PUSH="${SKIP_PUSH:-false}"
+SKIP_DEPLOY="${SKIP_DEPLOY:-false}"
 
 print_header() {
     echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
@@ -66,11 +63,12 @@ usage() {
 
 أمثلة:
   PROJECT_ID=sanguine-orb-493713-q6 REGION=northamerica-south1 ./cloud-run-deploy.sh
-  PROJECT_ID=sanguine-orb-493713-q6 SERVICE_NAME=mahwous-smart-pricing-v30 REGION=northamerica-south1 ./cloud-run-deploy.sh
+  PROJECT_ID=sanguine-orb-493713-q6 SERVICE_NAME=mahwous-smart-pricing-v30 REGION=northamerica-south1 GEMINI_API_KEY=AIza... GCS_BUCKET_NAME=my-bucket ./cloud-run-deploy.sh
+  SKIP_BUILD=true SKIP_PUSH=true ./cloud-run-deploy.sh
 
-مهم:
-  هذا السكربت ينتقل تلقائياً إلى مجلد المستودع: $SCRIPT_DIR
-  وبذلك يمنع رفع مجلد المنزل ~ بالخطأ عند النشر.
+المهم:
+  - هذا السكربت ينتقل تلقائياً إلى جذر المستودع: $SCRIPT_DIR
+  - الأسرار تُقرأ من البيئة فقط ولا تُكتب داخل Git.
 EOF
 }
 
@@ -141,8 +139,58 @@ push_docker_image() {
     print_success "تم دفع الصورة بنجاح"
 }
 
+build_env_string() {
+    ENV_VARS=(
+        "STREAMLIT_SERVER_HEADLESS=true"
+        "STREAMLIT_BROWSER_GATHER_USAGE_STATS=false"
+        "PYTHONUNBUFFERED=1"
+        "DATA_DIR=$DATA_DIR"
+        "GCP_PROJECT_ID=$PROJECT_ID"
+        "GCS_DB_BLOB_NAME=$GCS_DB_BLOB_NAME"
+        "GCS_SYNC_COOLDOWN=$GCS_SYNC_COOLDOWN"
+    )
+
+    append_env_if_set() {
+        local key="$1"
+        local value="${!key:-}"
+        if [ -n "$value" ]; then
+            ENV_VARS+=("${key}=${value}")
+        fi
+    }
+
+    append_env_if_set "GCS_BUCKET_NAME"
+    append_env_if_set "GEMINI_API_KEY"
+    append_env_if_set "GEMINI_API_KEYS"
+    append_env_if_set "OPENROUTER_API_KEY"
+    append_env_if_set "COHERE_API_KEY"
+    append_env_if_set "WEBHOOK_UPDATE_PRICES"
+    append_env_if_set "WEBHOOK_NEW_PRODUCTS"
+    append_env_if_set "EXTRA_API_KEY"
+    append_env_if_set "GOOGLE_API_KEY"
+    append_env_if_set "CLOUD_SQL_CONNECTION_NAME"
+    append_env_if_set "DB_USER"
+    append_env_if_set "DB_PASS"
+    append_env_if_set "DB_NAME"
+    append_env_if_set "USE_FIRESTORE"
+
+    if [ -z "${GCS_BUCKET_NAME:-}" ]; then
+        print_warning "GCS_BUCKET_NAME غير مضبوط — لن يكون الحفظ بعد إعادة التشغيل مضموناً بالكامل."
+    else
+        print_success "تم رصد GCS_BUCKET_NAME"
+    fi
+
+    if [ -z "${GEMINI_API_KEY:-${GEMINI_API_KEYS:-}}" ]; then
+        print_warning "لا يوجد GEMINI_API_KEY أو GEMINI_API_KEYS — ميزات الذكاء لن تعمل بالكامل."
+    else
+        print_success "تم رصد إعدادات الذكاء الاصطناعي"
+    fi
+
+    ENV_STRING="$(IFS=,; echo "${ENV_VARS[*]}")"
+}
+
 deploy_to_cloud_run() {
     print_header "نشر على Google Cloud Run"
+    build_env_string
 
     gcloud run deploy "$SERVICE_NAME" \
         --image "$IMAGE_NAME:latest" \
@@ -153,8 +201,9 @@ deploy_to_cloud_run() {
         --timeout "$TIMEOUT" \
         --max-instances "$MAX_INSTANCES" \
         --min-instances "$MIN_INSTANCES" \
+        --concurrency "$CONCURRENCY" \
         --allow-unauthenticated \
-        --set-env-vars="STREAMLIT_SERVER_HEADLESS=true,STREAMLIT_BROWSER_GATHER_USAGE_STATS=false"
+        --set-env-vars "$ENV_STRING"
 
     print_success "تم النشر بنجاح على Cloud Run"
 }
@@ -171,14 +220,6 @@ get_service_url() {
     print_info "لعرض السجلات: gcloud run services logs read $SERVICE_NAME --region $REGION --limit 50"
 }
 
-set_environment_variables() {
-    print_header "تذكير بمتغيرات البيئة"
-    print_warning "أضف المتغيرات السرية يدويًا بعد النشر إذا لم تكن موجودة على الخدمة"
-    echo "gcloud run services update $SERVICE_NAME \\
-  --region $REGION \\
-  --update-env-vars GEMINI_API_KEY=YOUR_KEY_HERE"
-}
-
 main() {
     if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
         usage
@@ -189,26 +230,25 @@ main() {
     check_requirements
     authenticate_gcloud
 
-    read -p "هل تريد بناء صورة Docker جديدة؟ (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [ "$SKIP_BUILD" != "true" ]; then
         build_docker_image
+    else
+        print_warning "تم تجاوز build لأن SKIP_BUILD=true"
     fi
 
-    read -p "هل تريد دفع الصورة إلى GCR؟ (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [ "$SKIP_PUSH" != "true" ]; then
         push_docker_image
+    else
+        print_warning "تم تجاوز push لأن SKIP_PUSH=true"
     fi
 
-    read -p "هل تريد النشر على Cloud Run؟ (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [ "$SKIP_DEPLOY" != "true" ]; then
         deploy_to_cloud_run
         get_service_url
+    else
+        print_warning "تم تجاوز deploy لأن SKIP_DEPLOY=true"
     fi
 
-    set_environment_variables
     print_header "✅ اكتمل النشر"
 }
 

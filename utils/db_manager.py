@@ -81,6 +81,17 @@ def trigger_gcs_sync(force: bool = False) -> bool:
     return False
 
 
+def _sync_after_write(force: bool = False) -> None:
+    """Best-effort cloud sync after a successful local write.
+    Non-blocking for callers: any sync failure is swallowed and only logged.
+    Use force=True only for milestone writes; otherwise rely on cooldown throttling.
+    """
+    try:
+        trigger_gcs_sync(force=force)
+    except Exception as _sync_exc:
+        _logger.debug("post-write GCS sync skipped: %s", _sync_exc)
+
+
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     # WAL: يسمح بالقراءة والكتابة المتزامنة من threads مختلفة بدون تعارض
@@ -368,6 +379,7 @@ def log_event(page, event_type, details="", product_name="", action=""):
             (_ts(), page, event_type, details, product_name, action)
         )
         conn.commit(); conn.close()
+        _sync_after_write()
     except: pass
 
 
@@ -385,6 +397,7 @@ def log_decision(product_name, old_status, new_status, reason="",
              competitor, old_status, new_status, reason)
         )
         conn.commit(); conn.close()
+        _sync_after_write()
     except: pass
 
 
@@ -467,6 +480,7 @@ def upsert_price_history(product_name, competitor, price,
         )
 
     conn.commit(); conn.close()
+    _sync_after_write()
     return price_changed
 
 
@@ -539,7 +553,9 @@ def save_job_progress(job_id, total, processed, results, status="running",
         conn.commit()
     # Push to GCS when a job completes — captures full analysis results
     if status in ("done", "completed", "finished"):
-        trigger_gcs_sync(force=True)
+        _sync_after_write(force=True)
+    else:
+        _sync_after_write()
 
 
 def get_job_progress(job_id):
@@ -644,6 +660,7 @@ def log_analysis(our_file, comp_file, total, matched, missing, summary=""):
             (_ts(), our_file, comp_file, total, matched, missing, summary)
         )
         conn.commit(); conn.close()
+        _sync_after_write()
     except: pass
 
 
@@ -688,6 +705,7 @@ def save_hidden_product(product_key: str, product_name: str = "", action: str = 
         )
         conn.commit()
         conn.close()
+        _sync_after_write()
     except Exception as _e:
         _logger.debug("save_hidden_product error: %s", _e)
 
@@ -746,6 +764,7 @@ def restore_soft_deleted_product(product_key: str) -> bool:
         )
         conn.commit()
         conn.close()
+        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("restore_soft_deleted_product error: %s", _e)
@@ -868,6 +887,7 @@ def update_product_data(
         )
         conn.commit()
         conn.close()
+        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("update_product_data error: %s", _e)
@@ -907,6 +927,7 @@ def delete_product_override(stable_key: str) -> bool:
         )
         conn.commit()
         conn.close()
+        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("delete_product_override error: %s", _e)
@@ -936,6 +957,7 @@ def force_link_product(our_id: str, our_name: str, comp_url: str) -> bool:
         )
         conn.commit()
         conn.close()
+        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("force_link_product error: %s", _e)
@@ -971,10 +993,12 @@ def delete_force_link(our_id: str, comp_url: str) -> bool:
         )
         conn.commit()
         conn.close()
+        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("delete_force_link error: %s", _e)
         return False
+
 
 
 # ── module-level initialisation ───────────────────────────────────────────────
@@ -1272,8 +1296,11 @@ def save_processed(product_key: str, product_name: str, competitor: str,
                  old_price, new_price, product_id, notes, str(comp_url or ""))
             )
             conn.commit()
+        _sync_after_write()
+        return 1
     except Exception:
-        pass  # لا يوقف الثريد الخلفي
+        return 0
+
 
 
 def get_processed(limit=50000) -> list:
@@ -1538,6 +1565,7 @@ def add_competitor_alias(alias: str, canonical_name: str) -> bool:
         )
         conn.commit()
         conn.close()
+        _sync_after_write()
         return True
     except Exception as exc:
         _logger.error("add_competitor_alias error: %s", exc)
@@ -1575,6 +1603,7 @@ def register_competitor(name: str, domain: str = "", notes: str = "") -> bool:
         )
         conn.commit()
         conn.close()
+        _sync_after_write()
         return True
     except Exception as exc:
         _logger.error("register_competitor error: %s", exc)
