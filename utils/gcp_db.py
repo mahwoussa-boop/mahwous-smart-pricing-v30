@@ -31,6 +31,8 @@ Environment variables (all optional — app falls back to SQLite if absent):
 
 import logging
 import os
+import sqlite3
+import tempfile
 import threading
 import time
 from typing import Optional
@@ -88,11 +90,56 @@ def gcp_status() -> dict:
 #  GCS — SQLite Sync
 # ═══════════════════════════════════════════════════════════════════
 
+def _cleanup_sqlite_sidecars(base_path: str) -> None:
+    for suffix in ("-wal", "-shm"):
+        sidecar = f"{base_path}{suffix}"
+        try:
+            if os.path.exists(sidecar):
+                os.remove(sidecar)
+        except OSError as exc:
+            _logger.debug("GCS: failed to remove sidecar %s: %s", sidecar, exc)
+
+
+def _validate_sqlite_file(db_path: str) -> None:
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        result = conn.execute("PRAGMA integrity_check;").fetchone()
+        status = str(result[0] if result else "").strip().lower()
+        if status != "ok":
+            raise sqlite3.DatabaseError(f"integrity_check failed: {status or 'unknown'}")
+    finally:
+        conn.close()
+
+
+def _create_sqlite_snapshot(local_path: str) -> str:
+    """Create a consistent SQLite snapshot for upload, even when WAL is active."""
+    tmp = tempfile.NamedTemporaryFile(prefix="sqlite_snapshot_", suffix=".db", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    src = sqlite3.connect(local_path, timeout=30, check_same_thread=False)
+    dst = sqlite3.connect(tmp_path, timeout=30, check_same_thread=False)
+    try:
+        src.execute("PRAGMA busy_timeout=30000;")
+        try:
+            src.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        except sqlite3.DatabaseError:
+            pass
+        src.backup(dst)
+        dst.commit()
+    finally:
+        dst.close()
+        src.close()
+
+    _validate_sqlite_file(tmp_path)
+    return tmp_path
+
+
 def sync_db_from_gcs(local_path: str) -> bool:
     """
-    Download the SQLite DB file from GCS to local_path.
-    Called once at application startup before any DB reads/writes.
-    Returns True if the file was downloaded successfully.
+    Download the SQLite DB file from GCS to local_path safely.
+    The downloaded file is first validated, then atomically moved in place.
+    Returns True if the file was restored successfully.
     """
     if not is_gcs_configured():
         return False
@@ -100,18 +147,31 @@ def sync_db_from_gcs(local_path: str) -> bool:
         from google.cloud import storage  # type: ignore
         client = storage.Client(project=GCP_PROJECT_ID or None)
         bucket = client.bucket(GCS_BUCKET_NAME)
-        blob   = bucket.blob(GCS_DB_BLOB_NAME)
+        blob = bucket.blob(GCS_DB_BLOB_NAME)
         if not blob.exists():
             _logger.info("GCS: blob gs://%s/%s does not exist yet — will create on first write",
                          GCS_BUCKET_NAME, GCS_DB_BLOB_NAME)
             return False
-        # Ensure parent directory exists before downloading
+
         os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
-        blob.download_to_filename(local_path)
-        size_kb = os.path.getsize(local_path) // 1024
-        _logger.info("GCS: downloaded DB (%d KB) from gs://%s/%s → %s",
-                     size_kb, GCS_BUCKET_NAME, GCS_DB_BLOB_NAME, local_path)
-        return True
+        tmp = tempfile.NamedTemporaryFile(prefix="sqlite_restore_", suffix=".db", delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        try:
+            blob.download_to_filename(tmp_path)
+            _validate_sqlite_file(tmp_path)
+            os.replace(tmp_path, local_path)
+            _cleanup_sqlite_sidecars(local_path)
+            size_kb = os.path.getsize(local_path) // 1024
+            _logger.info("GCS: restored validated DB (%d KB) from gs://%s/%s → %s",
+                         size_kb, GCS_BUCKET_NAME, GCS_DB_BLOB_NAME, local_path)
+            return True
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
     except ImportError:
         _logger.warning("GCS: google-cloud-storage not installed — run pip install google-cloud-storage")
     except Exception as exc:
@@ -121,10 +181,8 @@ def sync_db_from_gcs(local_path: str) -> bool:
 
 def sync_db_to_gcs(local_path: str, force: bool = False) -> bool:
     """
-    Upload the local SQLite DB file to GCS.
-    Throttled by _GCS_SYNC_COOLDOWN_SECS unless force=True.
-    Thread-safe: uses a lock so only one upload runs at a time.
-    Returns True if the upload succeeded.
+    Upload a consistent SQLite snapshot to GCS instead of the raw live DB file.
+    This prevents corruption when the application is running in WAL mode.
     """
     if not is_gcs_configured():
         return False
@@ -138,21 +196,29 @@ def sync_db_to_gcs(local_path: str, force: bool = False) -> bool:
         if not force and (now - _last_gcs_upload_time) < _GCS_SYNC_COOLDOWN_SECS:
             _logger.debug("GCS: upload throttled (cooldown %ds)", _GCS_SYNC_COOLDOWN_SECS)
             return False
+        snapshot_path = None
         try:
             from google.cloud import storage  # type: ignore
+            snapshot_path = _create_sqlite_snapshot(local_path)
             client = storage.Client(project=GCP_PROJECT_ID or None)
             bucket = client.bucket(GCS_BUCKET_NAME)
-            blob   = bucket.blob(GCS_DB_BLOB_NAME)
-            blob.upload_from_filename(local_path)
-            size_kb = os.path.getsize(local_path) // 1024
+            blob = bucket.blob(GCS_DB_BLOB_NAME)
+            blob.upload_from_filename(snapshot_path)
+            size_kb = os.path.getsize(snapshot_path) // 1024
             _last_gcs_upload_time = time.time()
-            _logger.info("GCS: uploaded DB (%d KB) → gs://%s/%s",
+            _logger.info("GCS: uploaded validated SQLite snapshot (%d KB) → gs://%s/%s",
                          size_kb, GCS_BUCKET_NAME, GCS_DB_BLOB_NAME)
             return True
         except ImportError:
             _logger.warning("GCS: google-cloud-storage not installed")
         except Exception as exc:
             _logger.warning("GCS sync_to_gcs error: %s", exc)
+        finally:
+            if snapshot_path and os.path.exists(snapshot_path):
+                try:
+                    os.remove(snapshot_path)
+                except OSError:
+                    pass
     return False
 
 
