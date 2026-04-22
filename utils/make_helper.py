@@ -18,9 +18,12 @@ v25.0 additions:
 
 import requests
 import json
+import logging
 import os
 import time
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger("MakeHelper")
 
 
 # ── Webhook URLs ───────────────────────────────────────────────────────────
@@ -85,6 +88,17 @@ def _clean_pid(raw) -> str:
         return str(int(float(s)))
     except (ValueError, TypeError):
         return s
+
+
+def _pid_as_int(raw) -> Optional[int]:
+    """product_id كرقم صحيح لموديول Salla UpdateProduct (select field)."""
+    s = _clean_pid(raw)
+    if not s:
+        return None
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
 
 
 # ── استخراج رقم المنتج No. من الكتالوج (Primary Key في سلة/زد) ───────────
@@ -213,9 +227,13 @@ def send_single_product(product: Dict) -> Dict:
     if price <= 0:
         return {"success": False, "message": f"❌ السعر غير صحيح: {price}"}
 
+    pid_int = _pid_as_int(product_no or product_id)
+    if pid_int is None:
+        logger.warning("⚠️ NO/product_id غير رقمي للمنتج «%s» — سيُرسل كنص", name[:50])
+        pid_int = product_no or product_id or ""
     _prod = {
-        "NO":          product_no,                   # ← Primary Key Make
-        "product_id":  product_id,
+        "NO":          product_no or product_id,     # ← Primary Key Make (fallback صلب)
+        "product_id":  pid_int,                       # ← integer لموديول Salla
         "name":        name,
         "price":       float(price),
         "section":     product.get("section", "update"),
@@ -296,9 +314,17 @@ def send_price_updates(products: List[Dict]) -> Dict:
             skipped += 1
             continue
 
+        pid_int = _pid_as_int(product_no or product_id)
+        if pid_int is None:
+            logger.warning("⚠️ تخطي «%s» — product_id غير رقمي", name[:50])
+            skipped += 1
+            continue
+
+        if not product_no:
+            logger.warning("⚠️ NO فارغ في الدفعة عند «%s»", name[:50])
         valid_products.append({
-            "NO":          product_no,                    # ← Primary Key Make
-            "product_id":  product_id,
+            "NO":          product_no or product_id,      # ← Primary Key Make (fallback صلب)
+            "product_id":  pid_int,                        # ← integer لموديول Salla
             "name":        name,
             "price":       float(price),
             "section":     p.get("section", "update"),
@@ -317,6 +343,9 @@ def send_price_updates(products: List[Dict]) -> Dict:
         }
 
     payload = {"products": valid_products}
+    _no_count = sum(1 for p in valid_products if p.get("NO"))
+    logger.info("📤 إرسال %d منتج إلى Make — مع NO: %d/%d",
+                len(valid_products), _no_count, len(valid_products))
     result = _post_to_webhook(WEBHOOK_UPDATE_PRICES, payload)
 
     if result["success"]:
@@ -335,7 +364,21 @@ def send_new_products(products: List[Dict]) -> Dict:
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات للإرسال"}
 
-    sent, skipped, errors = 0, 0, []
+    # ── بوابة إلزامية: وصف مهووس + رابط صورة حقيقي ────────────────────
+    try:
+        from utils.product_gate import validate_and_enrich
+        products, _gate_rejected = validate_and_enrich(products, auto_generate_desc=True)
+        gate_skipped = len(_gate_rejected)
+        if gate_skipped:
+            logger.warning("🚫 بوابة الجودة استبعدت %d منتج (وصف/صورة مفقود)", gate_skipped)
+    except Exception as _e:
+        logger.error("فشل تطبيق بوابة الجودة: %s", _e)
+        gate_skipped = 0
+    if not products:
+        return {"success": False,
+                "message": f"❌ لا توجد منتجات صالحة — تم رفض {gate_skipped} لغياب وصف مهووس أو صورة حقيقية"}
+
+    sent, skipped, errors = 0, gate_skipped, []
 
     for p in products:
         name  = str(p.get("name", p.get("أسم المنتج", ""))).strip()
@@ -402,17 +445,36 @@ def send_missing_products(products: List[Dict]) -> Dict:
     if not products:
         return {"success": False, "message": "❌ لا توجد منتجات مفقودة للإرسال"}
 
-    sent, skipped, errors = 0, 0, []
+    # ── بوابة إلزامية: وصف مهووس + رابط صورة حقيقي ────────────────────
+    try:
+        from utils.product_gate import validate_and_enrich
+        products, _gate_rejected = validate_and_enrich(products, auto_generate_desc=True)
+        gate_skipped = len(_gate_rejected)
+        if gate_skipped:
+            logger.warning("🚫 بوابة الجودة استبعدت %d منتج مفقود (وصف/صورة مفقود)", gate_skipped)
+    except Exception as _e:
+        logger.error("فشل تطبيق بوابة الجودة: %s", _e)
+        gate_skipped = 0
+    if not products:
+        return {"success": False,
+                "message": f"❌ لا توجد منتجات مفقودة صالحة — رفض {gate_skipped} لغياب وصف مهووس أو صورة حقيقية"}
+
+    sent, skipped, errors = 0, gate_skipped, []
 
     for p in products:
         name  = str(p.get("name", p.get("المنتج", p.get("منتج_المنافس", "")))).strip()
-        price = _safe_float(
-            p.get("price", 0) or p.get("السعر", 0) or p.get("سعر_المنافس", 0)
+        comp_price = _safe_float(
+            p.get("سعر_المنافس", 0) or p.get("comp_price", 0) or p.get("competitor_price", 0)
         )
+        # قاعدة التسعير للمفقودات: سعر المنافس − 1
+        if comp_price > 0:
+            price = max(int(round(comp_price - 1)), 1)
+        else:
+            price = int(round(_safe_float(p.get("price", 0) or p.get("السعر", 0))))
         product_no = _extract_no(p) or _clean_pid(p.get("NO", ""))
         pid = product_no or _clean_pid(p.get("product_id", p.get("معرف_المنتج", "")))
 
-        if not name:
+        if not name or price <= 0:
             skipped += 1
             continue
 
@@ -420,15 +482,18 @@ def send_missing_products(products: List[Dict]) -> Dict:
             "NO":              product_no,                # ← Primary Key Make
             "product_id":      pid,
             "أسم المنتج":      name,
-            "سعر المنتج":      float(price),
+            "سعر المنتج":      price,                      # uinteger لـ Salla
             "رمز المنتج sku":  str(p.get("sku", p.get("رمز المنتج sku", ""))).strip(),
-            "الوزن":           int(_safe_float(p.get("weight", p.get("الوزن", 1))) or 1),
-            "سعر التكلفة":     float(_safe_float(p.get("cost_price", p.get("سعر التكلفة", 0)))),
-            "السعر المخفض":    float(_safe_float(p.get("sale_price",  p.get("السعر المخفض", 0)))),
+            "الوزن":           1,                          # ثابت حسب القاعدة
+            "سعر التكلفة":     int(round(_safe_float(p.get("cost_price", p.get("سعر التكلفة", 0))))),
+            "السعر المخفض":    int(round(_safe_float(p.get("sale_price",  p.get("السعر المخفض", 0))))),
             "الوصف":           str(p.get("الوصف", p.get("description", ""))).strip(),
+            "صورة المنتج":     str(p.get("image_url", p.get("صورة المنتج", ""))).strip(),
+            "brand_id":        int(_safe_float(p.get("brand_id", 0))) or None,
+            "category_id":     int(_safe_float(p.get("category_id", 0))) or None,
         }
-        if p.get("image_url"):
-            item["صورة المنتج"] = str(p["image_url"])
+        # تنظيف: إزالة الحقول الفارغة None
+        item = {k: v for k, v in item.items() if v not in (None, "")}
 
         result = _post_to_webhook(WEBHOOK_NEW_PRODUCTS, {"data": [item]})
         if result["success"]:
@@ -546,8 +611,8 @@ def send_batch_smart(products: list, batch_type: str = "update",
 def verify_webhook_connection() -> Dict:
     test_price_payload = {
         "products": [{
-            "NO":         "test-001",
-            "product_id": "test-001",
+            "NO":         "1",
+            "product_id": 1,
             "name":       "اختبار الاتصال",
             "price":      1.0,
             "section":    "test",
@@ -583,3 +648,164 @@ def verify_webhook_connection() -> Dict:
         },
         "all_connected": r1["success"] and r2["success"],
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  تصدير ملفات سلة للرفع اليدوي (بديل عن Webhook)
+# ══════════════════════════════════════════════════════════════════════════
+
+# أعمدة ملف استيراد المنتجات في سلة (من قالب «منتج جديد.csv»)
+SALLA_PRODUCT_COLUMNS = [
+    "النوع ", "أسم المنتج", "تصنيف المنتج", "صورة المنتج", "وصف صورة المنتج",
+    "نوع المنتج", "سعر المنتج", "الوصف", "هل يتطلب شحن؟", "رمز المنتج sku",
+    "سعر التكلفة", "السعر المخفض", "تاريخ بداية التخفيض", "تاريخ نهاية التخفيض",
+    "اقصي كمية لكل عميل", "إخفاء خيار تحديد الكمية", "اضافة صورة عند الطلب",
+    "الوزن", "وحدة الوزن", "الماركة", "العنوان الترويجي", "تثبيت المنتج",
+    "الباركود", "السعرات الحرارية", "MPN", "GTIN", "خاضع للضريبة ؟",
+    "سبب عدم الخضوع للضريبة",
+]
+
+# أعمدة ملف استيراد الماركات في سلة (من قالب «ماركات مهووس.csv»)
+SALLA_BRAND_COLUMNS = [
+    "اسم الماركة", "وصف مختصر عن الماركة", "صورة شعار الماركة",
+    "(إختياري) صورة البانر", "(Page Title) عنوان صفحة العلامة التجارية",
+    "(SEO Page URL) رابط صفحة العلامة التجارية",
+    "(Page Description) وصف صفحة العلامة التجارية",
+]
+
+
+def export_missing_products_to_salla_csv(products: List[Dict], output_path: str) -> Dict:
+    """
+    تصدير المنتجات المفقودة إلى ملف CSV بصيغة قالب استيراد منتجات سلة.
+    للرفع اليدوي في لوحة تحكم سلة → إدارة المنتجات → استيراد.
+
+    السعر = سعر المنافس − 1 | الوزن = 1 | الكمية الافتراضية = 100
+    """
+    import csv
+
+    if not products:
+        return {"success": False, "message": "❌ لا توجد منتجات للتصدير", "path": ""}
+
+    # ── بوابة إلزامية: وصف مهووس + صورة حقيقية ────────────────────────
+    try:
+        from utils.product_gate import validate_and_enrich
+        products, _gate_rejected = validate_and_enrich(list(products), auto_generate_desc=True)
+        _gate_skipped = len(_gate_rejected)
+        if _gate_skipped:
+            logger.warning("🚫 بوابة التصدير: رفض %d منتج (وصف/صورة مفقود)", _gate_skipped)
+    except Exception as _e:
+        logger.error("فشل بوابة التصدير: %s", _e)
+        _gate_skipped = 0
+    if not products:
+        return {"success": False,
+                "message": f"❌ لا منتجات صالحة للتصدير — رُفض {_gate_skipped} لغياب وصف مهووس أو صورة حقيقية",
+                "path": ""}
+
+    rows = []
+    for p in products:
+        name = str(p.get("name", p.get("المنتج", p.get("منتج_المنافس", "")))).strip()
+        comp_price = _safe_float(
+            p.get("سعر_المنافس", 0) or p.get("comp_price", 0) or p.get("competitor_price", 0)
+        )
+        price = max(int(round(comp_price - 1)), 1) if comp_price > 0 else int(
+            round(_safe_float(p.get("price", 0) or p.get("السعر", 0)))
+        )
+        if not name or price <= 0:
+            continue
+
+        row = {col: "" for col in SALLA_PRODUCT_COLUMNS}
+        row["النوع "]              = "منتج"
+        row["أسم المنتج"]          = name
+        row["تصنيف المنتج"]        = str(p.get("category_name", p.get("التصنيف", "")))
+        row["صورة المنتج"]         = str(p.get("image_url", p.get("صورة المنتج", "")))
+        row["وصف صورة المنتج"]     = f"زجاجة {name}"
+        row["نوع المنتج"]          = "منتج جاهز"
+        row["سعر المنتج"]          = price
+        row["الوصف"]               = str(p.get("الوصف", p.get("description", "")))
+        row["هل يتطلب شحن؟"]       = "نعم"
+        row["رمز المنتج sku"]      = str(p.get("sku", p.get("رمز المنتج sku", "")))
+        row["سعر التكلفة"]         = int(round(_safe_float(p.get("cost_price", 0))))
+        row["السعر المخفض"]        = int(round(_safe_float(p.get("sale_price", 0))))
+        row["الوزن"]               = 1
+        row["وحدة الوزن"]          = "كجم"
+        row["الماركة"]             = str(p.get("brand", p.get("الماركة", "")))
+        row["إخفاء خيار تحديد الكمية"] = "لا"
+        row["تثبيت المنتج"]        = "لا"
+        row["خاضع للضريبة ؟"]      = "نعم"
+        rows.append(row)
+
+    if not rows:
+        return {"success": False, "message": "❌ لا توجد منتجات صالحة للتصدير", "path": ""}
+
+    try:
+        with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=SALLA_PRODUCT_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        return {
+            "success": True,
+            "message": f"✅ تم تصدير {len(rows)} منتج إلى ملف سلة",
+            "path": output_path,
+            "count": len(rows),
+        }
+    except Exception as e:
+        return {"success": False, "message": f"❌ فشل التصدير: {e}", "path": ""}
+
+
+def export_missing_brands_to_salla_csv(
+    brands: List[Dict], existing_brands: List[str], output_path: str
+) -> Dict:
+    """
+    تصدير الماركات المفقودة إلى ملف CSV بصيغة قالب استيراد ماركات سلة.
+    للرفع اليدوي → لوحة سلة → الماركات → استيراد.
+
+    brands: قائمة dicts فيها 'name' و 'description' و 'logo_url' (اختيارية)
+    existing_brands: قائمة أسماء الماركات الموجودة (للاستثناء)
+    """
+    import csv
+
+    if not brands:
+        return {"success": False, "message": "❌ لا توجد ماركات للتصدير", "path": ""}
+
+    existing_norm = {str(b).strip().lower() for b in (existing_brands or []) if b}
+    rows = []
+    seen = set()
+
+    for b in brands:
+        name = str(b.get("name", b.get("brand", b.get("الماركة", "")))).strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in existing_norm or key in seen:
+            continue
+        seen.add(key)
+
+        row = {col: "" for col in SALLA_BRAND_COLUMNS}
+        row["اسم الماركة"]                                      = name
+        row["وصف مختصر عن الماركة"]                             = str(
+            b.get("description", f"ماركة {name} - متوفرة في مهووس للعطور")
+        )
+        row["صورة شعار الماركة"]                                = str(b.get("logo_url", ""))
+        row["(Page Title) عنوان صفحة العلامة التجارية"]         = f"{name} | عطور فاخرة - مهووس"
+        row["(SEO Page URL) رابط صفحة العلامة التجارية"]        = f"ماركة-{name.replace(' ', '-')}"
+        row["(Page Description) وصف صفحة العلامة التجارية"]     = (
+            f"اكتشف تشكيلة {name} الفاخرة في مهووس للعطور. عطور أصلية بأفضل الأسعار."
+        )
+        rows.append(row)
+
+    if not rows:
+        return {"success": False, "message": "ℹ️ كل الماركات موجودة — لا شيء للتصدير", "path": ""}
+
+    try:
+        with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=SALLA_BRAND_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        return {
+            "success": True,
+            "message": f"✅ تم تصدير {len(rows)} ماركة مفقودة",
+            "path": output_path,
+            "count": len(rows),
+        }
+    except Exception as e:
+        return {"success": False, "message": f"❌ فشل التصدير: {e}", "path": ""}

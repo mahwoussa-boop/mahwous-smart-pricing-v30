@@ -2537,18 +2537,31 @@ def find_missing_products(our_df, comp_dfs):
 
             # ── حساب درجة الثقة ──────────────────────────────
             # score = أعلى نسبة تشابه مع منتجاتنا (كلما انخفضت = مفقود مؤكد أكثر)
+            # FIX: إعادة ترتيب فروع الثقة. الـ else النهائي السابق كان
+            # يصنّف أي منتج بتشابه ≥68% كـ "green" (مفقود مؤكد) مما ضخّم
+            # العدد الإجمالي للمفقودات ودفع آلاف المنتجات المتشابهة فعلاً
+            # مع كتالوجنا إلى قائمة "مؤكدة". الآن:
+            #   - variant "similar" → red
+            #   - ملاحظة ⚠️ → yellow
+            #   - score < 55 بلا variant → green (مؤكد)
+            #   - 55 ≤ score < 68 → yellow
+            #   - score ≥ 68 أو has_var → yellow (ليس مؤكداً)
             _has_similar = bool(reason and "⚠️" in reason)
             _has_var     = bool(variant)
-            if score < 40 and not _has_var and not _has_similar:
-                _conf_level = "green"    # مفقود مؤكد — جاهز للإرسال
-            elif score < 55 and not _has_similar:
-                _conf_level = "green"    # مفقود مؤكد
-            elif _has_similar or (score >= 55 and score < 68):
-                _conf_level = "yellow"   # مفقود محتمل — يحتاج تحقق
-            elif _has_var and variant.get("type") == "similar":
+            _var_type    = (variant or {}).get("type", "")
+
+            if _has_var and _var_type == "similar":
                 _conf_level = "red"      # مشكوك فيه — محظور الإرسال
+            elif _has_similar:
+                _conf_level = "yellow"
+            elif score < 55 and not _has_var:
+                _conf_level = "green"    # مفقود مؤكد
+            elif score < 68:
+                _conf_level = "yellow"   # محتمل
+            elif _has_var:
+                _conf_level = "yellow"   # نوع متاح عندنا — ليس مؤكداً
             else:
-                _conf_level = "green"
+                _conf_level = "yellow"   # تشابه عالٍ — فرصة لكن ليست مؤكدة
 
             _img_url = _extract_image_url_from_cell(row.get(img_col)) if img_col else ""
             if not _img_url:

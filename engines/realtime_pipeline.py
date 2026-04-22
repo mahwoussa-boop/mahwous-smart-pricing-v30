@@ -41,6 +41,14 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 import aiohttp
 import pandas as pd
 
+from observability.ledger import (
+    CompetitorIntakeLedger,
+    NullLedger,
+    REJECTED_LOW_CONFIDENCE,
+    CONFIRMED_MATCH,
+)
+from utils.data_paths import get_data_db_path
+
 logger = logging.getLogger("RealtimePipeline")
 
 _DATA_DIR = os.environ.get("DATA_DIR", "data")
@@ -107,20 +115,25 @@ def _reverse_match_one(
     comp_row: dict,
     our_entries: list,
     threshold: float = 62.0,
+    on_error: Optional[Callable[[str, str], None]] = None,
 ) -> Optional[dict]:
     """
     Reverse-match one scraped competitor product against the pre-indexed our_entries.
     Returns a result dict (same schema as engine._row output) or None if no match
     is found above `threshold`.
 
-    Wraps the entire body in try/except so a single bad row never kills the consumer.
+    Phase 0: ``on_error(error_class, detail)`` is invoked for every scoring
+    failure so the ledger's ``errors`` counter can track them — no more silent
+    ``except: continue``.
     """
     if not our_entries:
         return None
     try:
         from rapidfuzz import fuzz
         from engines.engine import normalize
-    except ImportError:
+    except ImportError as _imp:
+        if on_error is not None:
+            on_error("rt_import_error", str(_imp)[:200])
         return None
 
     comp_name = str(
@@ -138,7 +151,9 @@ def _reverse_match_one(
         comp_store = str(comp_row.get("store") or comp_row.get("المتجر") or "")
         comp_url   = str(comp_row.get("url") or comp_row.get("رابط_المنافس") or "")
         comp_img   = str(comp_row.get("image") or "")
-    except Exception:
+    except Exception as _pe:
+        if on_error is not None:
+            on_error("rt_parse_error", str(_pe)[:200])
         return None
 
     best_score  = 0.0
@@ -146,7 +161,12 @@ def _reverse_match_one(
     for entry in our_entries:
         try:
             s = fuzz.WRatio(comp_norm, entry["norm"])
-        except Exception:
+        except Exception as _se:
+            # Phase 0: per-entry scoring failure — row is kept (appended to
+            # store_rows above), we only lose this one comparison. Log so the
+            # ledger errors counter moves.
+            if on_error is not None:
+                on_error("rt_score_error", str(_se)[:150])
             continue
         if s > best_score:
             best_score = s
@@ -251,6 +271,7 @@ async def run_realtime_pipeline(
     use_ai: bool = False,
     result_callback: Optional[Callable[[str, Any], None]] = None,
     parallel_stores: int = 5,
+    ledger: Optional[CompetitorIntakeLedger] = None,
 ) -> AsyncGenerator[Tuple[str, Any], None]:
     """
     Async generator that drives the full scrape-then-match pipeline and yields
@@ -258,6 +279,11 @@ async def run_realtime_pipeline(
 
     v2.0: ALL stores scrape simultaneously, per-row real-time analysis in consumer,
     full analysis non-blocking in executor, immediate GCP persistence.
+
+    Phase 0: a ``CompetitorIntakeLedger`` is instantiated per run (unless one
+    is passed in). Every scraped competitor row is marked INGESTED before any
+    filter runs, and the run-end sweep + invariant report are attached to the
+    ``complete`` event's ``audit`` payload.
     """
     # ── Guard: reject obviously bad inputs early ──────────────────────────────
     if our_df is None or our_df.empty:
@@ -269,6 +295,21 @@ async def run_realtime_pipeline(
         logger.warning("run_realtime_pipeline: no store URLs — aborting")
         yield ("complete", {"df": pd.DataFrame(), "audit": {"error": "no_store_urls"}})
         return
+
+    # Phase 0 ledger — owned by this run unless injected for tests.
+    _owns_ledger = ledger is None
+    if ledger is None:
+        try:
+            ledger = CompetitorIntakeLedger(get_data_db_path("pricing_v18.db"))
+        except Exception as _le:
+            logger.warning("ledger init failed, falling back to NullLedger: %s", _le)
+            ledger = NullLedger()  # type: ignore[assignment]
+
+    def _rt_error_hook(error_class: str, detail: str) -> None:
+        try:
+            ledger.counters_inc_error(error_class)
+        except Exception:
+            pass
 
     from engines.async_scraper import scrape_one_store_streaming, _domain
 
@@ -376,10 +417,30 @@ async def run_realtime_pipeline(
 
             # ── New product row ───────────────────────────────────────────
             if not isinstance(payload, dict):
+                # Phase 0: not a dict means the scraper emitted garbage — log
+                # via the ledger error counter so it is visible.
+                _rt_error_hook("rt_non_dict_payload",
+                               f"type={type(payload).__name__}")
                 continue
 
             store_rows[domain].append(payload)
             count = len(store_rows[domain])
+
+            # Phase 0: ingest this scraped row into the ledger BEFORE any
+            # filter / match. Never lose a row without a terminal state.
+            try:
+                _p_name = str(payload.get("name") or payload.get("المنتج")
+                              or payload.get("product_name") or "").strip()
+                _p_url = str(payload.get("url") or payload.get("رابط_المنافس")
+                             or "").strip()
+                if _p_name:
+                    ledger.mark_ingested(
+                        domain, _p_name, url=_p_url,
+                        raw={k: v for k, v in payload.items()
+                             if k in ("price", "السعر", "image", "brand")},
+                    )
+            except Exception as _ing_exc:
+                _rt_error_hook("rt_ingest_error", str(_ing_exc)[:200])
 
             # Batch-persist to SQLite (GCP persistent volume)
             if count % _PERSIST_BATCH_SIZE == 0:
@@ -390,12 +451,16 @@ async def run_realtime_pipeline(
             # ── Per-row real-time reverse match (THE FIX: analysis on-the-fly) ──
             # Wrap in try/except so a single bad product never kills the consumer.
             try:
-                rt_result = _reverse_match_one(payload, our_entries)
+                rt_result = _reverse_match_one(
+                    payload, our_entries, on_error=_rt_error_hook,
+                )
                 if rt_result is not None:
                     realtime_results.append(rt_result)
                     await event_queue.put(("match_result", {"row": rt_result}))
             except Exception as _me:
-                logger.debug("Consumer: per-row match error: %s", _me)
+                # Phase 0: record the failure — do not swallow silently.
+                _rt_error_hook("rt_match_error", str(_me)[:200])
+                logger.error("Consumer: per-row match error: %s", _me)
 
             # Progress event for UI counter
             try:
@@ -495,6 +560,7 @@ async def run_realtime_pipeline(
                 comp_dfs,
                 None,    # progress_callback
                 use_ai,  # use_ai
+                ledger,  # Phase 0: share the run-level ledger
             ),
         )
         logger.info(
@@ -524,6 +590,33 @@ async def run_realtime_pipeline(
         )
     except Exception as _pe:
         logger.debug("Async persist scheduling error: %s", _pe)
+
+    # ── Phase 0: finalize ledger (sweep + invariant) ─────────────────────────
+    # run_full_analysis already swept + reported; we re-sweep here to catch any
+    # rows that were ingested into the ledger by the consumer but never made
+    # it into comp_dfs (e.g. if the full analysis failed early).
+    try:
+        swept = ledger.sweep_untransitioned(
+            default_state=REJECTED_LOW_CONFIDENCE,
+            reason_code="rt_not_reached_full_analysis",
+        )
+        ok, report = ledger.check_invariant()
+        if isinstance(audit, dict):
+            audit["ledger"] = report
+            audit["ledger_sweep_count"] = swept
+        else:
+            audit = {"ledger": report, "ledger_sweep_count": swept,
+                     "original_audit": audit}
+        if not ok:
+            logger.error("realtime pipeline invariant FAILED: %s", report)
+    except Exception as _lfe:
+        logger.warning("ledger finalize error (non-fatal): %s", _lfe)
+    finally:
+        if _owns_ledger and hasattr(ledger, "close"):
+            try:
+                ledger.close()
+            except Exception:
+                pass
 
     yield ("complete", {"df": results_df, "audit": audit})
 

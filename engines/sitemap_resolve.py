@@ -325,15 +325,25 @@ async def resolve_sitemap_recursively(
 
             # Semaphore-controlled concurrency — prevents spawning 200+ tasks at once
             # for large sitemapindex files, which overloads aiohttp and triggers WAF.
+            # Phase 1 (2026-04-19): added per-task stagger so the N workers that clear
+            # the semaphore on depth-N don't all hit the target origin within the same
+            # millisecond window — that burst was slipping past the rate limiter's
+            # per-domain delay and triggering Cloudflare 429 on large sitemapindex.
             _sem = asyncio.Semaphore(_SITEMAP_CONCURRENCY)
+            _STAGGER_STEP = 0.3  # seconds between child starts
 
-            async def _fetch_child(cu: str) -> Dict[str, str]:
+            async def _fetch_child(cu: str, idx: int) -> Dict[str, str]:
+                if idx:
+                    await asyncio.sleep(_STAGGER_STEP * min(idx, _SITEMAP_CONCURRENCY))
                 async with _sem:
                     return await resolve_sitemap_recursively(
                         session, cu, max_depth, current_depth + 1
                     )
 
-            tasks = [asyncio.create_task(_fetch_child(cu)) for cu in child_urls]
+            tasks = [
+                asyncio.create_task(_fetch_child(cu, i))
+                for i, cu in enumerate(child_urls)
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for cu, res in zip(child_urls, results):
                 if isinstance(res, BaseException):

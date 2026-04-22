@@ -53,6 +53,7 @@ SECTIONS = [
     "🔄 الأتمتة الذكية",
     "🕷️ كشط المنافسين",
     "🗑️ سلة المحذوفات",
+    "🔗 روابط المتجر",
     "⚙️ الإعدادات",
 ]
 from styles import (get_styles, vs_card, comp_strip, miss_card,
@@ -115,6 +116,7 @@ from utils.db_manager import (init_db, log_event, log_decision,
                                get_analysis_history, upsert_price_history,
                                get_price_history, get_price_changes,
                                save_job_progress, get_job_progress, get_last_job,
+                               any_running_job, release_stale_running_jobs,
                                save_hidden_product, get_hidden_product_keys,
                                init_db_v26, upsert_our_catalog, upsert_comp_catalog,
                                save_processed, get_processed, undo_processed,
@@ -1079,6 +1081,7 @@ def _cb_send_make(
     our_name: str, comp_name: str,
     our_price: float, comp_price: float, diff: float,
     decision: str, comp_src: str, pid: str, comp_url: str,
+    no: str = "",
 ) -> None:
     """
     Callback: إرسال تحديث سعر واحد إلى Make.com عبر on_click.
@@ -1094,6 +1097,7 @@ def _cb_send_make(
 
     # FIX: Transparency & Reversibility
     _mk_res = send_single_product({
+        "NO":         no or pid,
         "product_id": pid,
         "name": our_name,
         "price": float(_tp),
@@ -1105,7 +1109,7 @@ def _cb_send_make(
         "comp_url": comp_url or "",
     })
     _mk_status = int(_mk_res.get("status_code") or 0)
-    _ok = bool(_mk_res.get("success")) and _mk_status in (200, 201, 202, 204)
+    _ok = bool(_mk_res.get("success"))
 
     _hk = f"{prefix}_{our_name}_{idx}"
     if _ok:
@@ -1132,10 +1136,10 @@ def _cb_send_make(
         )
         st.rerun()  # FIX: Smart Workflow & AI Tracking
     else:
+        _err_detail = _mk_res.get("message", "خطأ غير معروف")
         st.session_state[f"_act_{prefix}_{idx}"] = (
-            "error", f"❌ فشل الإرسال إلى Make ({_mk_status or 'NO_HTTP'}) — لم يتم تعليم المنتج كمعالج."
+            "error", f"❌ فشل الإرسال إلى Make — {_err_detail}"
         )
-        st.error(f"❌ فشل الإرسال إلى Make: {_mk_res.get('message', 'خطأ غير معروف')}")  # FIX: Transparency & Reversibility
 
 
 def _cb_exclude(
@@ -1608,10 +1612,29 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
             else ""
         )
 
+        _no_val_disp = str(
+            row.get("No.", "") or row.get("NO", "") or row.get("no", "")
+            or row.get("No", "") or row.get("رقم_المنتج", "") or ""
+        ).strip()
+        try:
+            _fv = float(_no_val_disp)
+            _no_val_disp = str(int(_fv)) if _fv == int(_fv) else _no_val_disp
+        except (ValueError, TypeError):
+            pass
+        if _no_val_disp in ("nan", "None", "NaN"):
+            _no_val_disp = ""
+        _no_badge = (
+            f'<span style="background:#2a1a3a;color:#ce93d8;padding:1px 6px;'
+            f'border-radius:4px;font-size:.7rem;font-weight:700">'
+            f'#️⃣ NO: {html.escape(_no_val_disp)}</span>'
+            if _no_val_disp else ""
+        )
+
         st.markdown(f"""
         <div style="display:flex;justify-content:space-between;align-items:center;
                     padding:3px 12px;font-size:.8rem;flex-wrap:wrap;gap:4px;">
           <span>🏷️ <b>{brand}</b> {size} {ptype}</span>
+          {_no_badge}
           {_comp_badge}
           <span>تطابق: <b style="color:{match_color}">{match_pct:.0f}%</b></span>
           {risk_html}
@@ -1645,6 +1668,20 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
             if _pid_cb in ("nan", "None", "NaN", ""):
                 _pid_cb = ""
 
+            # رقم المنتج No. من كتالوج متجرنا (Primary Key في Make/سلة)
+            _no_raw = (
+                row.get("No.", "") or row.get("NO", "") or row.get("no", "")
+                or row.get("No", "") or row.get("رقم_المنتج", "")
+                or row.get("رقم المنتج", "") or ""
+            )
+            try:
+                _fv_no = float(_no_raw)
+                _no_cb = str(int(_fv_no)) if _fv_no == int(_fv_no) else str(_no_raw)
+            except (ValueError, TypeError):
+                _no_cb = str(_no_raw).strip()
+            if _no_cb in ("nan", "None", "NaN", ""):
+                _no_cb = ""
+
             _comp_url_make = (_comp_url_v or str(row.get("رابط_المنافس", "") or "")).strip()
 
             act_col1, act_col2, act_col3, _act_sp = st.columns([2.5, 2.5, 2, 4])
@@ -1668,6 +1705,7 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
                         prefix, idx, our_name, comp_name,
                         our_price, comp_price, diff,
                         decision, comp_src, _pid_cb, _comp_url_make,
+                        _no_cb,
                     ),
                 )
             with act_col3:
@@ -1878,8 +1916,21 @@ def render_pro_table(df, prefix, section_type="update", show_search=True,
                         _pid = str(_pid_raw).strip()
                     if _pid in ("nan", "None", "NaN", ""):
                         _pid = ""
+                    # رقم المنتج NO. من كتالوج سلة (Primary Key)
+                    _no_raw_b7 = (
+                        row.get("No.", "") or row.get("NO", "") or row.get("no", "")
+                        or row.get("No", "") or row.get("رقم_المنتج", "") or ""
+                    )
+                    try:
+                        _fv_no = float(_no_raw_b7)
+                        _no_b7 = str(int(_fv_no)) if _fv_no == int(_fv_no) else str(_no_raw_b7)
+                    except (ValueError, TypeError):
+                        _no_b7 = str(_no_raw_b7).strip()
+                    if _no_b7 in ("nan", "None", "NaN", ""):
+                        _no_b7 = ""
                     _final_price = _custom_price if _custom_price > 0 else _auto_price_row
                     res = send_single_product({
+                        "NO":         _no_b7 or _pid,
                         "product_id": _pid,
                         "name": our_name, "price": _final_price,
                         "comp_name": comp_name, "comp_price": comp_price,
@@ -2650,7 +2701,54 @@ if page == "📊 لوحة التحكم":
             help="عطّلها لتشغيل المقارنة فقط دون تعديل جداول كتالوجنا والمنافسين في SQLite.",
         )
 
-    if st.button("🚀 بدء التحليل", type="primary", key="dash_btn_start_analysis"):
+    # ── Duplicate-click mutex: UI + DB level ────────────────────────────
+    try:
+        release_stale_running_jobs(stale_after_seconds=3600)
+    except Exception:
+        pass
+    _db_running_job = None
+    try:
+        _db_running_job = any_running_job(stale_after_seconds=3600)
+    except Exception:
+        _db_running_job = None
+    _ui_job_running = bool(st.session_state.get("job_running", False))
+    _analysis_locked = _ui_job_running or bool(_db_running_job)
+
+    if _analysis_locked:
+        _lock_jid = (
+            st.session_state.get("job_id")
+            or (_db_running_job or {}).get("job_id")
+            or "?"
+        )
+        _lock_proc = (_db_running_job or {}).get("processed", 0)
+        _lock_tot  = (_db_running_job or {}).get("total", 0)
+        _prog_txt = (
+            f" — {_lock_proc:,}/{_lock_tot:,}"
+            if (_lock_tot and _lock_tot > 0) else ""
+        )
+        st.info(
+            f"⏳ يوجد تحليل قيد التشغيل (Job: `{_lock_jid}`){_prog_txt} — "
+            "زر «بدء التحليل» مُعطَّل حتى الانتهاء."
+        )
+
+    if st.button(
+        "🚀 بدء التحليل" if not _analysis_locked else "⏳ تحليل جارٍ... (يرجى الانتظار)",
+        type="primary",
+        key="dash_btn_start_analysis",
+        disabled=_analysis_locked,
+    ):
+        # Second-chance re-check right before doing work: covers race between
+        # render and click-handler (another replica may have acquired the lock).
+        try:
+            _late = any_running_job(stale_after_seconds=3600)
+        except Exception:
+            _late = None
+        if _late or st.session_state.get("job_running", False):
+            st.warning(
+                f"⚠️ تم منع تشغيل مزدوج — تحليل قيد التنفيذ بالفعل "
+                f"(Job: `{(_late or {}).get('job_id', st.session_state.get('job_id','?'))}`)."
+            )
+            st.stop()
         # Phase 1: لا نمسح المعالجات — البيانات المعالجة تبقى مستمرة عبر التحليلات
         # Smart Reversion في _split_results سيُعيد المنتجات تلقائياً إذا تغير سعر المنافس
         # ── حارس المدخلات (يدعم الوضعين: يدوي وتلقائي) ──────────────────
@@ -3076,6 +3174,65 @@ elif page == "🔍 منتجات مفقودة":
         "has_results": bool(st.session_state.results),
         "has_missing_key": bool(st.session_state.results and "missing" in st.session_state.results),
     })
+    # ── 🤖 الاستخراج الذكي بـ AI (محرك جديد — يدمج: مطابقة + ماركات + تصنيفات + وصف) ──
+    with st.expander("🤖 استخراج ذكي بـ AI (مع ماركات + تصنيفات + وصف Mahwous)", expanded=False):
+        st.markdown(
+            "ارفع كتالوجك + ملفات المنافسين + ماركات/تصنيفات مهووس → "
+            "يستخرج المفقودات الحقيقية فقط (≥85%=موجود، 70-85%=AI verify، <70%=مفقود) "
+            "ويصدّر `new_products.xlsx` + `new_brands.csv` بصيغة سلة."
+        )
+        try:
+            from engines.missing_products_engine import build_missing_exports
+            import tempfile as _tmp
+            from pathlib import Path as _Path
+
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                _smart_cat  = st.file_uploader("📦 كتالوج متجرنا", type=["xlsx","xls","csv"], key="smart_miss_cat")
+                _smart_br   = st.file_uploader("🏷️ ماركات مهووس", type=["csv","xlsx"], key="smart_miss_br")
+            with _c2:
+                _smart_cmp  = st.file_uploader("🏪 ملفات المنافسين (متعدد)", type=["csv","xlsx"],
+                                                accept_multiple_files=True, key="smart_miss_cmp")
+                _smart_cats = st.file_uploader("📁 تصنيفات مهووس", type=["csv","xlsx"], key="smart_miss_cats")
+
+            _o1, _o2 = st.columns(2)
+            _use_ai     = _o1.toggle("🤖 تفعيل AI", value=True, key="smart_miss_ai")
+            _gen_desc   = _o2.toggle("📝 توليد الوصف", value=True, key="smart_miss_desc")
+
+            if st.button("🚀 ابدأ الاستخراج الذكي", type="primary", key="smart_miss_run"):
+                if not all([_smart_cat, _smart_br, _smart_cats, _smart_cmp]):
+                    st.error("❌ ارفع جميع الملفات الأربعة.")
+                else:
+                    def _save(f):
+                        t = _tmp.NamedTemporaryFile(delete=False, suffix=_Path(f.name).suffix)
+                        t.write(f.read()); t.close(); return t.name
+                    with st.spinner("⚙️ جارٍ الفحص الذكي..."):
+                        _res = build_missing_exports(
+                            catalog_path=_save(_smart_cat),
+                            competitor_paths=[_save(f) for f in _smart_cmp],
+                            brands_path=_save(_smart_br),
+                            categories_path=_save(_smart_cats),
+                            output_dir="data/exports",
+                            use_ai=_use_ai,
+                            generate_descriptions=_gen_desc,
+                        )
+                    st.success(f"✅ {_res['products_count']} منتج | {_res['new_brands_count']} ماركة جديدة")
+                    _d1, _d2 = st.columns(2)
+                    with _d1:
+                        with open(_res["products_file"], "rb") as fh:
+                            st.download_button("📥 تحميل المنتجات الجديدة", fh.read(),
+                                file_name=_Path(_res["products_file"]).name,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True, key="smart_dl_prod")
+                    with _d2:
+                        if _res["new_brands_file"]:
+                            with open(_res["new_brands_file"], "rb") as fh:
+                                st.download_button("📥 تحميل الماركات الجديدة", fh.read(),
+                                    file_name=_Path(_res["new_brands_file"]).name,
+                                    mime="text/csv", use_container_width=True, key="smart_dl_br")
+        except Exception as _smart_e:
+            st.error(f"تعذّر تحميل المحرك الذكي: {_smart_e}")
+
     # ── المستشار الذكي للمفقودات ─────────────────────────────────────────
     with st.expander("🧠 المستشار الذكي للمفقودات (AI Expert)", expanded=False):
         st.markdown("اسأل المستشار عن استراتيجية إضافة هذه المنتجات أو تحليل السوق لها:")
@@ -3366,6 +3523,8 @@ elif page == "🔍 منتجات مفقودة":
                                             "المنتج_المنافس": _q_name,
                                             "مرشح_لدينا": _best_cand,
                                             "سبب": f"تشابه {_best_score:.0f}% — AI غير حاسم ({_ai_conf}%)",
+                                            "_idx": str(_q_idx),
+                                            "_row": _q_row.to_dict() if hasattr(_q_row, "to_dict") else dict(_q_row),
                                         }
                                         uncertain_pending.append(_item)
                                         if uncertain_policy == "❌ استبعاد تلقائي":
@@ -3387,6 +3546,8 @@ elif page == "🔍 منتجات مفقودة":
                                         "المنتج_المنافس": _q_name,
                                         "مرشح_لدينا": _best_cand,
                                         "سبب": f"تشابه {_best_score:.0f}%",
+                                        "_idx": str(_q_idx),
+                                        "_row": _q_row.to_dict() if hasattr(_q_row, "to_dict") else dict(_q_row),
                                     }
                                     uncertain_pending.append(_item)
                                     if uncertain_policy == "❌ استبعاد تلقائي":
@@ -3575,8 +3736,76 @@ elif page == "🔍 منتجات مفقودة":
 
             if st.session_state.get("missing_dup_uncertain"):
                 with st.expander("⚠️ حالات مشكوك فيها (تحتاج قرار)", expanded=True):
-                    st.dataframe(pd.DataFrame(st.session_state.missing_dup_uncertain), use_container_width=True)
-                    st.caption("اختر سياسة مختلفة من «سياسة منع التكرار قبل البدء» ثم أعد تنفيذ المعالجة.")
+                    st.caption("اتخذ قراراً سريعاً لكل حالة بدلاً من إعادة المعالجة:")
+                    _uncertain_list = list(st.session_state.missing_dup_uncertain)
+                    _to_remove = []
+                    _to_send_quick = []
+                    for _ui, _uitem in enumerate(_uncertain_list):
+                        _u_name = _uitem.get("المنتج_المنافس", "")
+                        _u_cand = _uitem.get("مرشح_لدينا", "—")
+                        _u_reason = _uitem.get("سبب", "")
+                        _row_dict = _uitem.get("_row", {}) or {}
+                        _u_price = safe_float(_row_dict.get("سعر_المنافس", 0))
+                        _u_comp = str(_row_dict.get("المنافس", ""))
+
+                        st.markdown(
+                            f"**{_u_name[:60]}**  \n"
+                            f"<span style='color:#999;font-size:.85rem'>"
+                            f"مرشح لدينا: {_u_cand[:60]} — {_u_reason}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        _bc1, _bc2, _bc3 = st.columns(3)
+                        with _bc1:
+                            if st.button("✅ مفقود فعلاً (أرسل)", key=f"unc_send_{_ui}",
+                                         use_container_width=True):
+                                if _u_price > 0:
+                                    _send_p = max(int(round(_u_price - 1)), 1)
+                                    _img = str(_row_dict.get("صورة_المنافس", "") or "").strip()
+                                    _payload = {
+                                        "name": _u_name,
+                                        "price": _send_p,
+                                        "image_url": _img,
+                                        "section": "missing",
+                                        "competitor": _u_comp,
+                                        "comp_name": _u_name,
+                                        "brand": str(_row_dict.get("الماركة", "")),
+                                    }
+                                    with st.spinner("جاري الإرسال..."):
+                                        _r = send_missing_products([_payload])
+                                    if _r.get("sent", 0) > 0:
+                                        st.success(f"✅ تم إرسال «{_u_name[:35]}»")
+                                        save_processed(
+                                            f"miss_unc_{_u_name[:30]}_{_u_comp}",
+                                            _u_name, _u_comp, "send_missing_uncertain",
+                                            new_price=_send_p,
+                                        )
+                                        _to_remove.append(_ui)
+                                    else:
+                                        st.error(f"❌ فشل: {_r.get('message','')}")
+                                else:
+                                    st.error("❌ السعر غير صالح")
+                        with _bc2:
+                            if st.button("⛔ موجود (تجاهل)", key=f"unc_skip_{_ui}",
+                                         use_container_width=True):
+                                save_processed(
+                                    f"miss_unc_{_u_name[:30]}_{_u_comp}",
+                                    _u_name, _u_comp, "ignored_uncertain",
+                                    notes=f"موجود لدينا — {_u_cand[:50]}",
+                                )
+                                _to_remove.append(_ui)
+                                st.success(f"⛔ تم تجاهل «{_u_name[:35]}»")
+                        with _bc3:
+                            if st.button("⏭️ تأجيل", key=f"unc_skip_later_{_ui}",
+                                         use_container_width=True,
+                                         help="إبقاؤه في القائمة للمراجعة لاحقاً"):
+                                st.toast(f"⏭️ تم تأجيل «{_u_name[:30]}» — سيبقى في قائمة المراجعة", icon="⏭️")
+                        st.markdown('<hr style="border:none;border-top:1px solid #1a2a44;margin:6px 0">', unsafe_allow_html=True)
+
+                    if _to_remove:
+                        st.session_state.missing_dup_uncertain = [
+                            it for i, it in enumerate(_uncertain_list) if i not in _to_remove
+                        ]
+                        st.rerun()
 
             # ── خيارات الإرسال الذكي ─────────────────────────────
             _conf_opts = {"🟢 مؤكدة فقط": "green", "🟡 محتملة": "yellow", "🔵 الكل": ""}
@@ -3647,6 +3876,71 @@ elif page == "🔍 منتجات مفقودة":
 
             st.caption(f"{len(filtered)} منتج — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
+            # ── 🤖 فحص المكررات (الموزّع الذكي) ───────────────────────────
+            with st.expander("🤖 فحص المكررات بالذكاء الاصطناعي", expanded=False):
+                st.caption(
+                    "يفحص المنتجات المفقودة عبر 3 طبقات (مفتاح ثابت + تشابه ضبابي + تحقق AI). "
+                    "كل منتج يُؤكَّد كمكرر يُرحَّل تلقائياً إلى « ⚠️ تحت المراجعة » مع سجل تدقيق كامل."
+                )
+                if st.button("🔁 ابدأ فحص المكررات", key="miss_dup_scan", type="primary"):
+                    try:
+                        from engines.duplicate_detector import detect as _dup_detect
+                        from engines.smart_router import ingest_product as _smart_ingest
+                        from utils.product_key import make_product_key as _mk_key
+                        # كتالوج البحث = كل صفوف التحليل (المنتج عندنا)
+                        _adf = st.session_state.get("analysis_df")
+                        _catalog = []
+                        if _adf is not None and not _adf.empty and "المنتج" in _adf.columns:
+                            for _, _r in _adf.iterrows():
+                                _catalog.append({
+                                    "name":  str(_r.get("المنتج", "")),
+                                    "store": "mahwous",
+                                    "url":   "",
+                                })
+                        _existing = set()
+                        _moved = 0; _kept = 0; _errs = 0
+                        with st.spinner("🤖 جاري الفحص…"):
+                            for _i, _row in filtered.iterrows():
+                                try:
+                                    _nm  = str(_row.get("منتج_المنافس", ""))
+                                    _cmp = str(_row.get("المنافس", ""))
+                                    _url = competitor_product_url_from_row(_row) or ""
+                                    _key = _mk_key(_nm, _cmp, _url)
+                                    _verdict = _dup_detect(
+                                        {"name": _nm, "store": _cmp, "url": _url},
+                                        _catalog, existing_keys=_existing,
+                                    )
+                                    _existing.add(_key)
+                                    # سجّل في الموزّع الذكي (مصدر الحقيقة الموحّد)
+                                    _smart_ingest(
+                                        {"name": _nm, "store": _cmp, "url": _url,
+                                         "price": safe_float(_row.get("سعر_المنافس", 0))},
+                                        _catalog, existing_keys=_existing,
+                                        decided_by="duplicate_scan",
+                                    )
+                                    if _verdict.decision == "DUPLICATE":
+                                        # رحّل المكرر إلى « تحت المراجعة »
+                                        _hk = f"missing_{_nm}_{_i}"
+                                        st.session_state.hidden_products.add(_hk)
+                                        save_hidden_product(_hk, _nm, "moved_to_review_duplicate")
+                                        log_decision(_nm, "missing", "review",
+                                                     f"مكرر ({_verdict.confidence:.0f}%): {_verdict.reason}",
+                                                     0, safe_float(_row.get("سعر_المنافس", 0)),
+                                                     0, _cmp)
+                                        _moved += 1
+                                    else:
+                                        _kept += 1
+                                except Exception:
+                                    _errs += 1
+                        st.success(
+                            f"✅ تم الفحص: {_moved} منتج رُحّل إلى « تحت المراجعة » | "
+                            f"{_kept} منتج بقي في المفقودة | أخطاء: {_errs}"
+                        )
+                        if _moved > 0:
+                            st.rerun()
+                    except Exception as _e_dup:
+                        st.error(f"❌ تعذّر الفحص: {_e_dup}")
+
             # ── عرض المنتجات ──────────────────────────────────────────────
             PAGE_SIZE = 20
             total_p = len(filtered)
@@ -3676,7 +3970,13 @@ elif page == "🔍 منتجات مفقودة":
                 price           = safe_float(row.get("سعر_المنافس", 0))
                 brand           = str(row.get("الماركة", ""))
                 comp            = str(row.get("المنافس", ""))
-                size            = str(row.get("الحجم", ""))
+                size            = str(row.get("الحجم", "") or "").strip()
+                # Fallback: استخراج الحجم من اسم المنتج إن لم يوجد
+                if not size or size.lower() in ("nan", "none"):
+                    import re as _re_size
+                    _name_for_size = str(row.get("منتج_المنافس", "") or row.get("المنتج", "") or name)
+                    _m_size = _re_size.search(r"(\d{1,4})\s*(?:مل|ملي|ml|ML|mL)\b", _name_for_size)
+                    size = f"{_m_size.group(1)} مل" if _m_size else ""
                 ptype           = str(row.get("النوع", ""))
                 _comp_show = _humanize_competitor_upload(comp)
                 _title_display = _display_name_for_missing_row(row)
@@ -3801,8 +4101,84 @@ elif page == "🔍 منتجات مفقودة":
                     ), unsafe_allow_html=True)
 
                 # ── إجراءات مختصرة على البطاقة ───────────────────────────
-                a4 = st.columns(1)[0]
-                with a4:
+                a_quick, a_enrich, a_ign = st.columns(3)
+                _miss_url_card = _miss_comp_url if _miss_comp_url else ""
+                _send_price = max(int(round(price - 1)), 1) if price > 0 else 0
+
+                with a_quick:
+                    if st.button("⚡ إرسال سريع", key=f"qs_{idx}",
+                                 use_container_width=True,
+                                 help="إرسال فوري لـ Make (اسم + سعر + صورة) بدون إثراء AI"):
+                        if _send_price <= 0 or not nm_ai.strip():
+                            st.error("❌ بيانات ناقصة: تأكد من السعر والاسم")
+                        else:
+                            _payload = {
+                                "name": nm_ai,
+                                "price": _send_price,
+                                "image_url": _miss_img or "",
+                                "sku": _miss_pid,
+                                "section": "missing",
+                                "comp_name": name,
+                                "competitor": comp,
+                                "brand": brand,
+                            }
+                            with st.spinner("جاري الإرسال..."):
+                                _r = send_missing_products([_payload])
+                            if _r.get("sent", 0) > 0:
+                                st.success(f"✅ تم إرسال «{nm_ai[:40]}» إلى Make")
+                                _pk = f"miss_{name[:30]}_{comp}"
+                                save_processed(_pk, nm_ai, comp, "send_missing_single",
+                                               new_price=_send_price, comp_url=_miss_url_card)
+                                if _miss_url_card:
+                                    _track_processed_missing_url(_miss_url_card)
+                                st.session_state.hidden_products.add(f"missing_{name}_{idx}")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ فشل الإرسال: {_r.get('message', 'خطأ غير معروف')}")
+
+                with a_enrich:
+                    if st.button("🤖 إثراء + إرسال", key=f"en_{idx}",
+                                 use_container_width=True,
+                                 help="يولّد الوصف والماركة بـ AI ثم يرسل (~10 ثواني)"):
+                        if _send_price <= 0 or not nm_ai.strip():
+                            st.error("❌ بيانات ناقصة: تأكد من السعر والاسم")
+                        else:
+                            with st.spinner("🤖 إثراء + إرسال..."):
+                                try:
+                                    _frag = fetch_fragrantica_info(nm_ai) or {}
+                                    _html = generate_mahwous_description(
+                                        product_name=nm_ai,
+                                        price=price,
+                                        fragrantica_data=_frag if _frag.get("success") else None,
+                                    )
+                                except Exception as _e_enrich:
+                                    _html = ""
+                                    st.warning(f"⚠️ تعذّر الإثراء، سيُرسل بدون وصف: {_e_enrich}")
+                                _payload = {
+                                    "name": nm_ai,
+                                    "price": _send_price,
+                                    "image_url": _miss_img or "",
+                                    "sku": _miss_pid,
+                                    "الوصف": _html or "",
+                                    "section": "missing",
+                                    "comp_name": name,
+                                    "competitor": comp,
+                                    "brand": brand,
+                                }
+                                _r = send_missing_products([_payload])
+                            if _r.get("sent", 0) > 0:
+                                st.success(f"✅ تم إثراء وإرسال «{nm_ai[:40]}»")
+                                _pk = f"miss_{name[:30]}_{comp}"
+                                save_processed(_pk, nm_ai, comp, "send_missing_enriched",
+                                               new_price=_send_price, comp_url=_miss_url_card)
+                                if _miss_url_card:
+                                    _track_processed_missing_url(_miss_url_card)
+                                st.session_state.hidden_products.add(f"missing_{name}_{idx}")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ فشل الإرسال: {_r.get('message', 'خطأ غير معروف')}")
+
+                with a_ign:
                     if st.button("🗑️ تجاهل", key=f"ign_{idx}", use_container_width=True):
                         log_decision(nm_ai,"missing","ignored","تجاهل",0,price,-price,comp)
                         _ign = f"missing_{name}_{idx}"
@@ -3843,6 +4219,27 @@ elif page == "⚪ مستبعد (لا يوجد تطابق)":
 elif page == "⚠️ تحت المراجعة":
     st.header("⚠️ منتجات تحت المراجعة — مطابقة غير مؤكدة")
     db_log("review", "view")
+
+    # ── 📊 لوحة صحة المنظومة + شبكة الأمان (24 ساعة) ───────────────
+    with st.expander("📊 صحة المنظومة الذكية", expanded=False):
+        try:
+            from utils.db_manager import state_health_counts, stale_products
+            from engines.smart_router import safety_sweep
+            _h = state_health_counts() or {}
+            _c1, _c2, _c3, _c4, _c5 = st.columns(5)
+            _c1.metric("✅ مطابق",   _h.get("MATCHED", 0))
+            _c2.metric("🔍 مفقود",  _h.get("MISSING", 0))
+            _c3.metric("⚠️ مراجعة",  _h.get("REVIEW", 0))
+            _c4.metric("♻️ مكرر",   _h.get("DUPLICATE", 0))
+            _c5.metric("🔔 انتباه", _h.get("NEEDS_ATTENTION", 0))
+            _stuck = len(stale_products(hours=24, status="MISSING")) + \
+                     len(stale_products(hours=24, status="NEW"))
+            st.caption(f"⏳ {_stuck} منتج ثابت > 24 ساعة بلا قرار")
+            if st.button("🛡️ تشغيل شبكة الأمان (نقل الثابت > 24 ساعة)", key="safety_sweep_btn"):
+                _moved_sn = safety_sweep(hours=24)
+                st.success(f"✅ شبكة الأمان: {_moved_sn} منتج نُقل إلى « 🔔 يحتاج انتباه »")
+        except Exception as _e_health:
+            st.caption(f"(لوحة الصحة غير متاحة: {_e_health})")
 
     if st.session_state.results and "review" in st.session_state.results:
         df = st.session_state.results["review"]
@@ -4035,6 +4432,50 @@ elif page == "⚠️ تحت المراجعة":
                                        old_price=our_price,
                                        notes="تجاهل من تحت المراجعة")
                         st.rerun()
+
+                # ── صف ثانٍ: إعادة تحليل + تراجع (الموزّع الذكي) ─────────
+                bg, bh = st.columns(2)
+                with bg:
+                    if st.button("🔁 إعادة تحليل", key=f"rv_reanalyze_{idx}",
+                                 use_container_width=True,
+                                 help="يعيد تشغيل المحرك الذكي ويوزّع المنتج إلى البطاقة الصحيحة"):
+                        try:
+                            from engines.duplicate_detector import detect as _d_detect
+                            from engines.smart_router import reroute_after_reanalysis as _d_reroute
+                            from utils.product_key import make_product_key as _d_key
+                            _adf2 = st.session_state.get("analysis_df")
+                            _cat2 = []
+                            if _adf2 is not None and not _adf2.empty and "المنتج" in _adf2.columns:
+                                for _, _rr2 in _adf2.iterrows():
+                                    _cat2.append({"name": str(_rr2.get("المنتج","")), "store":"mahwous","url":""})
+                            _pk2 = _d_key(comp_name, comp_name_s, "")
+                            _v2 = _d_detect({"name": comp_name, "store": comp_name_s, "url":""}, _cat2)
+                            _d_reroute(_pk2, _v2, decided_by="reanalysis_button")
+                            _target_label = {
+                                "MATCHED":"✅ مطابق", "REVIEW":"⚠️ تحت المراجعة",
+                                "MISSING":"🔍 مفقود", "DUPLICATE":"♻️ مكرر → تحت المراجعة",
+                            }.get(_v2.decision, _v2.decision)
+                            st.success(f"🔁 إعادة التحليل: {_target_label} ({_v2.confidence:.0f}%) — {_v2.reason}")
+                            log_decision(our_name,"review", _v2.decision.lower(),
+                                         f"إعادة تحليل: {_v2.reason}",
+                                         our_price, comp_price, diff, comp_name_s)
+                        except Exception as _e_re:
+                            st.error(f"❌ تعذّرت إعادة التحليل: {_e_re}")
+                with bh:
+                    if st.button("↩️ تراجع", key=f"rv_undo_{idx}",
+                                 use_container_width=True,
+                                 help="يُلغي آخر قرار على هذا المنتج"):
+                        try:
+                            from utils.db_manager import undo_last_transition as _undo
+                            from utils.product_key import make_product_key as _d_key2
+                            _pk3 = _d_key2(comp_name, comp_name_s, "")
+                            _prev = _undo(_pk3, decided_by="user_undo")
+                            if _prev:
+                                st.success(f"↩️ تم التراجع — الحالة الحالية: {_prev}")
+                            else:
+                                st.info("لا يوجد قرار سابق للتراجع عنه")
+                        except Exception as _e_un:
+                            st.error(f"❌ تعذّر التراجع: {_e_un}")
 
                 st.markdown('<hr style="border:none;border-top:1px solid #0d1a2e;margin:6px 0">',
                             unsafe_allow_html=True)
@@ -4283,35 +4724,204 @@ elif page == "⚡ أتمتة Make":
             sec_type = section_type_map[sec_key]
             df_s     = st.session_state.results.get(sec_key, pd.DataFrame())
 
+            # ═══════════════════════════════════════════════════════════════
+            # قسم المفقودات — نظام إدارة سلة الذكي
+            # ═══════════════════════════════════════════════════════════════
+            if sec_type == "missing":
+                try:
+                    from utils.missing_queue_manager import (
+                        enqueue_missing_products, get_queue_stats,
+                        get_ready_products, get_pending_brands,
+                        get_failed_products, get_waiting_products,
+                        update_brand_catalog_from_file, update_category_catalog_from_file,
+                        mark_products_sent, retry_failed_products,
+                        mark_brand_uploaded, export_missing_brands_csv,
+                        export_ready_products_salla_csv,
+                        BRANDS_QUEUE_FILE, PRODUCTS_QUEUE_FILE,
+                    )
+                    _qmgr_ok = True
+                except ImportError:
+                    _qmgr_ok = False
+                    st.warning("⚠️ تعذّر تحميل نظام الطابور — تحقق من utils/missing_queue_manager.py")
+
+                if _qmgr_ok:
+                    st.markdown("---")
+                    st.markdown("### 🛒 إدارة سلة الذكية — المنتجات المفقودة")
+
+                    # ── أضف نتائج التحليل الحالي للطابور ────────────────────
+                    if not df_s.empty:
+                        _products_for_queue = export_to_make_format(df_s, "missing")
+                        if st.button("➕ أضف نتائج التحليل الحالية للطابور", key="enqueue_btn"):
+                            _eq = enqueue_missing_products(_products_for_queue)
+                            st.success(_eq["message"])
+                            st.rerun()
+
+                    # ── إحصاءات الطابور ──────────────────────────────────────
+                    _stats = get_queue_stats()
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("⏳ بانتظار ماركة", _stats["waiting_brand"])
+                    c2.metric("✅ جاهز للإرسال",  _stats["ready_to_send"])
+                    c3.metric("📤 أُرسل بنجاح",   _stats["sent_success"])
+                    c4.metric("❌ فشل الإرسال",   _stats["sent_failed"])
+
+                    st.markdown("---")
+
+                    # ══════════════════════════════════════════════════════
+                    # 1️⃣ تحديث كتالوج الماركات
+                    # ══════════════════════════════════════════════════════
+                    with st.expander(f"1️⃣ تحديث كتالوج الماركات — {_stats.get('brands_pending',0)} ماركة مفقودة", expanded=_stats.get('brands_pending',0) > 0):
+                        st.caption("ارفع ملف «ماركات مهووس.csv» المحدث بعد إضافة الماركات الجديدة في سلة")
+                        _brand_file = st.file_uploader("📂 ارفع ماركات مهووس.csv", type=["csv","xlsx"], key="brand_catalog_upload")
+                        if _brand_file:
+                            try:
+                                _bdf = pd.read_csv(_brand_file) if _brand_file.name.endswith(".csv") else pd.read_excel(_brand_file)
+                                _bres = update_brand_catalog_from_file(_bdf)
+                                if _bres["success"]:
+                                    st.success(_bres["message"])
+                                    if _bres.get("upgraded_products", 0) > 0:
+                                        st.info(f"🔓 {_bres['upgraded_products']} منتج انتقل إلى «جاهز للإرسال»")
+                                    st.rerun()
+                                else:
+                                    st.error(_bres["message"])
+                            except Exception as _be:
+                                st.error(f"❌ خطأ في قراءة الملف: {_be}")
+
+                    # ══════════════════════════════════════════════════════
+                    # 2️⃣ الماركات المفقودة — تصدير إجباري قبل الإرسال
+                    # ══════════════════════════════════════════════════════
+                    _pending_brands = get_pending_brands()
+                    with st.expander(f"2️⃣ الماركات المفقودة 🏷️ ({len(_pending_brands)} ماركة تنتظر الرفع)", expanded=len(_pending_brands) > 0):
+                        if _pending_brands:
+                            st.warning("⚠️ يجب رفع هذه الماركات يدوياً في سلة قبل إرسال منتجاتها")
+                            _bq_df = pd.DataFrame(_pending_brands)[["brand_name","discovered_at"]]
+                            _bq_df.columns = ["اسم الماركة", "تاريخ الاكتشاف"]
+                            st.dataframe(_bq_df, use_container_width=True, hide_index=True)
+
+                            _brands_export_path = str(BRANDS_QUEUE_FILE.parent / "missing_brands_export.csv")
+                            if st.button("⬇️ تصدير ملف الماركات المفقودة (صيغة سلة)", key="export_brands_btn", type="primary"):
+                                _bexp = export_missing_brands_csv(_brands_export_path)
+                                if _bexp["success"]:
+                                    with open(_brands_export_path, "rb") as _f:
+                                        st.download_button(
+                                            label=f"💾 تحميل {_bexp['count']} ماركة مفقودة",
+                                            data=_f.read(),
+                                            file_name="missing_brands_salla.csv",
+                                            mime="text/csv",
+                                            key="download_brands_csv",
+                                        )
+                                    st.success(_bexp["message"])
+                                else:
+                                    st.error(_bexp["message"])
+
+                            st.caption("بعد الرفع في سلة، حدد الماركات المرفوعة:")
+                            for _pb in _pending_brands[:20]:
+                                _pb_col1, _pb_col2 = st.columns([4, 1])
+                                _pb_col1.write(_pb["brand_name"])
+                                if _pb_col2.button("✅ مرفوعة", key=f"uploaded_brand_{_pb['brand_key']}"):
+                                    mark_brand_uploaded(_pb["brand_key"])
+                                    st.success(f"✅ تم تعليم «{_pb['brand_name']}» كمرفوعة — منتجاتها جاهزة الآن")
+                                    st.rerun()
+                        else:
+                            st.success("✅ كل الماركات متوفرة في المتجر — لا شيء مفقود")
+
+                    # ══════════════════════════════════════════════════════
+                    # 3️⃣ المنتجات الجاهزة للإرسال
+                    # ══════════════════════════════════════════════════════
+                    _ready_products = get_ready_products()
+                    with st.expander(f"3️⃣ المنتجات الجاهزة للإرسال 📦 ({len(_ready_products)} منتج)", expanded=len(_ready_products) > 0):
+                        if _ready_products:
+                            _rp_df = pd.DataFrame(_ready_products)[["product_name","brand_name","price","category_name"]]
+                            _rp_df.columns = ["المنتج","الماركة","السعر","التصنيف"]
+                            st.dataframe(_rp_df.head(50), use_container_width=True, hide_index=True)
+
+                            _rc1, _rc2 = st.columns(2)
+
+                            # إرسال عبر Make
+                            if _rc1.button("📤 إرسال عبر Make", key="send_ready_make", type="primary",
+                                           disabled=len(_pending_brands) > 0):
+                                if _pending_brands:
+                                    st.error("⛔ أرفع الماركات المفقودة أولاً قبل الإرسال")
+                                else:
+                                    _pkeys = [p["product_key"] for p in _ready_products]
+                                    _res = send_missing_products(_ready_products)
+                                    mark_products_sent(_pkeys, _res.get("success", False), _res.get("message",""))
+                                    if _res.get("success"):
+                                        st.success(_res["message"])
+                                    else:
+                                        st.error(_res["message"])
+                                    st.rerun()
+
+                            # تصدير CSV سلة
+                            if _rc2.button("⬇️ تصدير CSV سلة (رفع يدوي)", key="export_ready_csv"):
+                                _prod_export_path = str(PRODUCTS_QUEUE_FILE.parent / "ready_products_salla.csv")
+                                _pexp = export_ready_products_salla_csv(_prod_export_path)
+                                if _pexp["success"]:
+                                    with open(_prod_export_path, "rb") as _f:
+                                        st.download_button(
+                                            label=f"💾 تحميل {_pexp['count']} منتج (صيغة سلة)",
+                                            data=_f.read(),
+                                            file_name="ready_products_salla.csv",
+                                            mime="text/csv",
+                                            key="download_products_csv",
+                                        )
+                                    st.success(_pexp["message"])
+                                else:
+                                    st.error(_pexp["message"])
+
+                            if _pending_brands:
+                                st.warning(f"⛔ زر الإرسال معطّل — أرفع {len(_pending_brands)} ماركة مفقودة أولاً")
+                        else:
+                            st.info("لا توجد منتجات جاهزة حالياً")
+
+                    # ══════════════════════════════════════════════════════
+                    # 4️⃣ سجل الطابور الكامل
+                    # ══════════════════════════════════════════════════════
+                    with st.expander("4️⃣ سجل الطابور الكامل 📋"):
+                        _waiting = get_waiting_products()
+                        _failed  = get_failed_products()
+
+                        if _waiting:
+                            st.markdown(f"**⏳ بانتظار ماركات: {len(_waiting)} منتج**")
+                            _wdf = pd.DataFrame(_waiting)[["product_name","brand_name","discovered_at"]]
+                            _wdf.columns = ["المنتج","الماركة","تاريخ الاكتشاف"]
+                            st.dataframe(_wdf.head(100), use_container_width=True, hide_index=True)
+
+                        if _failed:
+                            st.markdown(f"**❌ فشل الإرسال: {len(_failed)} منتج**")
+                            _fdf = pd.DataFrame(_failed)[["product_name","brand_name","error_msg","sent_at"]]
+                            _fdf.columns = ["المنتج","الماركة","سبب الفشل","وقت المحاولة"]
+                            st.dataframe(_fdf, use_container_width=True, hide_index=True)
+                            if st.button("🔄 إعادة محاولة الفاشلة", key="retry_failed_btn"):
+                                _rc = retry_failed_products()
+                                st.success(f"✅ أُعيد تعيين {_rc} منتج إلى «جاهز للإرسال»")
+                                st.rerun()
+
+                        if not _waiting and not _failed:
+                            st.success("✅ الطابور نظيف — لا منتجات متعطلة")
+
+                    st.markdown("---")
+
+            # ═══════════════════════════════════════════════════════════════
+            # باقي الأقسام (غير المفقودات) — الإرسال المباشر
+            # ═══════════════════════════════════════════════════════════════
             if not df_s.empty:
-                # معاينة ما سيُرسل
-                _prev_cols = ["المنتج","السعر","سعر_المنافس","الماركة"]
-                _prev_cols = [c for c in _prev_cols if c in df_s.columns]
-                if _prev_cols:
-                    st.dataframe(df_s[_prev_cols].head(10), use_container_width=True)
+                if sec_type != "missing":
+                    # معاينة ما سيُرسل
+                    _prev_cols = ["المنتج","السعر","سعر_المنافس","الماركة"]
+                    _prev_cols = [c for c in _prev_cols if c in df_s.columns]
+                    if _prev_cols:
+                        st.dataframe(df_s[_prev_cols].head(10), use_container_width=True)
 
-                products = export_to_make_format(df_s, sec_type)
-                _sendable = [p for p in products if p.get("name") and p.get("price",0) > 0]
-                st.info(f"سيتم إرسال {len(_sendable)} منتج → Make (Payload: product_id + name + price)")
+                    products = export_to_make_format(df_s, sec_type)
+                    _sendable = [p for p in products if p.get("name") and p.get("price",0) > 0]
+                    st.info(f"سيتم إرسال {len(_sendable)} منتج → Make")
 
-                if st.button("📤 إرسال الآن", type="primary"):
-                    if sec_type == "missing":
-                        res = send_missing_products(_sendable)
-                    else:
+                    if st.button("📤 إرسال الآن", type="primary"):
                         res = send_price_updates(_sendable)
-                    # FIX: Missing Products Display Recovery
-                    if sec_type == "missing" and res.get("success"):
-                        _missing_link_col = None
-                        for _c in ["رابط_المنافس", "الرابط", "رابط المنتج", "url", "رابط", "Link"]:
-                            if _c in df_s.columns:
-                                _missing_link_col = _c
-                                break
-                        if _missing_link_col:
-                            for _u in df_s[_missing_link_col].dropna().astype(str):
-                                _track_processed_missing_url(_u)
-                    st.success(res["message"]) if res["success"] else st.error(res["message"])
+                        st.success(res["message"]) if res["success"] else st.error(res["message"])
             else:
-                st.info("لا توجد بيانات في هذا القسم")
+                if sec_type != "missing":
+                    st.info("لا توجد بيانات في هذا القسم")
 
     with tab3:
         pending = st.session_state.decisions_pending
@@ -4371,6 +4981,132 @@ elif page == "🕷️ كشط المنافسين":
 
     st.header("🕷️ كشط بيانات المنافسين")
     db_log("scraper", "view")
+
+    # ════════════════════════════════════════════════════════════════════════
+    #  🚀 التحديث الذكي عبر Sitemap (تزايدي — يكشط فقط ما تغيّر)
+    # ════════════════════════════════════════════════════════════════════════
+    with st.expander("🚀 تحديث ذكي عبر Sitemap (موصى به)", expanded=True):
+        st.caption(
+            "يجلب أحدث Sitemap من كل متجر منافس، ويكشط فقط المنتجات الجديدة أو التي تغيّر تاريخ تعديلها (lastmod) "
+            "منذ آخر تشغيل — أسرع 5×–10× من الكشط الكامل، وأقل ضغطاً، وأقل تعرضاً للحظر."
+        )
+        from utils import sitemap_cache as _smc
+        _stat_rows = _smc.status_all()
+        _DATA_SM = _os_scraper.environ.get("DATA_DIR", "data")
+        _sm_prog_path = _os_scraper.path.join(_DATA_SM, "sitemap_auto_progress.json")
+        _sm_pid_path  = _os_scraper.path.join(_DATA_SM, "sitemap_auto.pid")
+
+        # حالة الكاش
+        if _stat_rows:
+            import datetime as _dt_smc
+            _total_urls = sum(r["urls_count"] for r in _stat_rows)
+            _last_ts = max((r["fetched_at"] for r in _stat_rows), default=0)
+            _last_str = _dt_smc.datetime.fromtimestamp(_last_ts).strftime("%Y-%m-%d %H:%M") if _last_ts else "—"
+            cA, cB, cC = st.columns(3)
+            cA.metric("🗂️ متاجر مكشوطة سابقاً", f"{len(_stat_rows)}")
+            cB.metric("🔗 روابط منتجات محفوظة", f"{_total_urls:,}")
+            cC.metric("🕒 آخر تحديث", _last_str)
+        else:
+            st.info("لم يتم تشغيل التحديث الذكي بعد — سيتم كشط جميع المنتجات في المرة الأولى.")
+
+        # حالة العملية الجارية
+        _sm_prog = {}
+        if _os_scraper.path.exists(_sm_prog_path):
+            try:
+                with open(_sm_prog_path, "r", encoding="utf-8") as _f:
+                    _sm_prog = _json_sc.load(_f)
+            except Exception:
+                _sm_prog = {}
+        _sm_running = bool(_sm_prog.get("running", False))
+
+        # تحقق من الـPID
+        _sm_pid = 0
+        if _os_scraper.path.exists(_sm_pid_path):
+            try:
+                with open(_sm_pid_path, "r", encoding="utf-8") as _f:
+                    _sm_pid = int((_f.read() or "0").strip() or 0)
+            except Exception:
+                _sm_pid = 0
+        if _sm_pid and _sm_running:
+            try:
+                _os_scraper.kill(_sm_pid, 0)
+                _alive = True
+            except Exception:
+                _alive = False
+            if not _alive:
+                _sm_running = False
+                _sm_prog["running"] = False
+
+        col1, col2 = st.columns(2)
+        with col1:
+            _btn_inc = st.button(
+                "🔄 تحديث ذكي (تزايدي)",
+                type="primary",
+                use_container_width=True,
+                disabled=_sm_running,
+                key="sm_btn_inc",
+            )
+        with col2:
+            _btn_full = st.button(
+                "🔁 كشط كامل (تجاهل الكاش)",
+                use_container_width=True,
+                disabled=_sm_running,
+                key="sm_btn_full",
+            )
+
+        if _btn_inc or _btn_full:
+            try:
+                _cmd = [_sys_sc.executable, "sitemap_automation.py"]
+                if _btn_full:
+                    _cmd.append("--full")
+                _os_scraper.makedirs(_DATA_SM, exist_ok=True)
+                _log_path = _os_scraper.path.join(_DATA_SM, "sitemap_auto.log")
+                with open(_log_path, "ab") as _lf:
+                    _proc = subprocess.Popen(
+                        _cmd, stdout=_lf, stderr=subprocess.STDOUT,
+                        cwd=_os_scraper.getcwd(),
+                    )
+                with open(_sm_pid_path, "w", encoding="utf-8") as _pf:
+                    _pf.write(str(_proc.pid))
+                st.success(f"✅ بدأ التشغيل (PID={_proc.pid}). تابع التقدم أدناه.")
+                import time as _t_sc
+                _t_sc.sleep(1)
+                st.rerun()
+            except Exception as _e:
+                st.error(f"❌ فشل التشغيل: {_e}")
+
+        # شريط التقدم الحي
+        if _sm_prog:
+            _phase = str(_sm_prog.get("phase", ""))
+            if _sm_running:
+                st.markdown("### 📊 حالة التشغيل الحالية")
+                _ts = _sm_prog.get("total_stores", 0) or 1
+                _si = _sm_prog.get("store_index", 0)
+                st.progress(min(_si / _ts, 1.0), text=f"المتجر {_si}/{_ts}: {_sm_prog.get('current_store', '...')}")
+                _pd = _sm_prog.get("products_done", 0)
+                _pt = _sm_prog.get("products_total", 0) or 1
+                st.progress(min(_pd / _pt, 1.0), text=f"منتجات هذا المتجر: {_pd}/{_pt} (نجح: {_sm_prog.get('successful', 0)})")
+                st.caption(f"البدء: {_sm_prog.get('started_at', '')} • وضع: {'تزايدي' if _sm_prog.get('incremental') else 'كامل'}")
+                # auto-refresh
+                import time as _t_sc2
+                _t_sc2.sleep(2)
+                st.rerun()
+            elif _phase == "completed":
+                st.success(
+                    f"✅ اكتمل بنجاح — {_sm_prog.get('products_done', 0):,} منتج عبر "
+                    f"{_sm_prog.get('total_stores', 0)} متجر • انتهى: {_sm_prog.get('finished_at', '')}"
+                )
+                _tps = _sm_prog.get("totals_per_store") or {}
+                if _tps:
+                    st.dataframe(
+                        [{"المتجر": k, "منتجات محدّثة": v} for k, v in _tps.items()],
+                        use_container_width=True, hide_index=True,
+                    )
+            elif _phase == "error":
+                st.error(f"❌ {_sm_prog.get('message', 'فشل التشغيل')}")
+
+        st.markdown("---")
+        st.caption("⬇️ أو استخدم الكاشط القديم الكامل (Playwright/v30):")
 
     # ─── ثوابت المسارات ──────────────────────────────────────────────────────
     _SCRAPER_SCRIPT   = _os_scraper.path.join("scrapers", "async_scraper.py")
@@ -4718,7 +5454,8 @@ elif page == "🕷️ كشط المنافسين":
                 0 if st.session_state.get("sc_all_products", True)
                 else int(st.session_state.get("sc_max_prod", 0) or 0)
             )
-            concurrency = int(st.session_state.get("sc_concurrency", 8))
+            concurrency = int(st.session_state.get("sc_concurrency", 3))
+            concurrency = max(1, min(concurrency, 4))  # auto-clamp to 2-4 safe range
 
             log_fh = open(_LOG_FILE, "w", encoding="utf-8")
             # Parallelism: run every registered competitor at the same time.
@@ -4868,10 +5605,10 @@ elif page == "🕷️ كشط المنافسين":
         with _sc_c3:
             st.number_input(
                 "طلبات متزامنة",
-                2, 30, 8,
+                1, 8, 3,
                 step=1,
                 key="sc_concurrency",
-                help="زيادة الرقم = أسرع لكن احتمال حظر أكبر. موصى به: 6–10",
+                help="تلقائي 2–4 لتجنّب 403 من Cloudflare. لا تتخطَّ 4 إلا إذا كان عندك بروكسيات.",
                 disabled=_is_alive,
             )
 
@@ -4941,7 +5678,8 @@ elif page == "🕷️ كشط المنافسين":
                     0 if st.session_state.get("sc_all_products", True)
                     else int(st.session_state.get("sc_max_prod", 0) or 0)
                 )
-                _cc = int(st.session_state.get("sc_concurrency", 8))
+                _cc = int(st.session_state.get("sc_concurrency", 3))
+                _cc = max(1, min(_cc, 4))  # auto-clamp to 2-4 safe range
                 try:
                     ok = _trigger_now(max_products=_mp, concurrency=_cc)
                     if ok:
@@ -5032,7 +5770,9 @@ elif page == "🕷️ كشط المنافسين":
         "retrying":    ("⏳ إعادة محاولة (backoff)...", "#2a1a00", "#FFA000"),
         "stale":       ("⚠️ يبدو معلقاً — يجري التحقق (5+ دق بدون تحديث)", "#2a1800", "#FF6F00"),
         "completed":   ("✅ اكتمل بنجاح",              "#0a2a0a", "#00C853"),
-        "failed":      ("❌ فشل",                      "#2a0a0a", "#EF5350"),
+        "partial":     ("⚠️ اكتمل جزئياً (أخطاء مرتفعة)", "#2a1800", "#FF9800"),
+        "failed":      ("❌ فشل — لم تُحفظ منتجات",    "#2a0a0a", "#EF5350"),
+        "timeout":     ("⏰ انتهت المهلة",             "#2a1800", "#FF6F00"),
         "stopped":     ("⏹️ موقوف",                   "#1a1a1a", "#9e9e9e"),
     }
     _plabel, _pbg, _pcolor = _PHASE_META.get(_phase, ("◻️ غير معروف", "#111", "#666"))
@@ -5051,6 +5791,39 @@ elif page == "🕷️ كشط المنافسين":
     _stores_res  = dict(_prog.get("stores_results") or {})
     _finished    = str(_prog.get("finished_at", ""))
     _started     = str(_prog.get("started_at", ""))
+
+    # ── توحيد عداد المنتجات مع تفاصيل المتاجر (منع تعارض KPI) ────────────
+    try:
+        _state_map_top = _load_scraper_state_map()
+    except Exception:
+        _state_map_top = {}
+    try:
+        _csv_counts_top = _load_csv_rows_by_store(_OUTPUT_CSV)
+    except Exception:
+        _csv_counts_top = {}
+    _sum_store_results = 0
+    try:
+        for _d_all in [ (s.replace("https://","").replace("http://","").rstrip("/").split("/")[0])
+                         for s in _load_stores() ]:
+            _cands = [
+                _stores_res.get(_d_all),
+                (_state_map_top.get(_d_all, {}) or {}).get("rows_saved"),
+                _read_live_store_progress(_d_all).get("rows_saved"),
+                _csv_counts_top.get(_d_all),
+            ]
+            _best = 0
+            for _c in _cands:
+                try:
+                    if _c is not None:
+                        _best = max(_best, int(_c))
+                except Exception:
+                    pass
+            _sum_store_results += _best
+    except Exception:
+        _sum_store_results = 0
+    # الرقم الموحّد: الأكبر من (CSV counter) و (مجموع تفاصيل المتاجر)
+    _rows_unified = max(_rows, _sum_store_results)
+    _rows = _rows_unified
 
     if not _os_scraper.path.exists(_PROGRESS_FILE) and not _is_alive:
         # لم يبدأ أي كشط بعد
@@ -5192,9 +5965,112 @@ elif page == "🕷️ كشط المنافسين":
                 unsafe_allow_html=True,
             )
 
+        # ── تشخيص: الفشل / الاكتمال الجزئي ───────────────────────────────
+        if (not _is_alive) and _phase in ("failed", "partial", "timeout") :
+            _urls_proc = int(_prog.get("urls_processed", 0) or 0)
+            _err_ratio = (_errors / max(_urls_proc, 1)) * 100 if _urls_proc else 100.0
+            # تجميع مؤشرات الحجب HTTP من stores_http_errors
+            _http_err_map = _prog.get("stores_http_errors") or {}
+            _sum_403 = 0
+            _sum_429 = 0
+            if isinstance(_http_err_map, dict):
+                for _v in _http_err_map.values():
+                    try:
+                        _sum_403 += int((_v or {}).get("403", 0) or 0)
+                        _sum_429 += int((_v or {}).get("429", 0) or 0)
+                    except Exception:
+                        pass
+
+            # ── Evidence-backed failure-class selection ───────────────────
+            # Trust persisted counters (urls_discovered/enqueued/attempted +
+            # skipped_reason histogram). Never claim "sitemap empty" unless
+            # urls_discovered == 0.
+            _discovered = int(_prog.get("urls_discovered", 0) or 0)
+            _enqueued   = int(_prog.get("urls_enqueued",   0) or 0)
+            _attempted  = int(_prog.get("urls_attempted",  0) or 0)
+            _skipmap    = _prog.get("urls_skipped_reason") or {}
+            if not isinstance(_skipmap, dict):
+                _skipmap = {}
+
+            _hints = []
+            # Class 1 — HTTP blocks dominate (Cloudflare / WAF / 429 rate-limit)
+            if _sum_403 > 0 or _sum_429 > 0:
+                _hints.append(
+                    f"🛡️ **حجب HTTP مرصود**: 403×{_sum_403} · 429×{_sum_429} — "
+                    "غالباً Cloudflare/Rate-Limit. قلّل «طلبات متزامنة» إلى 2–4 "
+                    "أو فعّل بروكسي عبر متغيرات البيئة `SCRAPER_PROXIES`."
+                )
+
+            # Class 2 — sitemap/discovery failure (truly no URLs found)
+            if _discovered == 0:
+                _sm_to  = int(_skipmap.get("sitemap_timeout", 0) or 0)
+                _sm_blk = int(_skipmap.get("sitemap_blocked", 0) or 0)
+                _sm_emp = int(_skipmap.get("empty_sitemap",   0) or 0)
+                if _sm_blk:
+                    _hints.append("🗺️ **Sitemap محجوب** — المضيف يرفض `/sitemap.xml` (WAF/403). جرّب بروكسي.")
+                elif _sm_to:
+                    _hints.append("🗺️ **انتهت مهلة Sitemap** — المضيف بطيء أو يعلق. أعد المحاولة لاحقاً.")
+                elif _sm_emp:
+                    _hints.append("🗺️ **Sitemap فارغ** — لم يُرجع أي روابط منتج، و `products.json` أيضاً فشل.")
+                else:
+                    _hints.append("🗺️ **لم تُكتشف روابط** — تعذّر حلّ أي مسار منتج لهذا المتجر.")
+
+            # Class 3 — discovered URLs but nothing was attempted (logic bug)
+            elif _attempted == 0:
+                _hints.append(
+                    f"🐛 **اكتُشف {_discovered:,} رابط لكن لم تُحاوَل معالجة أيّها** — "
+                    "خلل في قائمة الانتظار أو جميع الروابط قد تم تخطّيها."
+                )
+                if _skipmap:
+                    _top = ", ".join(f"{k}:{v}" for k, v in
+                                     sorted(_skipmap.items(), key=lambda x: -int(x[1] or 0))[:4])
+                    _hints.append(f"• أسباب التخطّي المرصودة: {_top}")
+
+            # Class 4 — attempted but 0 rows and 0 HTTP blocks and 0 exceptions
+            #          => parse-empty (JS-rendered / no Structured Data)
+            elif _rows == 0 and _errors == 0 and _sum_403 == 0 and _sum_429 == 0:
+                _hints.append(
+                    f"🧩 **{_attempted:,} محاولة دون استخراج** — الصفحات لا تحتوي "
+                    "JSON-LD/OpenGraph أو تستخدم تحميلاً ديناميكياً (JS). "
+                    "فعّل المستخرج الاحتياطي (AI last-resort)."
+                )
+
+            # Class 5 — exceptions dominate (network / parsing errors)
+            elif _rows == 0 and _errors > 0:
+                _hints.append(
+                    f"⏱️ **{_errors} خطأ شبكة/تحليل** على {_attempted:,} محاولة — "
+                    "تحقّق من التزامن ومهلة الطلب."
+                )
+
+            # Transparent evidence footer so the user sees raw counters
+            _hints.append(
+                f"📊 اكتُشف {_discovered:,} · أُدرج {_enqueued:,} · "
+                f"حُوول {_attempted:,} · حُفظ {_rows:,}"
+            )
+
+            if not _hints:
+                _hints.append("⏱️ سبب غير مصنّف — راجع السجلات.")
+
+            _head_color = "#EF5350" if _phase == "failed" else "#FF9800"
+            _head_icon  = "❌" if _phase == "failed" else ("⚠️" if _phase == "partial" else "⏰")
+            _head_txt = {
+                "failed":  f"{_head_icon} انتهى الكشط دون حفظ أي منتج",
+                "partial": f"{_head_icon} اكتمل جزئياً — {_rows:,} منتج محفوظ لكن نسبة الأخطاء عالية",
+                "timeout": f"{_head_icon} انتهت المهلة قبل اكتمال الكشط",
+            }[_phase]
+            st.markdown(
+                f"<div style='background:#2a0a0a;border:1px solid {_head_color};"
+                f"border-radius:8px;padding:10px 14px;color:{_head_color};"
+                f"font-weight:700;margin-bottom:6px'>{_head_txt} — "
+                f"{_errors} خطأ (≈ {_err_ratio:.0f}%)</div>",
+                unsafe_allow_html=True,
+            )
+            for _h in _hints:
+                st.markdown(f"- {_h}")
+
         # ── سجل الأخطاء ──────────────────────────────────────────────────
         if _last_err:
-            with st.expander("⚠️ آخر خطأ مسجل", expanded=False):
+            with st.expander(f"⚠️ آخر خطأ مسجل ({_errors} حادث)", expanded=False):
                 st.error(_last_err)
 
         # ── سجل stderr ───────────────────────────────────────────────────
@@ -5251,8 +6127,123 @@ elif page == "🕷️ كشط المنافسين":
             _col_rename = {"product_name": "المنتج", "competitor": "المنافس", "price": "السعر (ر.س)", "brand": "الماركة", "updated_at": "آخر تحديث"}
             _show_df = _local_prods_df[_display_cols].rename(columns=_col_rename) if _display_cols else _local_prods_df
             st.dataframe(_show_df, use_container_width=True, height=400, hide_index=True)
+
+            # ── 🧹 تنظيف الصفوف الفاسدة (اسم=ID + سعر=0) ───────────────
+            with st.expander("🧹 تنظيف البيانات الفاسدة", expanded=False):
+                st.caption(
+                    "يحذف الصفوف التي فشل كشطها: السعر = 0 والاسم على شكل ID "
+                    "(مثل « منتج P12345 » أو هاش عشوائي). آمن ولا يلمس البيانات الصحيحة."
+                )
+                if st.button("🗑️ احذف الصفوف الفاسدة الآن", key="btn_clean_corrupt",
+                             type="secondary", use_container_width=True):
+                    try:
+                        from utils.db_manager import get_db, trigger_gcs_sync
+                        _conn = get_db()
+                        _cur = _conn.cursor()
+                        _n_before = _cur.execute(
+                            "SELECT COUNT(*) FROM competitor_products_store"
+                        ).fetchone()[0]
+                        _cur.execute("""
+                            DELETE FROM competitor_products_store
+                            WHERE (price IS NULL OR price <= 0)
+                              AND (
+                                product_name LIKE 'منتج P%'
+                                OR product_name GLOB 'P[0-9]*'
+                                OR product_name GLOB 'P[A-Za-z0-9]*[Pp]ng'
+                                OR product_name GLOB 'P[A-Za-z0-9]*[Jj]pg'
+                                OR product_name GLOB 'منتج P[A-Za-z0-9]*[Pp]ng'
+                              )
+                        """)
+                        _deleted = _cur.rowcount
+                        _conn.commit()
+                        _n_after = _cur.execute(
+                            "SELECT COUNT(*) FROM competitor_products_store"
+                        ).fetchone()[0]
+                        _conn.close()
+                        try:
+                            trigger_gcs_sync(force=True)
+                        except Exception:
+                            pass
+                        st.success(
+                            f"✅ تم حذف {_deleted} صف فاسد | "
+                            f"قبل: {_n_before} → بعد: {_n_after}"
+                        )
+                        st.rerun()
+                    except Exception as _e_clean:
+                        st.error(f"❌ تعذّر التنظيف: {_e_clean}")
         else:
             st.info("لا توجد منتجات لهذا المنافس.")
+
+        # ── زر: إرسال المنتجات المكشوطة للتحليل ──────────────────────────
+        if st.button(
+            "📤 إرسال المنتجات المكشوطة للتحليل",
+            key="btn_send_scraped_to_analysis",
+            type="primary",
+            use_container_width=True,
+            help="ينقل كل المنتجات المكشوطة إلى لوحة التحكم للمقارنة والتحليل",
+        ):
+            try:
+                _full_df = get_competitor_products_df("")  # كل المنافسين
+                if _full_df is None or _full_df.empty:
+                    # fallback: CSV
+                    try:
+                        if _os_scraper.path.exists(_OUTPUT_CSV):
+                            _full_df = pd.read_csv(
+                                _OUTPUT_CSV, encoding="utf-8-sig", low_memory=False
+                            )
+                    except Exception:
+                        _full_df = None
+
+                if _full_df is None or _full_df.empty:
+                    st.warning("⚠️ لا توجد منتجات مكشوطة بعد — ابدأ الكشط أولاً.")
+                else:
+                    _rename_map = {
+                        "product_name": "المنتج", "name": "المنتج",
+                        "price":        "السعر",
+                        "image_url":    "صورة_المنافس",
+                        "product_url":  "رابط_المنافس",
+                        "brand":        "الماركة",
+                    }
+                    _df_norm = _full_df.rename(
+                        columns={k: v for k, v in _rename_map.items() if k in _full_df.columns}
+                    ).copy()
+
+                    # العمود الذي يُعرّف المنافس
+                    _comp_col = (
+                        "competitor" if "competitor" in _df_norm.columns
+                        else ("store" if "store" in _df_norm.columns else None)
+                    )
+
+                    _comp_dfs: dict = {}
+                    if _comp_col is None:
+                        _comp_dfs["كل المنتجات"] = _df_norm
+                    else:
+                        for _comp, _g in _df_norm.groupby(_comp_col):
+                            if not _comp or str(_comp).lower() == "nan":
+                                continue
+                            _gdf = _g.copy()
+                            _gdf["المنافس"]       = _comp
+                            _gdf["منتج_المنافس"] = _gdf.get("المنتج", "")
+                            _gdf["سعر_المنافس"]  = _gdf.get("السعر", 0)
+                            _comp_dfs[str(_comp)] = _gdf
+
+                    if not _comp_dfs:
+                        st.warning("⚠️ تعذر تجهيز البيانات للتحليل.")
+                    else:
+                        st.session_state["comp_dfs"]            = _comp_dfs
+                        st.session_state["_use_auto_scraper"]   = True
+                        st.session_state["_nav_pending"]        = "📊 لوحة التحكم"
+                        st.session_state["nav_flash"]           = (
+                            f"✅ أُرسل {len(_df_norm):,} منتج من "
+                            f"{len(_comp_dfs)} منافس للتحليل"
+                        )
+                        st.success(
+                            f"✅ تم تجهيز {len(_df_norm):,} منتج من "
+                            f"{len(_comp_dfs)} منافس — جاري الانتقال للوحة التحكم..."
+                        )
+                        st.rerun()
+            except Exception as _send_err:
+                st.error(f"❌ فشل الإرسال: {_send_err}")
     else:
         st.info("📭 قاعدة البيانات المحلية فارغة. ابدأ الكشط لجلب البيانات.")
 
@@ -5375,7 +6366,7 @@ elif page == "🕷️ كشط المنافسين":
 
     # ── Auto-Analysis Trigger (fires ONCE per completed scrape) ──────────
     if (
-        _phase == "completed"
+        _phase in ("completed", "partial")
         and not _is_alive
         and _rows > 0
         and _finished
@@ -5413,6 +6404,81 @@ elif page == "🕷️ كشط المنافسين":
                 st.caption(f"Auto-Bootstrap: {_auto_result['message']}")
         except Exception as _auto_err:
             st.caption(f"Auto-Bootstrap: {_auto_err}")
+
+elif page == "🔗 روابط المتجر":
+    st.header("🔗 روابط المتجر — Sitemap")
+    st.caption(
+        "يجلب روابط الماركات والتصنيفات الحقيقية من mahwous.com (مع المعرّفات الداخلية مثل brand-XXXX و cYYYY) "
+        "ليتم استخدامها كروابط داخلية موثوقة في أوصاف المنتجات."
+    )
+    from utils import mahwous_links as _mlinks
+    _stat = _mlinks.cache_status()
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("🏷️ ماركات محفوظة", f"{_stat['brands_count']:,}")
+    with c2:
+        st.metric("🗂️ تصنيفات محفوظة", f"{_stat['categories_count']:,}")
+    with c3:
+        if _stat["fetched_at"]:
+            import datetime as _dt
+            _ts = _dt.datetime.fromtimestamp(_stat["fetched_at"]).strftime("%Y-%m-%d %H:%M")
+            st.metric("🕒 آخر تحديث", _ts)
+        else:
+            st.metric("🕒 آخر تحديث", "لم يتم بعد")
+
+    st.markdown("---")
+    if st.button("🔄 تحديث الروابط من mahwous.com الآن", type="primary", use_container_width=True):
+        with st.spinner("جاري جلب الـsitemap وصفحة الماركات..."):
+            try:
+                _res = _mlinks.refresh_cache()
+                _mlinks.reload_cache()
+                st.success(
+                    f"✅ تم بنجاح — {_res['brands_count']:,} ماركة و {_res['categories_count']:,} تصنيف. "
+                    f"المسار: `{_res['cache_path']}`"
+                )
+                st.rerun()
+            except Exception as _e:
+                st.error(f"❌ فشل الجلب: {_e}")
+
+    st.markdown("---")
+    st.subheader("🧪 جرّب البحث")
+    _q1, _q2 = st.columns(2)
+    with _q1:
+        _qb = st.text_input("ابحث ماركة (مثال: سوسبيرو)", key="links_test_brand")
+        if _qb:
+            _u = _mlinks.lookup_brand_url(_qb)
+            if _u:
+                st.success(f"✅ {_u}")
+                st.markdown(f"[افتح الرابط]({_u})")
+            else:
+                st.warning("لم يُعثر على ماركة مطابقة")
+    with _q2:
+        _qc = st.text_input("ابحث تصنيف (مثال: عطور النيش)", key="links_test_cat")
+        if _qc:
+            _u = _mlinks.lookup_category_url(_qc)
+            if _u:
+                st.success(f"✅ {_u}")
+                st.markdown(f"[افتح الرابط]({_u})")
+            else:
+                st.warning("لم يُعثر على تصنيف مطابق")
+
+    if _stat["exists"]:
+        with st.expander("📋 عرض جميع الروابط المحفوظة"):
+            import json as _json
+            with open(_stat["cache_path"], "r", encoding="utf-8") as _f:
+                _data = _json.load(_f)
+            t1, t2 = st.tabs([f"🏷️ ماركات ({len(_data.get('brands', []))})",
+                              f"🗂️ تصنيفات ({len(_data.get('categories', []))})"])
+            with t1:
+                st.dataframe(
+                    [{"الماركة (slug)": b["slug"], "الرابط": b["url"]} for b in _data.get("brands", [])],
+                    use_container_width=True, hide_index=True,
+                )
+            with t2:
+                st.dataframe(
+                    [{"التصنيف (slug)": c["slug"], "الرابط": c["url"]} for c in _data.get("categories", [])],
+                    use_container_width=True, hide_index=True,
+                )
 
 elif page == "⚙️ الإعدادات":
     st.header("⚙️ الإعدادات")

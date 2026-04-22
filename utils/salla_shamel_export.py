@@ -352,10 +352,23 @@ def _extract_gender(row: dict) -> str:
     return "للجنسين"
 
 
+_SIZE_RE = re.compile(r"(\d{1,4})\s*(?:مل|ملي|ml|ML|mL)\b", re.I)
+
+
 def _extract_size(row: dict) -> str:
-    for k in ("الحجم", "size", "Size"):
+    # 1) من حقل الحجم المخصّص
+    for k in ("الحجم", "size", "Size", "حجم"):
         v = _safe_str(row.get(k, ""))
-        m = re.search(r"(\d+)\s*ml", v, re.I)
+        m = _SIZE_RE.search(v)
+        if m:
+            return m.group(1)
+        # رقم خام في حقل الحجم (مثل "100")
+        if v.isdigit() and 1 <= int(v) <= 9999:
+            return v
+    # 2) من اسم المنتج كـ fallback
+    for k in ("منتج_المنافس", "أسم المنتج", "اسم المنتج", "المنتج", "name", "title"):
+        v = _safe_str(row.get(k, ""))
+        m = _SIZE_RE.search(v)
         if m:
             return m.group(1)
     return "100"
@@ -373,11 +386,26 @@ def _extract_price(row: dict) -> str:
     return ""
 
 
+_CDN_CGI_IMAGE_RE = re.compile(r"/cdn-cgi/image/[^/]+/", re.I)
+
+
+def _sanitize_image_url(url: str) -> str:
+    """يزيل تحويلات Cloudflare Image Resizing (cdn-cgi/image/...,...)
+    لأن الفواصل داخلها تكسر استيراد سلة الذي يَفصِل الصور بـ ','."""
+    if not url:
+        return ""
+    cleaned = _CDN_CGI_IMAGE_RE.sub("/", url, count=1)
+    # احتياط: لو ما زال يحتوي فواصل، خذ أول جزء قبل أول فاصلة فقط
+    if "," in cleaned:
+        cleaned = cleaned.split(",", 1)[0]
+    return cleaned.strip()
+
+
 def _extract_image(row: dict) -> str:
     for k in ("صورة_المنافس", "صورة المنتج", "image_url", "صورة", "الصورة"):
         v = _safe_str(row.get(k, ""))
         if v and v.lower().startswith("http"):
-            return v
+            return _sanitize_image_url(v)
     return ""
 
 
@@ -546,7 +574,12 @@ def build_salla_shamel_dataframe(
         # FIX: extract SKU from input row if available (e.g. magic factory)
         out["رمز المنتج sku"]            = _safe_str(r.get("رمز المنتج sku", ""))
         out["سعر التكلفة"]               = ""
-        out["السعر المخفض"]              = ""
+        # السعر المخفض = سعر المنافس − 1 ريال
+        try:
+            _p = float(str(price).replace(",", "")) if price not in ("", None) else 0.0
+            out["السعر المخفض"] = str(round(_p - 1, 2)) if _p > 1 else ""
+        except (ValueError, TypeError):
+            out["السعر المخفض"] = ""
         out["تاريخ بداية التخفيض"]       = ""
         out["تاريخ نهاية التخفيض"]       = ""
         out["اقصي كمية لكل عميل"]        = 100  # FIX: Salla Strict CSV Validation
@@ -568,6 +601,27 @@ def build_salla_shamel_dataframe(
 
     df = pd.DataFrame(rows, columns=SALLA_SHAMEL_COLUMNS)
     assert len(df.columns) == 40, f"عدد الأعمدة {len(df.columns)} ≠ 40"
+
+    # ── بوابة جودة إلزامية: وصف مهووس صالح + رابط صورة حقيقي ──────────
+    try:
+        from utils.product_gate import is_mahwous_description, is_real_image_url
+        keep_mask = df.apply(
+            lambda r: bool(is_mahwous_description(r.get("الوصف", "")))
+                      and bool(is_real_image_url(r.get("صورة المنتج", ""))),
+            axis=1,
+        )
+        rejected_count = int((~keep_mask).sum())
+        if rejected_count:
+            try:
+                st.warning(
+                    f"⚠️ تم استبعاد {rejected_count} منتج من ملف سلة لغياب وصف مهووس صالح أو رابط صورة حقيقي."
+                )
+            except Exception:
+                pass
+        df = df.loc[keep_mask].reset_index(drop=True)
+    except Exception:
+        pass
+
     return df, found_in_cat
 
 
