@@ -433,7 +433,7 @@ def build_missing_exports(
     competitor_paths: List[str],
     brands_path: str,
     categories_path: str,
-    output_dir: str = "data/exports",
+    output_dir: str = "",
     use_ai: bool = True,
     generate_descriptions: bool = True,
 ) -> Dict[str, str]:
@@ -443,7 +443,11 @@ def build_missing_exports(
       - new_brands_{ts}.csv      للماركات الجديدة فقط
     يعيد dict بمسارات الملفات.
     """
+    import os as _os
     from datetime import datetime
+    if not output_dir:
+        _base = (_os.environ.get("DATA_DIR") or "data").rstrip("/")
+        output_dir = _os.path.join(_base, "exports")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M")
 
