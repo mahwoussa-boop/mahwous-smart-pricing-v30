@@ -21,7 +21,7 @@ Provides two persistence backends for vision2030-v2:
 Environment variables (all optional — app falls back to SQLite if absent):
   GCP_PROJECT_ID              Google Cloud project ID
   GCS_BUCKET_NAME             GCS bucket that holds the DB backup
-  GCS_DB_BLOB_NAME            Blob path inside bucket (default: vision2030/pricing_v18.db)
+  GCS_DB_BLOB_NAME            Blob path inside bucket (default: vision2030/pricing_v30.db)
   CLOUD_SQL_CONNECTION_NAME   e.g. project:region:instance
   DB_USER                     Cloud SQL user
   DB_PASS                     Cloud SQL password
@@ -42,7 +42,7 @@ _logger = logging.getLogger(__name__)
 # ─── Read GCP config from environment ────────────────────────────────────────
 GCP_PROJECT_ID           = os.environ.get("GCP_PROJECT_ID", "").strip()
 GCS_BUCKET_NAME          = os.environ.get("GCS_BUCKET_NAME", "").strip()
-GCS_DB_BLOB_NAME         = os.environ.get("GCS_DB_BLOB_NAME", "vision2030/pricing_v18.db").strip()
+GCS_DB_BLOB_NAME         = os.environ.get("GCS_DB_BLOB_NAME", "vision2030/pricing_v30.db").strip()
 CLOUD_SQL_CONNECTION_NAME = os.environ.get("CLOUD_SQL_CONNECTION_NAME", "").strip()
 DB_USER                  = os.environ.get("DB_USER", "").strip()
 DB_PASS                  = os.environ.get("DB_PASS", "").strip()
