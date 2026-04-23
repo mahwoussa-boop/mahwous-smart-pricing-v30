@@ -4,7 +4,10 @@
 """
 from __future__ import annotations
 
+import logging
 import os
+import re
+import threading
 import traceback
 
 import pandas as pd
@@ -23,6 +26,66 @@ from utils.data_helpers import (
 from utils.helpers import safe_float
 from utils.db_manager import log_analysis, save_job_progress, upsert_price_history
 
+_logger = logging.getLogger(__name__)
+
+# حد أقصى لعمر وظيفة التحليل قبل إعلانها «عالقة» وإنهاؤها تلقائياً.
+# قابل للضبط عبر ENV بدون نشر. الافتراضي 20 دقيقة — كافٍ حتى لـ 5K منتج
+# ومقبول للواجهة (لا يبقى «running» للأبد ويقفل لوحة التحكم).
+_ANALYSIS_JOB_TIMEOUT_SEC = int(
+    os.environ.get("ANALYSIS_JOB_TIMEOUT_SEC", "1200")
+)
+
+# نمط أسماء الـ placeholder الوهمية («منتج P12345» / «P1172895619» …).
+_PHANTOM_NAME_RE = re.compile(r"^(?:منتج\s+)?[Pp][A-Za-z0-9_\-]*$")
+
+
+def _is_phantom_name(name: object) -> bool:
+    try:
+        s = str(name or "").strip()
+    except Exception:
+        return False
+    if not s:
+        return True
+    return bool(_PHANTOM_NAME_RE.match(s))
+
+
+def _strip_phantom_rows(
+    df: "pd.DataFrame",
+    name_cols: tuple[str, ...] = ("المنتج", "product_name", "name"),
+    price_cols: tuple[str, ...] = ("السعر", "price", "سعر_المنافس"),
+) -> "pd.DataFrame":
+    """يُزيل الصفوف الوهمية (اسم placeholder + سعر ≤ 0) قبل بدء المطابقة.
+
+    هذه الحلقة دفاعية: حتى لو تسلّل منتج وهمي إلى قاعدة البيانات، لن يدخل
+    محرك التحليل ويسبّب Deadlock.
+    """
+    if df is None or df.empty:
+        return df
+    try:
+        name_col = next((c for c in name_cols if c in df.columns), None)
+        price_col = next((c for c in price_cols if c in df.columns), None)
+        if name_col is None:
+            return df
+        mask_phantom_name = df[name_col].apply(_is_phantom_name)
+        if price_col is not None:
+            mask_zero_price = pd.to_numeric(
+                df[price_col], errors="coerce"
+            ).fillna(0) <= 0
+            mask = mask_phantom_name & mask_zero_price
+        else:
+            mask = mask_phantom_name
+        dropped = int(mask.sum())
+        if dropped:
+            _logger.warning(
+                "analysis_job_runner: تم تخطي %d صف وهمي (اسم placeholder + سعر ≤ 0) قبل التحليل.",
+                dropped,
+            )
+            return df.loc[~mask].reset_index(drop=True)
+        return df
+    except Exception:
+        _logger.debug("_strip_phantom_rows failed", exc_info=True)
+        return df
+
 
 def run_analysis_background_job(
     job_id: str,
@@ -34,10 +97,50 @@ def run_analysis_background_job(
     prev_analysis_records: list | None = None,
     prev_missing_records: list | None = None,
 ) -> None:
-    """تعمل في thread منفصل — تحفظ النتائج كل 25 منتجاً مع حماية من الأخطاء."""
+    """تعمل في thread منفصل — تحفظ النتائج كل 25 منتجاً مع حماية من الأخطاء.
+
+    دفاعات جديدة:
+      - يتخطى كل المنتجات الوهمية (اسم «منتج P…» + سعر 0) قبل بدء المطابقة،
+        حتى لا تُعلّق محرك التحليل عند تسرّب صفوف فاسدة.
+      - watchdog timer يُنهي المهمة تلقائياً إذا تجاوزت
+        ANALYSIS_JOB_TIMEOUT_SEC بدل أن تبقى «running» للأبد وتقفل الواجهة.
+    """
+    # تنظيف المدخلات من المنتجات الوهمية — يحمي التحليل من deadlock
+    our_df = _strip_phantom_rows(our_df)
+    if isinstance(comp_dfs, dict):
+        comp_dfs = {
+            k: _strip_phantom_rows(v)
+            for k, v in comp_dfs.items()
+            if isinstance(v, pd.DataFrame)
+        }
+
     total = len(our_df)
     processed = 0
     _last_save = [0]
+
+    # Watchdog: يُنهي المهمة إذا تجاوزت الحد الأقصى.
+    _timed_out = threading.Event()
+
+    def _on_timeout() -> None:
+        _timed_out.set()
+        try:
+            save_job_progress(
+                job_id, total, processed,
+                [],
+                f"error: انتهت مهلة التحليل ({_ANALYSIS_JOB_TIMEOUT_SEC}s) — "
+                "تم إلغاء المهمة تلقائياً لتحرير الواجهة.",
+                our_file_name, comp_names,
+            )
+        except Exception:
+            traceback.print_exc()
+        _logger.warning(
+            "analysis_job_runner[%s]: watchdog timeout after %ds — marked as error.",
+            job_id, _ANALYSIS_JOB_TIMEOUT_SEC,
+        )
+
+    _watchdog = threading.Timer(_ANALYSIS_JOB_TIMEOUT_SEC, _on_timeout)
+    _watchdog.daemon = True
+    _watchdog.start()
 
     def progress_cb(pct, current_results):
         nonlocal processed
@@ -71,6 +174,13 @@ def run_analysis_background_job(
             [], f"error: تحليل المقارنة فشل — {str(e)[:200]}",
             our_file_name, comp_names,
         )
+        _watchdog.cancel()
+        return
+
+    if _timed_out.is_set():
+        # انقضت المهلة أثناء run_full_analysis — لا تستمر كي لا نكتب فوق
+        # حالة error التي سجّلها الـ watchdog.
+        _watchdog.cancel()
         return
 
     try:
@@ -130,6 +240,10 @@ def run_analysis_background_job(
         except Exception:
             traceback.print_exc()
 
+    if _timed_out.is_set():
+        _watchdog.cancel()
+        return
+
     try:
         safe_records = safe_results_for_json(analysis_df.to_dict("records"))
         safe_missing = missing_df.to_dict("records") if not missing_df.empty else []
@@ -164,3 +278,5 @@ def run_analysis_background_job(
                 [], f"error: فشل الحفظ النهائي — {str(e)[:200]}",
                 our_file_name, comp_names,
             )
+    finally:
+        _watchdog.cancel()

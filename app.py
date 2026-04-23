@@ -6131,26 +6131,39 @@ elif page == "🕷️ كشط المنافسين":
             with st.expander("🧹 تنظيف البيانات الفاسدة", expanded=False):
                 st.caption(
                     "يحذف الصفوف التي فشل كشطها: السعر = 0 والاسم على شكل ID "
-                    "(مثل « منتج P12345 » أو هاش عشوائي). آمن ولا يلمس البيانات الصحيحة."
+                    "(مثل « منتج P12345 » أو هاش عشوائي)، ويحرّر أي مهام تحليل "
+                    "عالقة. آمن ولا يلمس البيانات الصحيحة."
                 )
                 if st.button("🗑️ احذف الصفوف الفاسدة الآن", key="btn_clean_corrupt",
                              type="secondary", use_container_width=True):
                     try:
-                        from utils.db_manager import get_db, trigger_gcs_sync
+                        from utils.db_manager import (
+                            get_db,
+                            trigger_gcs_sync,
+                            release_stale_running_jobs,
+                        )
                         _conn = get_db()
                         _cur = _conn.cursor()
                         _n_before = _cur.execute(
                             "SELECT COUNT(*) FROM competitor_products_store"
                         ).fetchone()[0]
+                        # كل صف سعره ≤ 0 واسمه على شكل placeholder
+                        # «منتج P…» / «P123…» / «pngrandom» يُحذف بشكل جذري
+                        # (ROOT CAUSE DELETE) — لا يلمس أي صف بسعر حقيقي.
                         _cur.execute("""
                             DELETE FROM competitor_products_store
                             WHERE (price IS NULL OR price <= 0)
                               AND (
                                 product_name LIKE 'منتج P%'
+                                OR product_name LIKE 'منتج p%'
                                 OR product_name GLOB 'P[0-9]*'
+                                OR product_name GLOB 'p[0-9]*'
                                 OR product_name GLOB 'P[A-Za-z0-9]*[Pp]ng'
                                 OR product_name GLOB 'P[A-Za-z0-9]*[Jj]pg'
                                 OR product_name GLOB 'منتج P[A-Za-z0-9]*[Pp]ng'
+                                OR product_name GLOB 'منتج P[A-Za-z0-9]*[Jj]pg'
+                                OR product_name IS NULL
+                                OR TRIM(product_name) = ''
                               )
                         """)
                         _deleted = _cur.rowcount
@@ -6159,13 +6172,39 @@ elif page == "🕷️ كشط المنافسين":
                             "SELECT COUNT(*) FROM competitor_products_store"
                         ).fetchone()[0]
                         _conn.close()
+
+                        # حرّر أي مهمة تحليل عالقة (stuck job) — ≥ 5 دقائق
+                        # بدون تحديث → تُعلَّم stopped. هذا يُحرّر الواجهة فوراً
+                        # عند الضغط على الزر.
+                        try:
+                            _unstuck = release_stale_running_jobs(stale_after_seconds=300)
+                        except Exception:
+                            _unstuck = 0
+
+                        # احذف أي ملفات قفل خلفية معروفة
+                        _removed_locks = 0
+                        try:
+                            import glob as _glob
+                            _data_dir = os.environ.get("DATA_DIR", "data")
+                            for _pat in ("*.lock", "_lock_*", "scraper.pid"):
+                                for _lp in _glob.glob(os.path.join(_data_dir, _pat)):
+                                    try:
+                                        os.remove(_lp)
+                                        _removed_locks += 1
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+
                         try:
                             trigger_gcs_sync(force=True)
                         except Exception:
                             pass
                         st.success(
                             f"✅ تم حذف {_deleted} صف فاسد | "
-                            f"قبل: {_n_before} → بعد: {_n_after}"
+                            f"قبل: {_n_before} → بعد: {_n_after} | "
+                            f"مهام عالقة مُحرَّرة: {_unstuck} | "
+                            f"قفل مُزال: {_removed_locks}"
                         )
                         st.rerun()
                     except Exception as _e_clean:

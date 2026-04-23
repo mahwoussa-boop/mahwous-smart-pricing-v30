@@ -66,59 +66,74 @@ def _slug_from_url(product_url: str) -> str:
 
 
 async def _fetch_and_scrape_product(session, product_url, store_name):
-    """جلب صفحة المنتج مع fallback إلى v30 عند غياب السعر أو الحظر."""
+    """جلب صفحة المنتج مع fallback إلى v30 عند غياب السعر أو الحظر.
+
+    يُعيد None صراحةً عند الفشل (403/Cloudflare/انتهاء المهلة/سعر غير صالح)
+    بدلاً من إنشاء "منتج وهمي" باسم placeholder وسعر 0 — هذه السلوكية
+    السابقة كانت تُلوّث قاعدة البيانات بآلاف الصفوف الفاسدة وتُعلّق محرك
+    التحليل.
+    """
     slug = _slug_from_url(product_url)
+    last_status: int | None = None
+
     try:
         async with session.get(
             product_url,
             headers=get_browser_headers(),
             ssl=False,
             timeout=aiohttp.ClientTimeout(total=15),
-            allow_redirects=True
+            allow_redirects=True,
         ) as resp:
+            last_status = resp.status
             if resp.status == 200:
-                html = await resp.text(errors='ignore')
+                html = await resp.text(errors="ignore")
                 product_data = scrape_product_ai(html, product_url, slug)
-                if product_data and float(product_data.get("price") or 0) > 0:
+                if (
+                    product_data
+                    and str(product_data.get("name") or "").strip()
+                    and float(product_data.get("price") or 0) > 0
+                ):
                     return product_data
+            elif resp.status in (403, 429, 503):
+                # حماية Cloudflare/معدل محدود — لا داعي لمحاولة AI، انتقل لـ v30
+                logger.debug(
+                    f"⚠️ {store_name}: حظر محتمل {resp.status} على {product_url}"
+                )
     except Exception as e:
         logger.debug(f"⚠️ خطأ HTTP في جلب {product_url}: {e}")
 
     try:
         loop = asyncio.get_running_loop()
-        v30 = await loop.run_in_executor(None, lambda: scrape_product_v30(product_url, store_url=product_url))
+        v30 = await loop.run_in_executor(
+            None, lambda: scrape_product_v30(product_url, store_url=product_url)
+        )
         if isinstance(v30, dict):
-            return {
-                "name": v30.get("name") or clean_product_name_ai(slug),
-                "price": float(v30.get("price") or 0),
-                "price_source": v30.get("source") or "v30",
-                "size": "",
-                "brand": v30.get("brand") or "",
-                "gender": "للجنسين",
-                "type": "عطر",
-                "url": v30.get("url") or product_url,
-                "success": bool((v30.get("name") or slug) and float(v30.get("price") or 0) > 0),
-                "confidence": 0.95 if float(v30.get("price") or 0) > 0 else 0.2,
-                "image_url": v30.get("image") or "",
-                "sku": v30.get("sku") or "",
-            }
+            v30_name = str(v30.get("name") or "").strip()
+            v30_price = float(v30.get("price") or 0)
+            if v30_name and v30_price > 0:
+                return {
+                    "name": v30_name,
+                    "price": v30_price,
+                    "price_source": v30.get("source") or "v30",
+                    "size": "",
+                    "brand": v30.get("brand") or "",
+                    "gender": "للجنسين",
+                    "type": "عطر",
+                    "url": v30.get("url") or product_url,
+                    "success": True,
+                    "confidence": 0.95,
+                    "image_url": v30.get("image") or "",
+                    "sku": v30.get("sku") or "",
+                }
     except Exception as e:
         logger.debug(f"⚠️ خطأ v30 في {product_url}: {e}")
 
-    return {
-        "name": clean_product_name_ai(slug),
-        "price": 0.0,
-        "price_source": "failed",
-        "size": "",
-        "brand": "",
-        "gender": "للجنسين",
-        "type": "عطر",
-        "url": product_url,
-        "success": False,
-        "confidence": 0.0,
-        "image_url": "",
-        "sku": "",
-    }
+    # فشل كامل → لا نُرجع placeholder. الاستدعاء الأعلى سيتجاهل None.
+    logger.debug(
+        f"🚫 فشل كشط {product_url} (status={last_status}) — سيتم تجاهل الرابط "
+        "وعدم إدراج منتج وهمي."
+    )
+    return None
 
 async def process_store_sitemap(session, store_name, store_url, sitemap_url, incremental: bool = True, progress_cb=None):
     """جلب المنتجات من sitemap وكشطها باستخدام محرك v27 الهجين.
@@ -180,22 +195,31 @@ async def process_store_sitemap(session, store_name, store_url, sitemap_url, inc
             )
 
             rows_to_save = []
+            failed_in_batch = 0
             for entry, product_data in zip(batch, batch_results):
-                if isinstance(product_data, Exception) or not isinstance(product_data, dict):
-                    product_data = {
-                        "name": clean_product_name_ai(_slug_from_url(entry.url)),
-                        "price": 0.0,
-                        "url": entry.url,
-                        "image_url": "",
-                        "brand": "",
-                        "size": "",
-                        "gender": "للجنسين",
-                        "success": False,
-                    }
+                # تجاهل الفشل (None / Exception / dict بدون اسم+سعر حقيقي)
+                if (
+                    product_data is None
+                    or isinstance(product_data, Exception)
+                    or not isinstance(product_data, dict)
+                ):
+                    failed_in_batch += 1
+                    continue
+
+                pname = str(product_data.get("name") or "").strip()
+                try:
+                    pprice = float(product_data.get("price") or 0)
+                except (TypeError, ValueError):
+                    pprice = 0.0
+
+                # شرط الحفظ: اسم حقيقي + سعر > 0. أي شيء أقل = منتج وهمي.
+                if not pname or pprice <= 0:
+                    failed_in_batch += 1
+                    continue
 
                 row = {
-                    "name": product_data.get("name") or clean_product_name_ai(_slug_from_url(entry.url)),
-                    "price": float(product_data.get("price") or 0),
+                    "name": pname,
+                    "price": pprice,
                     "product_url": product_data.get("url") or entry.url,
                     "image_url": product_data.get("image_url") or "",
                     "brand": product_data.get("brand", ""),
@@ -204,9 +228,14 @@ async def process_store_sitemap(session, store_name, store_url, sitemap_url, inc
                 }
                 db_products.append(row)
                 rows_to_save.append(row)
-                if row["price"] > 0:
-                    successful_scrapes += 1
-                    successful_urls.append(row["product_url"])
+                successful_scrapes += 1
+                successful_urls.append(row["product_url"])
+
+            if failed_in_batch:
+                logger.info(
+                    f"⏭️ {store_name}: تم تجاهل {failed_in_batch} رابط فاشل "
+                    "(بدون اسم أو سعر) — لن يتم إدراج منتجات وهمية."
+                )
 
             if rows_to_save:
                 res = upsert_competitor_products(store_name, rows_to_save, name_key="name", price_key="price")

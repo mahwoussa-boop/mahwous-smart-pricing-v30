@@ -7,6 +7,7 @@ utils/db_manager.py - v18.0
 """
 import hashlib
 import logging
+import re
 import sqlite3, json, os
 from datetime import datetime
 from typing import List, Optional, Dict
@@ -1827,6 +1828,30 @@ def normalize_scraped_row_for_db(
     }
 
 
+_PHANTOM_NAME_RE = re.compile(
+    # أنماط أسماء الـ placeholder التي كان يولدها sitemap_automation سابقاً
+    # (slug URL على شكل P + أرقام/أحرف، قد يكون مسبوقاً بـ "منتج ").
+    # نرفض الحفظ إذا طابق الاسم هذا النمط. لا يؤثر على الأسماء الحقيقية.
+    r"^(?:منتج\s+)?[Pp][A-Za-z0-9_\-]*$"
+)
+
+
+def _is_phantom_row(name: str, price: float) -> bool:
+    """منتج «وهمي» = سعر ≤ 0 واسم يبدو كـ slug/ID عشوائي.
+
+    هذه هي الحارس الدفاعي الذي يمنع تلويث pricing_v30.db بآلاف الصفوف
+    الفاسدة الناتجة عن فشل الكشط (403/Cloudflare/timeout).
+    """
+    if price > 0:
+        return False
+    if not name:
+        return True
+    try:
+        return bool(_PHANTOM_NAME_RE.match(name.strip()))
+    except Exception:
+        return False
+
+
 def upsert_competitor_products(
     competitor: str,
     products: list[dict],
@@ -1835,11 +1860,11 @@ def upsert_competitor_products(
 ) -> dict:
     """
     يحفظ منتجات المنافس في جدول التراكم — INSERT OR UPDATE.
-    يُعيد {'inserted': N, 'updated': M}
+    يُعيد {'inserted': N, 'updated': M, 'skipped_phantom': K}
     """
     init_competitor_store()
     conn = get_db()
-    inserted = updated = 0
+    inserted = updated = skipped_phantom = 0
     today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Phase 3: intra-batch dedup by canonical product URL (within the same
@@ -1858,11 +1883,18 @@ def upsert_competitor_products(
             pname = str(p.get(name_key, "") or "").strip()
             if not pname or len(pname) < 2:
                 continue
-            norm = _normalize_for_store(pname)
             try:
                 price = float(str(p.get(price_key, 0) or 0).replace(",", ""))
             except (ValueError, TypeError):
                 price = 0.0
+
+            # دفاع نهائي ضد المنتجات الوهمية: ارفض الحفظ إذا
+            # (سعر ≤ 0) + (اسم على شكل placeholder «منتج P…»).
+            if _is_phantom_row(pname, price):
+                skipped_phantom += 1
+                continue
+
+            norm = _normalize_for_store(pname)
 
             existing = conn.execute(
                 "SELECT id FROM competitor_products_store WHERE competitor=? AND norm_name=?",
@@ -1918,7 +1950,18 @@ def upsert_competitor_products(
         # Force a GCS upload after every scrape batch so data survives restarts.
         trigger_gcs_sync(force=True)
 
-    return {"inserted": inserted, "updated": updated}
+    if skipped_phantom:
+        _logger.info(
+            "upsert_competitor_products[%s]: skipped %d phantom row(s) — "
+            "name-only placeholders with price ≤ 0 were rejected.",
+            competitor, skipped_phantom,
+        )
+
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "skipped_phantom": skipped_phantom,
+    }
 
 
 def get_all_competitor_products(competitor: str = "") -> list[dict]:
@@ -1974,12 +2017,16 @@ def get_competitor_store_stats() -> dict:
     init_competitor_store()
     conn = get_db()
     total = conn.execute("SELECT COUNT(*) FROM competitor_products_store").fetchone()[0]
+    with_price = conn.execute(
+        "SELECT COUNT(*) FROM competitor_products_store WHERE price IS NOT NULL AND price > 0"
+    ).fetchone()[0]
     comps = conn.execute(
         "SELECT competitor, COUNT(*) as cnt FROM competitor_products_store GROUP BY competitor"
     ).fetchall()
     conn.close()
     return {
         "total_products": total,
+        "with_price": with_price,
         "by_competitor": {r[0]: r[1] for r in comps},
     }
 
