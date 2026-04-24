@@ -90,6 +90,19 @@ _ACCEPT_HEADERS = [
     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 ]
 
+# Mobile Safari (iOS) + AJAX (XHR) header profile. Used as a secondary
+# curl_cffi attempt: some stores gate their public HTML behind a browser
+# check but return JSON via the same URL when the request looks like an
+# in-page XHR from the mobile site.
+_MOBILE_AJAX_HEADERS = {
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "X-Requested-With": "XMLHttpRequest",
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  2. SmartUARotator — per-domain failure-aware UA selection (NEW v3.0)
@@ -565,12 +578,51 @@ async def fetch_with_retry(
 # ══════════════════════════════════════════════════════════════════════════
 _SESSION_LOCK  = threading.Lock()
 _CFFI_SESSION  = None
+_CFFI_SESSIONS: Dict[str, object] = {}  # keyed by impersonate string
 _CLOUD_SCRAPER = None
 _REQ_SESSION   = None
 
+# When a caller asks for an impersonate value that the installed curl_cffi
+# doesn't recognise, try these same-family fallbacks so we still get a
+# working session instead of silently falling through to weaker fallbacks.
+_IMPERSONATE_FALLBACKS: Dict[str, Tuple[str, ...]] = {
+    "chrome131": ("chrome131", "chrome124", "chrome120", "chrome110"),
+    "safari_ios": ("safari_ios", "safari17_2_ios", "safari17_0_ios", "safari15_5"),
+}
 
-def _get_cffi_session():
+
+def _get_cffi_session(impersonate: Optional[str] = None):
+    """
+    Return a curl_cffi Session.
+
+    impersonate=None → legacy singleton (tries chrome131 → 110).
+    impersonate=<str> → cached per-value session. If the exact string fails
+    to initialise we try the family fallbacks in _IMPERSONATE_FALLBACKS
+    so a curl_cffi version mismatch degrades gracefully.
+    """
     global _CFFI_SESSION
+
+    if impersonate:
+        sess = _CFFI_SESSIONS.get(impersonate)
+        if sess is not None:
+            return sess
+        with _SESSION_LOCK:
+            sess = _CFFI_SESSIONS.get(impersonate)
+            if sess is not None:
+                return sess
+            try:
+                from curl_cffi import requests as cffi_requests
+            except ImportError:
+                return None
+            for imp in _IMPERSONATE_FALLBACKS.get(impersonate, (impersonate,)):
+                try:
+                    sess = cffi_requests.Session(impersonate=imp)
+                    _CFFI_SESSIONS[impersonate] = sess
+                    return sess
+                except Exception:
+                    continue
+        return None
+
     if _CFFI_SESSION is None:
         with _SESSION_LOCK:
             if _CFFI_SESSION is None:
@@ -620,18 +672,36 @@ def try_curl_cffi(
     url: str,
     timeout: int = 25,
     proxy: Optional[str] = None,
+    impersonate: Optional[str] = "chrome131",
+    extra_headers: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """
-    Attempt fetch via curl_cffi Chrome impersonation.
-    proxy: optional proxy URL string — passed to curl_cffi if provided.
+    Attempt fetch via curl_cffi browser impersonation.
+
+    Args:
+        url:           target URL
+        timeout:       request timeout in seconds
+        proxy:         optional proxy URL string — passed to curl_cffi if provided
+        impersonate:   curl_cffi browser fingerprint (default "chrome131").
+                       Other useful values: "safari_ios" for mobile Safari.
+        extra_headers: additional headers merged on top of the default browser
+                       headers. Useful to force an XHR-style request via
+                       _MOBILE_AJAX_HEADERS as a second-pass attempt.
     """
-    session = _get_cffi_session()
+    session = _get_cffi_session(impersonate=impersonate)
     if session is None:
         return None
     try:
         kwargs: dict = dict(timeout=timeout, allow_redirects=True)
         if proxy:
             kwargs["proxies"] = {"http": proxy, "https": proxy}
+        if extra_headers:
+            domain = urlparse(url).netloc
+            headers = get_browser_headers(
+                referer=f"https://{domain}/", domain=domain
+            )
+            headers.update(extra_headers)
+            kwargs["headers"] = headers
         resp = session.get(url, **kwargs)
         if resp.status_code == 200:
             return resp.text
@@ -657,6 +727,39 @@ def try_cloudscraper(url: str, timeout: int = 25) -> Optional[str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  8b. ZenRows Web Unlocker — paid last-resort fallback
+# ══════════════════════════════════════════════════════════════════════════
+def try_web_unlocker(url: str, timeout: int = 30) -> Optional[str]:
+    """
+    Final paid-proxy fallback via ZenRows Web Unlocker.
+
+    Activated only when the ZENROWS_API_KEY environment variable is set,
+    so the call is a silent no-op in dev / self-hosted environments where
+    the key isn't configured.
+    """
+    import os
+    import requests
+    api_key = os.environ.get("ZENROWS_API_KEY")
+    if not api_key:
+        return None
+
+    api_url = "https://api.zenrows.com/v1/"
+    params = {
+        "apikey": api_key,
+        "url": url,
+        "js_render": "true",
+        "premium_proxy": "true",
+    }
+    try:
+        resp = requests.get(api_url, params=params, timeout=timeout)
+        if resp.status_code == 200:
+            return resp.text
+    except Exception as exc:
+        logger.debug("zenrows unlocker %s: %s", url, type(exc).__name__)
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  9. Full sync fallback chain (called from asyncio executor)
 # ══════════════════════════════════════════════════════════════════════════
 def try_all_sync_fallbacks(
@@ -665,23 +768,43 @@ def try_all_sync_fallbacks(
     proxy: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Sync fallback chain: curl_cffi → cloudscraper → requests.
-    Receives a timeout so threads never hang indefinitely.
-    proxy: optional proxy URL forwarded to curl_cffi and requests.
+    Sync fallback chain (in order):
+      1. curl_cffi (Chrome 131 desktop fingerprint)
+      2. curl_cffi (Safari iOS fingerprint + XHR/AJAX headers)
+      3. cloudscraper (JS-challenge bypass)
+      4. requests (rotated browser headers, optional proxy)
+      5. ZenRows Web Unlocker (paid, only if ZENROWS_API_KEY is set)
+
+    proxy: optional proxy URL forwarded to curl_cffi and requests. The
+    ZenRows step uses its own premium proxy pool and ignores this.
     """
     domain = urlparse(url).netloc
 
-    # Attempt 1: curl_cffi — strongest TLS impersonation
+    # Attempt 1: curl_cffi — strongest TLS impersonation (Chrome desktop)
     html = try_curl_cffi(url, timeout=timeout, proxy=proxy)
     if html and not looks_like_bot_challenge(html):
         return html
 
-    # Attempt 2: cloudscraper — JS-challenge bypass
+    # Attempt 2: curl_cffi — Safari iOS + XHR headers. Some stores gate
+    # their desktop HTML behind bot-checks but happily return mobile JSON
+    # when the request looks like an in-page AJAX call from m.* site.
+    html_mobile = try_curl_cffi(
+        url,
+        timeout=timeout,
+        proxy=proxy,
+        impersonate="safari_ios",
+        extra_headers=_MOBILE_AJAX_HEADERS,
+    )
+    if html_mobile and not looks_like_bot_challenge(html_mobile):
+        return html_mobile
+
+    # Attempt 3: cloudscraper — JS-challenge bypass
     html_cs = try_cloudscraper(url, timeout=timeout)
     if html_cs and not looks_like_bot_challenge(html_cs):
         return html_cs
 
-    # Attempt 3: requests — last resort with rotated browser headers
+    # Attempt 4: requests — rotated browser headers, optional proxy
+    html_req: Optional[str] = None
     try:
         headers  = get_browser_headers(
             referer=f"https://{domain}/", domain=domain
@@ -695,14 +818,23 @@ def try_all_sync_fallbacks(
             req_kwargs["proxies"] = {"http": proxy, "https": proxy}
         resp = session.get(url, **req_kwargs)
         if resp.status_code == 200:
-            return resp.text
+            html_req = resp.text
+            if html_req and not looks_like_bot_challenge(html_req):
+                return html_req
         elif resp.status_code in (403, 429):
             _ua_rotator.mark_failed(domain, headers.get("User-Agent", ""))
     except Exception as exc:
         logger.debug("requests fallback %s: %s", url, type(exc).__name__)
 
-    # Return whatever partial HTML we got rather than None
-    return html or html_cs or None
+    # Attempt 5: ZenRows Web Unlocker — paid last-resort when IP is fully
+    # banned. Silent no-op if ZENROWS_API_KEY is unset.
+    html_wu = try_web_unlocker(url, timeout=max(timeout, 30))
+    if html_wu and not looks_like_bot_challenge(html_wu):
+        return html_wu
+
+    # Return whatever partial HTML we got rather than None so callers can
+    # still try to parse a soft-blocked page.
+    return html or html_mobile or html_cs or html_req or html_wu or None
 
 
 def looks_like_bot_challenge(html: str) -> bool:
