@@ -7,6 +7,7 @@ utils/db_manager.py - v18.0
 """
 import hashlib
 import logging
+import re
 import sqlite3, json, os
 from datetime import datetime
 from typing import List, Optional, Dict
@@ -79,17 +80,6 @@ def trigger_gcs_sync(force: bool = False) -> bool:
     if _GCP_AVAILABLE and is_gcs_configured():
         return sync_db_to_gcs(DB_PATH, force=force)
     return False
-
-
-def _sync_after_write(force: bool = False) -> None:
-    """Best-effort cloud sync after a successful local write.
-    Non-blocking for callers: any sync failure is swallowed and only logged.
-    Use force=True only for milestone writes; otherwise rely on cooldown throttling.
-    """
-    try:
-        trigger_gcs_sync(force=force)
-    except Exception as _sync_exc:
-        _logger.debug("post-write GCS sync skipped: %s", _sync_exc)
 
 
 def get_db():
@@ -379,7 +369,6 @@ def log_event(page, event_type, details="", product_name="", action=""):
             (_ts(), page, event_type, details, product_name, action)
         )
         conn.commit(); conn.close()
-        _sync_after_write()
     except: pass
 
 
@@ -397,7 +386,6 @@ def log_decision(product_name, old_status, new_status, reason="",
              competitor, old_status, new_status, reason)
         )
         conn.commit(); conn.close()
-        _sync_after_write()
     except: pass
 
 
@@ -480,7 +468,6 @@ def upsert_price_history(product_name, competitor, price,
         )
 
     conn.commit(); conn.close()
-    _sync_after_write()
     return price_changed
 
 
@@ -553,9 +540,7 @@ def save_job_progress(job_id, total, processed, results, status="running",
         conn.commit()
     # Push to GCS when a job completes — captures full analysis results
     if status in ("done", "completed", "finished"):
-        _sync_after_write(force=True)
-    else:
-        _sync_after_write()
+        trigger_gcs_sync(force=True)
 
 
 def get_job_progress(job_id):
@@ -660,7 +645,6 @@ def log_analysis(our_file, comp_file, total, matched, missing, summary=""):
             (_ts(), our_file, comp_file, total, matched, missing, summary)
         )
         conn.commit(); conn.close()
-        _sync_after_write()
     except: pass
 
 
@@ -705,7 +689,6 @@ def save_hidden_product(product_key: str, product_name: str = "", action: str = 
         )
         conn.commit()
         conn.close()
-        _sync_after_write()
     except Exception as _e:
         _logger.debug("save_hidden_product error: %s", _e)
 
@@ -764,7 +747,6 @@ def restore_soft_deleted_product(product_key: str) -> bool:
         )
         conn.commit()
         conn.close()
-        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("restore_soft_deleted_product error: %s", _e)
@@ -887,7 +869,6 @@ def update_product_data(
         )
         conn.commit()
         conn.close()
-        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("update_product_data error: %s", _e)
@@ -927,7 +908,6 @@ def delete_product_override(stable_key: str) -> bool:
         )
         conn.commit()
         conn.close()
-        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("delete_product_override error: %s", _e)
@@ -957,7 +937,6 @@ def force_link_product(our_id: str, our_name: str, comp_url: str) -> bool:
         )
         conn.commit()
         conn.close()
-        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("force_link_product error: %s", _e)
@@ -993,12 +972,10 @@ def delete_force_link(our_id: str, comp_url: str) -> bool:
         )
         conn.commit()
         conn.close()
-        _sync_after_write()
         return True
     except Exception as _e:
         _logger.debug("delete_force_link error: %s", _e)
         return False
-
 
 
 # ── module-level initialisation ───────────────────────────────────────────────
@@ -1296,11 +1273,8 @@ def save_processed(product_key: str, product_name: str, competitor: str,
                  old_price, new_price, product_id, notes, str(comp_url or ""))
             )
             conn.commit()
-        _sync_after_write()
-        return 1
     except Exception:
-        return 0
-
+        pass  # لا يوقف الثريد الخلفي
 
 
 def get_processed(limit=50000) -> list:
@@ -1565,7 +1539,6 @@ def add_competitor_alias(alias: str, canonical_name: str) -> bool:
         )
         conn.commit()
         conn.close()
-        _sync_after_write()
         return True
     except Exception as exc:
         _logger.error("add_competitor_alias error: %s", exc)
@@ -1603,7 +1576,6 @@ def register_competitor(name: str, domain: str = "", notes: str = "") -> bool:
         )
         conn.commit()
         conn.close()
-        _sync_after_write()
         return True
     except Exception as exc:
         _logger.error("register_competitor error: %s", exc)
@@ -1856,6 +1828,30 @@ def normalize_scraped_row_for_db(
     }
 
 
+_PHANTOM_NAME_RE = re.compile(
+    # أنماط أسماء الـ placeholder التي كان يولدها sitemap_automation سابقاً
+    # (slug URL على شكل P + أرقام/أحرف، قد يكون مسبوقاً بـ "منتج ").
+    # نرفض الحفظ إذا طابق الاسم هذا النمط. لا يؤثر على الأسماء الحقيقية.
+    r"^(?:منتج\s+)?[Pp][A-Za-z0-9_\-]*$"
+)
+
+
+def _is_phantom_row(name: str, price: float) -> bool:
+    """منتج «وهمي» = سعر ≤ 0 واسم يبدو كـ slug/ID عشوائي.
+
+    هذه هي الحارس الدفاعي الذي يمنع تلويث pricing_v30.db بآلاف الصفوف
+    الفاسدة الناتجة عن فشل الكشط (403/Cloudflare/timeout).
+    """
+    if price > 0:
+        return False
+    if not name:
+        return True
+    try:
+        return bool(_PHANTOM_NAME_RE.match(name.strip()))
+    except Exception:
+        return False
+
+
 def upsert_competitor_products(
     competitor: str,
     products: list[dict],
@@ -1864,11 +1860,11 @@ def upsert_competitor_products(
 ) -> dict:
     """
     يحفظ منتجات المنافس في جدول التراكم — INSERT OR UPDATE.
-    يُعيد {'inserted': N, 'updated': M}
+    يُعيد {'inserted': N, 'updated': M, 'skipped_phantom': K}
     """
     init_competitor_store()
     conn = get_db()
-    inserted = updated = 0
+    inserted = updated = skipped_phantom = 0
     today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Phase 3: intra-batch dedup by canonical product URL (within the same
@@ -1887,11 +1883,18 @@ def upsert_competitor_products(
             pname = str(p.get(name_key, "") or "").strip()
             if not pname or len(pname) < 2:
                 continue
-            norm = _normalize_for_store(pname)
             try:
                 price = float(str(p.get(price_key, 0) or 0).replace(",", ""))
             except (ValueError, TypeError):
                 price = 0.0
+
+            # دفاع نهائي ضد المنتجات الوهمية: ارفض الحفظ إذا
+            # (سعر ≤ 0) + (اسم على شكل placeholder «منتج P…»).
+            if _is_phantom_row(pname, price):
+                skipped_phantom += 1
+                continue
+
+            norm = _normalize_for_store(pname)
 
             existing = conn.execute(
                 "SELECT id FROM competitor_products_store WHERE competitor=? AND norm_name=?",
@@ -1947,7 +1950,18 @@ def upsert_competitor_products(
         # Force a GCS upload after every scrape batch so data survives restarts.
         trigger_gcs_sync(force=True)
 
-    return {"inserted": inserted, "updated": updated}
+    if skipped_phantom:
+        _logger.info(
+            "upsert_competitor_products[%s]: skipped %d phantom row(s) — "
+            "name-only placeholders with price ≤ 0 were rejected.",
+            competitor, skipped_phantom,
+        )
+
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "skipped_phantom": skipped_phantom,
+    }
 
 
 def get_all_competitor_products(competitor: str = "") -> list[dict]:
@@ -2003,12 +2017,16 @@ def get_competitor_store_stats() -> dict:
     init_competitor_store()
     conn = get_db()
     total = conn.execute("SELECT COUNT(*) FROM competitor_products_store").fetchone()[0]
+    with_price = conn.execute(
+        "SELECT COUNT(*) FROM competitor_products_store WHERE price IS NOT NULL AND price > 0"
+    ).fetchone()[0]
     comps = conn.execute(
         "SELECT competitor, COUNT(*) as cnt FROM competitor_products_store GROUP BY competitor"
     ).fetchall()
     conn.close()
     return {
         "total_products": total,
+        "with_price": with_price,
         "by_competitor": {r[0]: r[1] for r in comps},
     }
 
