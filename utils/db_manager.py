@@ -1987,6 +1987,38 @@ def get_all_competitor_products(competitor: str = "") -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_scraped_urls_today(competitor: str) -> set[str]:
+    """يُرجع مجموعة روابط المنتجات التي كُشطت بنجاح اليوم لهذا المنافس.
+
+    تُستخدم كـ checkpoint للاستئناف: إذا أُغلق المتصفح في منتصف الكشط،
+    يعود المستخدم ويضغط "تحديث ذكي" مرة أخرى، وسيتخطى المحرك آلياً كل
+    الروابط التي سبق حفظها اليوم بسعر صحيح — بدلاً من البدء من الصفر.
+
+    الشرط: price > 0 (لا نعتبر الأخطاء «نجاح»)
+           AND date(updated_at) = date('now')
+    """
+    if not competitor:
+        return set()
+    init_competitor_store()
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT product_url
+                 FROM competitor_products_store
+                WHERE competitor = ?
+                  AND price > 0
+                  AND product_url IS NOT NULL
+                  AND product_url != ''
+                  AND date(updated_at) = date('now', 'localtime')""",
+            (competitor,),
+        ).fetchall()
+        conn.close()
+        return {str(r[0]).strip() for r in rows if r and r[0]}
+    except Exception:
+        _logger.debug("get_scraped_urls_today failed", exc_info=True)
+        return set()
+
+
 def get_competitor_products_df(competitor: str = "") -> "pd.DataFrame":
     """
     Returns a DataFrame from the persistent competitor store.
