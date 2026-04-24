@@ -16,6 +16,9 @@ app.py - نظام التسعير الذكي مهووس v26.0
 ✅ محرك كشط غير متزامن (Async Scraper + Detached Process)
 ✅ فحص ذاتي عند الإقلاع (Health Check)
 """
+import nest_asyncio
+nest_asyncio.apply()
+
 import html
 import json
 import re
@@ -6341,7 +6344,7 @@ elif page == "🕷️ كشط المنافسين":
                 import asyncio as _aio
                 from engines.scraper_v30_advanced import run_advanced_price_scraping
 
-                _adv_result = _aio.run(run_advanced_price_scraping(
+                _adv_result = _aio.get_event_loop().run_until_complete(run_advanced_price_scraping(
                     store_filter=_adv_store.strip(),
                     limit=int(_adv_limit),
                     progress_cb=_adv_progress,
@@ -6432,7 +6435,7 @@ elif page == "🕷️ كشط المنافسين":
             import asyncio as _aio
             from engines.scraper_v30_advanced import run_advanced_price_scraping
 
-            _auto_result = _aio.run(run_advanced_price_scraping(
+            _auto_result = _aio.get_event_loop().run_until_complete(run_advanced_price_scraping(
                 store_filter="", limit=min(_sp_no_price, 500),
             ))
             if _auto_result.get("prices_found", 0) > 0:
