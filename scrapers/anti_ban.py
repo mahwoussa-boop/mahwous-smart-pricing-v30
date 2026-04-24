@@ -759,6 +759,10 @@ def try_web_unlocker(url: str, timeout: int = 30) -> Optional[str]:
     return None
 
 
+# Limit concurrent Selenium instances — each uses ~300MB RAM
+import threading as _threading
+_SELENIUM_SEM = _threading.Semaphore(2)
+
 # ══════════════════════════════════════════════════════════════════════════
 #  9. Full sync fallback chain (called from asyncio executor)
 # ══════════════════════════════════════════════════════════════════════════
@@ -831,6 +835,22 @@ def try_all_sync_fallbacks(
     html_wu = try_web_unlocker(url, timeout=max(timeout, 30))
     if html_wu and not looks_like_bot_challenge(html_wu):
         return html_wu
+
+    # Attempt 6: Selenium / Chromium headless — renders JavaScript fully,
+    # bypasses Cloudflare challenges that block pure-HTTP clients.
+    # Only invoked when every HTTP method above has failed.
+    # Max 2 concurrent instances to avoid OOM on Cloud Run.
+    if _SELENIUM_SEM.acquire(blocking=True, timeout=60):
+        try:
+            from engines.selenium_scraper_v30 import render_page as _selenium_render
+            _rendered = _selenium_render(url, timeout=timeout, proxy=proxy or "")
+            if _rendered.html and not looks_like_bot_challenge(_rendered.html):
+                logger.debug("selenium fallback succeeded: %s", url)
+                return _rendered.html
+        except Exception as _sel_err:
+            logger.debug("selenium fallback error %s: %s", url, _sel_err)
+        finally:
+            _SELENIUM_SEM.release()
 
     # Return whatever partial HTML we got rather than None so callers can
     # still try to parse a soft-blocked page.
