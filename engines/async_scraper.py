@@ -1093,7 +1093,37 @@ async def scrape_one_store(
             return []
 
         total = len(all_urls)
-        
+
+        # ── Resumption from DB (URL-level) ───────────────────────────────
+        # Independent of scraper_state.json / sitemap_cache: if the caller
+        # re-triggers a scrape for the same store, skip URLs already saved
+        # today with price>0 in competitor_products_store. This survives
+        # container restarts and lost/corrupt state files.
+        if resume and not _force_run:
+            try:
+                from utils.db_manager import get_scraped_urls_today
+                _done_urls = get_scraped_urls_today(domain)
+            except Exception:
+                _done_urls = set()
+            if _done_urls:
+                before = len(all_urls)
+                all_urls = [u for u in all_urls if u not in _done_urls]
+                skipped_db = before - len(all_urls)
+                if skipped_db:
+                    logger.info(
+                        f"♻️ {domain} — DB-resume: تخطّي {skipped_db} رابط "
+                        f"كُشط بنجاح اليوم. المتبقي: {len(all_urls)}"
+                    )
+                    _bump_skip(progress, "db_resume_done", skipped_db)
+                total = len(all_urls)  # recompute after filter
+                if not all_urls:
+                    logger.info(
+                        f"✅ {domain} — كل الروابط مكتملة في DB اليوم."
+                    )
+                    state.mark_done(domain, 0)
+                    progress.save()
+                    return []
+
         # Reset checkpoint if forced run
         resume_idx = 0 if _force_run else (cp.last_url_index if (resume and cp.last_url_index > 0) else 0)
         
@@ -1121,6 +1151,41 @@ async def scrape_one_store(
         _CIRCUIT_BREAKER_LIMIT = 20  # break after 20 consecutive failed URLs
         _circuit_broken = False
 
+        # ── Real-time commit buffer (configurable; default: every 5 rows) ──
+        # Decouples commit cadence from the parallel batch size so we persist
+        # to SQLite as rows stream in, not only at end-of-batch.
+        _commit_batch_size = max(1, int(os.environ.get("ASYNC_SCRAPER_COMMIT_BATCH", "5")))
+        _pending_db_rows: list[dict] = []
+        _db_flush_lock = asyncio.Lock()
+
+        async def _flush_pending_rows(force: bool = False) -> None:
+            """Commit the streaming buffer to SQLite (skips phantom rows)."""
+            async with _db_flush_lock:
+                if not _pending_db_rows:
+                    return
+                if not force and len(_pending_db_rows) < _commit_batch_size:
+                    return
+                batch = list(_pending_db_rows)
+                _pending_db_rows.clear()
+            try:
+                from utils.db_manager import (
+                    upsert_competitor_products,
+                    normalize_scraped_row_for_db,
+                )
+                _db_rows = [
+                    nr for r in batch
+                    if (nr := normalize_scraped_row_for_db(r, domain)) is not None
+                ]
+                if not _db_rows:
+                    return
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda rows=_db_rows: upsert_competitor_products(domain, rows),
+                )
+            except Exception as _db_exc:
+                logger.debug("SQLite real-time write error: %s", _db_exc)
+
         async def _fetch_one(url: str) -> None:
             nonlocal done_count, _consecutive_failures, _circuit_broken
             progress.urls_attempted += 1
@@ -1138,6 +1203,10 @@ async def scrape_one_store(
                 if row:
                     rows.append(row)
                     progress.rows_saved_run = int(getattr(progress, "rows_saved_run", 0) or 0) + 1
+                    # Stream into DB buffer — flush at _commit_batch_size
+                    async with _db_flush_lock:
+                        _pending_db_rows.append(row)
+                    await _flush_pending_rows(force=False)
                     if output_queue is not None:
                         # Streaming mode: forward immediately to caller.
                         # asyncio.Queue(maxsize=200) provides natural backpressure —
@@ -1220,30 +1289,12 @@ async def scrape_one_store(
                     break
 
                 batch = pending_urls[start: start + BATCH]
-                _pre_count = len(rows)
 
                 await asyncio.gather(*[_fetch_one(u) for u in batch], return_exceptions=True)
 
-                # Persist every batch to SQLite immediately (GCP-safe, WAL mode)
-                _new_in_batch = rows[_pre_count:]
-                if _new_in_batch:
-                    try:
-                        # Phase 2 Item 5: use canonical normalizer — drops rows
-                        # with missing name / invalid price instead of polluting
-                        # the analysis table with zeros and empty strings.
-                        from utils.db_manager import (
-                            upsert_competitor_products,
-                            normalize_scraped_row_for_db,
-                        )
-                        _db_rows = [
-                            nr
-                            for r in _new_in_batch
-                            if (nr := normalize_scraped_row_for_db(r, domain)) is not None
-                        ]
-                        if _db_rows:
-                            upsert_competitor_products(domain, _db_rows)
-                    except Exception as _db_exc:
-                        logger.debug("SQLite real-time write error: %s", _db_exc)
+                # Real-time commits already happen inside _fetch_one every
+                # _commit_batch_size rows. Flush any stragglers from this batch.
+                await _flush_pending_rows(force=True)
 
                 recent_blocks = int(store_http_status.get("403", 0)) + int(store_http_status.get("429", 0))
                 recent_processed = start + len(batch)
@@ -1275,6 +1326,12 @@ async def scrape_one_store(
             await _run_batches()
 
     finally:
+        # Guaranteed final flush of any rows still in the streaming buffer —
+        # protects against data loss on crash, timeout, or circuit-breaker exit.
+        try:
+            await _flush_pending_rows(force=True)
+        except Exception:
+            logger.debug("final flush failed", exc_info=True)
         if own_session and session is not None and isinstance(session, aiohttp.ClientSession):
             if not session.closed:
                 await session.close()
