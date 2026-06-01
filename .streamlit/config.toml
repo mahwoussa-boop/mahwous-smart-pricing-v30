@@ -1,0 +1,15 @@
+[server]
+headless = false
+port = 8501
+fileWatcherType = "none"
+runOnSave = false
+maxUploadSize = 500
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+fastReruns = true
+
+[theme]
+base = "dark"

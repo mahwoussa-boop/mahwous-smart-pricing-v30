@@ -1,0 +1,38 @@
+# ملفات git وبيئات التطوير
+.git/
+.gitignore
+.github/
+.cursor/
+.vscode/
+
+# بيئات Python المحلية
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# أسرار وملفات محلية
+.env
+.env.*
+.streamlit/secrets.toml
+
+# سجلات ومخرجات مؤقتة
+*.log
+terminals/
+agent-transcripts/
+mcps/
+.cache/
+.pytest_cache/
+
+# قواعد بيانات وبيانات محلية لا نريد رفعها ضمن source deploy
+*.db
+data/
+
+# استثناءات مطلوبة للتشغيل
+!data/competitors_list_v30.json
+!Dockerfile
+!requirements.txt
+!app.py
+!docker_entrypoint.py

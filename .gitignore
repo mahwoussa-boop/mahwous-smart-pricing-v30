@@ -1,0 +1,26 @@
+# ── Data files (لا ترفع على GitHub) ──
+data/*.db
+data/*.sqlite
+data/*.csv
+data/*.xlsx
+data/*.json
+!data/competitors_list_v30.json
+!data/config*.json
+
+# ── Exports (ملفات التصدير) ──
+exports/
+
+# ── Temporary/scratch ──
+_*.py
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+
+# ── IDE ──
+.vscode/
+.idea/
+
+# ── OS ──
+Thumbs.db
+.DS_Store
