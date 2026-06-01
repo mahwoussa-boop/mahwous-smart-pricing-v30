@@ -1,0 +1,503 @@
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f680' in position 32: character maps to <undefined>
+Call stack:
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 198, in process_store_sitemap
+    logger.info(f"\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: {store_name} ({store_url})  incremental={incremental}")
+Message: '\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: ”⁄Ìœ ’·«Õ (https://saeedsalah.com/)  incremental=False'
+Arguments: ()
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 202, in process_store_sitemap
+    entries = await _fetch_and_parse_sitemap(session, sitemap_url)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 407, in _fetch_and_parse_sitemap
+    urls = await resolve_sitemap_recursively(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 292, in resolve_sitemap_recursively
+    xml_text = await _fetch_sitemap_text(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 73, in _fetch_sitemap_text
+    resp = await fetch_with_retry(session, url, max_retries=4, referer=ref)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\scrapers\anti_ban.py", line 512, in fetch_with_retry
+    resp = await session.get(url, **request_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 779, in _request
+    resp = await handler(req)
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 734, in _connect_and_send_request
+    conn = await self._connector.connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 672, in connect
+    proto = await self._create_connection(req, traces, timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1239, in _create_connection
+    _, proto = await self._create_direct_connection(req, traces, timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1562, in _create_direct_connection
+    hosts = await self._resolve_host(host, port, traces=traces)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1178, in _resolve_host
+    return await asyncio.shield(resolved_host_task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f680' in position 32: character maps to <undefined>
+Call stack:
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 198, in process_store_sitemap
+    logger.info(f"\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: {store_name} ({store_url})  incremental={incremental}")
+Message: '\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: ”⁄Ìœ ’·«Õ (https://saeedsalah.com/)  incremental=False'
+Arguments: ()
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 202, in process_store_sitemap
+    entries = await _fetch_and_parse_sitemap(session, sitemap_url)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 407, in _fetch_and_parse_sitemap
+    urls = await resolve_sitemap_recursively(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 292, in resolve_sitemap_recursively
+    xml_text = await _fetch_sitemap_text(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 73, in _fetch_sitemap_text
+    resp = await fetch_with_retry(session, url, max_retries=4, referer=ref)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\scrapers\anti_ban.py", line 512, in fetch_with_retry
+    resp = await session.get(url, **request_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 779, in _request
+    resp = await handler(req)
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 734, in _connect_and_send_request
+    conn = await self._connector.connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 672, in connect
+    proto = await self._create_connection(req, traces, timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1239, in _create_connection
+    _, proto = await self._create_direct_connection(req, traces, timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1562, in _create_direct_connection
+    hosts = await self._resolve_host(host, port, traces=traces)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1178, in _resolve_host
+    return await asyncio.shield(resolved_host_task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f680' in position 32: character maps to <undefined>
+Call stack:
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 198, in process_store_sitemap
+    logger.info(f"\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: {store_name} ({store_url})  incremental={incremental}")
+Message: '\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: ”⁄Ìœ ’·«Õ (https://saeedsalah.com/)  incremental=False'
+Arguments: ()
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 202, in process_store_sitemap
+    entries = await _fetch_and_parse_sitemap(session, sitemap_url)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 407, in _fetch_and_parse_sitemap
+    urls = await resolve_sitemap_recursively(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 292, in resolve_sitemap_recursively
+    xml_text = await _fetch_sitemap_text(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 73, in _fetch_sitemap_text
+    resp = await fetch_with_retry(session, url, max_retries=4, referer=ref)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\scrapers\anti_ban.py", line 512, in fetch_with_retry
+    resp = await session.get(url, **request_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 779, in _request
+    resp = await handler(req)
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 734, in _connect_and_send_request
+    conn = await self._connector.connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 672, in connect
+    proto = await self._create_connection(req, traces, timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1239, in _create_connection
+    _, proto = await self._create_direct_connection(req, traces, timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1562, in _create_direct_connection
+    hosts = await self._resolve_host(host, port, traces=traces)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1178, in _resolve_host
+    return await asyncio.shield(resolved_host_task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f680' in position 32: character maps to <undefined>
+Call stack:
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 198, in process_store_sitemap
+    logger.info(f"\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: {store_name} ({store_url})  incremental={incremental}")
+Message: '\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: ”⁄Ìœ ’·«Õ (https://saeedsalah.com/)  incremental=False'
+Arguments: ()
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 202, in process_store_sitemap
+    entries = await _fetch_and_parse_sitemap(session, sitemap_url)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 407, in _fetch_and_parse_sitemap
+    urls = await resolve_sitemap_recursively(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 292, in resolve_sitemap_recursively
+    xml_text = await _fetch_sitemap_text(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\engines\sitemap_resolve.py", line 73, in _fetch_sitemap_text
+    resp = await fetch_with_retry(session, url, max_retries=4, referer=ref)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\scrapers\anti_ban.py", line 512, in fetch_with_retry
+    resp = await session.get(url, **request_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 779, in _request
+    resp = await handler(req)
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 734, in _connect_and_send_request
+    conn = await self._connector.connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 672, in connect
+    proto = await self._create_connection(req, traces, timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1239, in _create_connection
+    _, proto = await self._create_direct_connection(req, traces, timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1562, in _create_direct_connection
+    hosts = await self._resolve_host(host, port, traces=traces)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\connector.py", line 1178, in _resolve_host
+    return await asyncio.shield(resolved_host_task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f680' in position 32: character maps to <undefined>
+Call stack:
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 198, in process_store_sitemap
+    logger.info(f"\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: {store_name} ({store_url})  incremental={incremental}")
+Message: '\U0001f680 »œ¡ „⁄«·Ã… «·„ Ã—: ”⁄Ìœ ’·«Õ (https://saeedsalah.com/)  incremental=True'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2705' in position 32: character maps to <undefined>
+Call stack:
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 213, in process_store_sitemap
+    logger.info(f"\u2705  „ «·⁄ÀÊ— ⁄·Ï {len(product_entries)} „‰ Ã ›Ì {store_name}")
+Message: '\u2705  „ «·⁄ÀÊ— ⁄·Ï 2721 „‰ Ã ›Ì ”⁄Ìœ ’·«Õ'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f195' in position 32: character maps to <undefined>
+Call stack:
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 227, in process_store_sitemap
+    logger.info(f"\U0001f195 {store_name}: ·« ÌÊÃœ ﬂ«‘ ”«»ﬁ ó ”Ì „ ﬂ‘ÿ «·ﬂ· ({len(product_entries)})")
+Message: '\U0001f195 ”⁄Ìœ ’·«Õ: ·« ÌÊÃœ ﬂ«‘ ”«»ﬁ ó ”Ì „ ﬂ‘ÿ «·ﬂ· (2721)'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 32-33: character maps to <undefined>
+Call stack:
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 244, in process_store_sitemap
+    logger.info(
+Message: '\u267b\ufe0f ”⁄Ìœ ’·«Õ: «” ∆‰«› „‰ DB ó  Œÿ¯Ì 1 —«»ÿ ﬂı‘ÿ »‰Ã«Õ «·ÌÊ„. «·„ »ﬁÌ: 2720'
+Arguments: ()
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 489, in run_automation
+    count = await process_store_sitemap(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 367, in process_store_sitemap
+    await asyncio.gather(*tasks, return_exceptions=True)
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 320, in _process_one
+    async with semaphore:
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\locks.py", line 15, in __aenter__
+    await self.acquire()
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\locks.py", line 387, in acquire
+    await fut
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Hp\Downloads\mahwous-smart-pricing-v30-master\mahwous-smart-pricing-v30-master\sitemap_automation.py", line 539, in <module>
+    asyncio.run(run_automation(incremental=not args.full))
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt
