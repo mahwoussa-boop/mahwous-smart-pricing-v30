@@ -142,6 +142,19 @@ def stat_card(icon, label, value, color="#6C63FF"):
 def vs_card(our_name, our_price, comp_name, comp_price, diff, comp_source="", product_id="", our_img="", comp_img="",
             comp_url="", our_url="", accent_border="", row_bg="", compact=False):
     """بطاقة VS الأساسية — المنافس الرئيسي (الأقل سعراً) + صور اختيارية"""
+    # Defensive: ensure numeric types even if caller passes strings/Series
+    try:
+        our_price = float(our_price)
+    except (TypeError, ValueError):
+        our_price = 0.0
+    try:
+        comp_price = float(comp_price)
+    except (TypeError, ValueError):
+        comp_price = 0.0
+    try:
+        diff = float(diff)
+    except (TypeError, ValueError):
+        diff = 0.0
     dc = "#FF1744" if diff > 0 else "#00C853" if diff < 0 else "#FFD600"
     src = f'<div style="font-size:.65rem;color:#666">{comp_source}</div>' if comp_source else ""
     pid = str(product_id) if product_id and str(product_id) not in ("", "nan", "None", "0") else ""
