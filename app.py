@@ -5312,7 +5312,28 @@ elif page == "🕷️ كشط المنافسين":
 
     def _load_stores() -> list:
         try:
-            return _json_sc.loads(open(_COMPETITORS_FILE, encoding="utf-8").read())
+            raw = _json_sc.loads(open(_COMPETITORS_FILE, encoding="utf-8").read())
+            if not isinstance(raw, list):
+                return []
+            # Normalize: entries may be plain URL strings or dicts with
+            # keys like "domain", "sitemap_url", "url", "name".
+            result = []
+            for item in raw:
+                if isinstance(item, str):
+                    result.append(item)
+                elif isinstance(item, dict):
+                    # Prefer explicit URL fields; fall back to domain
+                    url = (
+                        item.get("url")
+                        or item.get("sitemap_url")
+                        or item.get("link")
+                    )
+                    if url and isinstance(url, str):
+                        result.append(url.strip())
+                    elif item.get("domain"):
+                        result.append("https://" + str(item["domain"]).strip())
+                    # Skip entries that have no usable URL/domain
+            return result
         except Exception:
             return []
 
