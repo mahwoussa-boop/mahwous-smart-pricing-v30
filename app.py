@@ -5895,11 +5895,15 @@ elif page == "🕷️ كشط المنافسين":
             )
 
         # ── بطاقات الأرقام ────────────────────────────────────────────────
+        _rows_run = int(_prog.get("rows_saved_run", 0))
+        _urls_proc = int(_prog.get("urls_processed", 0))
         _mc1, _mc2, _mc3, _mc4 = st.columns(4)
         _mc1.metric("🏪 متاجر",     f"{_stores_done}/{_stores_tot}")
-        _mc2.metric("📦 منتجات",    f"{_rows:,}")
+        _mc2.metric("📦 محفوظ (هذا الجري)", f"{_rows_run:,}")
         _mc3.metric("📈 نجاح",      f"{_success:.1f}%")
         _mc4.metric("⚠️ أخطاء",    str(_errors))
+        if _rows > _rows_run:
+            st.caption(f"📊 إجمالي في ملف CSV: {_rows:,} منتج  |  🔗 روابط مفحوصة: {_urls_proc:,}")
 
         # ── قائمة المتاجر التفصيلية ──────────────────────────────────────
         _all_stores_list = _load_stores()
