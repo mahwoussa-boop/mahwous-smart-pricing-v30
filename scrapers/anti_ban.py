@@ -590,7 +590,7 @@ _REQ_SESSION   = None
 # doesn't recognise, try these same-family fallbacks so we still get a
 # working session instead of silently falling through to weaker fallbacks.
 _IMPERSONATE_FALLBACKS: Dict[str, Tuple[str, ...]] = {
-    "chrome131": ("chrome131", "chrome124", "chrome120", "chrome110"),
+    "chrome131": ("chrome131", "chrome124", "chrome120", "chrome110", "chrome107", "chrome104", "chrome100"),
     "safari_ios": ("safari_ios", "safari17_2_ios", "safari17_0_ios", "safari15_5"),
 }
 
@@ -633,7 +633,7 @@ def _get_cffi_session(impersonate: Optional[str] = None):
                 try:
                     from curl_cffi import requests as cffi_requests
                     # Try newest Chrome impersonation, fall back gracefully
-                    for imp in ("chrome131", "chrome124", "chrome120", "chrome110"):
+                    for imp in ("chrome131", "chrome124", "chrome120", "chrome110", "chrome107", "chrome104", "chrome100"):
                         try:
                             _CFFI_SESSION = cffi_requests.Session(impersonate=imp)
                             break
@@ -681,36 +681,35 @@ def try_curl_cffi(
 ) -> Optional[str]:
     """
     Attempt fetch via curl_cffi browser impersonation.
-
-    Args:
-        url:           target URL
-        timeout:       request timeout in seconds
-        proxy:         optional proxy URL string — passed to curl_cffi if provided
-        impersonate:   curl_cffi browser fingerprint (default "chrome131").
-                       Other useful values: "safari_ios" for mobile Safari.
-        extra_headers: additional headers merged on top of the default browser
-                       headers. Useful to force an XHR-style request via
-                       _MOBILE_AJAX_HEADERS as a second-pass attempt.
+    On 403/429, automatically tries older Chrome fingerprints.
     """
-    session = _get_cffi_session(impersonate=impersonate)
-    if session is None:
-        return None
-    try:
-        kwargs: dict = dict(timeout=timeout, allow_redirects=True)
-        if proxy:
-            kwargs["proxies"] = {"http": proxy, "https": proxy}
-        if extra_headers:
-            domain = urlparse(url).netloc
-            headers = get_browser_headers(
-                referer=f"https://{domain}/", domain=domain
-            )
-            headers.update(extra_headers)
-            kwargs["headers"] = headers
-        resp = session.get(url, **kwargs)
-        if resp.status_code == 200:
-            return resp.text
-    except Exception as exc:
-        logger.debug("curl_cffi %s: %s", url, type(exc).__name__)
+    # Build the list of impersonations to try
+    _try_list = _IMPERSONATE_FALLBACKS.get(impersonate, (impersonate,))
+
+    for imp in _try_list:
+        session = _get_cffi_session(impersonate=imp)
+        if session is None:
+            continue
+        try:
+            kwargs: dict = dict(timeout=timeout, allow_redirects=True)
+            if proxy:
+                kwargs["proxies"] = {"http": proxy, "https": proxy}
+            if extra_headers:
+                domain = urlparse(url).netloc
+                headers = get_browser_headers(
+                    referer=f"https://{domain}/", domain=domain
+                )
+                headers.update(extra_headers)
+                kwargs["headers"] = headers
+            resp = session.get(url, **kwargs)
+            if resp.status_code == 200:
+                return resp.text
+            if resp.status_code in (403, 429):
+                logger.debug("curl_cffi %s imp=%s got %d, trying next", url, imp, resp.status_code)
+                continue  # try next impersonation
+        except Exception as exc:
+            logger.debug("curl_cffi %s imp=%s: %s", url, imp, type(exc).__name__)
+            continue
     return None
 
 
