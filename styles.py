@@ -305,3 +305,28 @@ def miss_card(name, price, brand, size, ptype, comp, suggested_price,
 </div>
 </div>"""
     return dedent(inner).strip()
+
+
+def lazy_img_tag(url, w=56, h=56, alt="", loading="lazy"):
+    """HTML img tag with lazy loading and error handling."""
+    u = str(url or "").strip()
+    if not u or u.lower() in ("nan", "none", ""):
+        return ""
+    eu = _html_escape(u, quote=True)
+    safe_alt = _html_escape(str(alt or ""), quote=True)
+    return (
+        f'<img src="{eu}" width="{w}" height="{h}" alt="{safe_alt}" '
+        f'loading="{loading}" referrerpolicy="no-referrer" '
+        f'style="border-radius:6px;object-fit:cover;border:1px solid #333344;background:#0e1628" '
+        f'onerror="this.style.display=\'none\'" />'
+    )
+
+
+def linked_product_title(name, url="", max_len=60):
+    """Product title optionally wrapped in a link."""
+    safe = _html_escape(str(name or "")[:max_len])
+    u = str(url or "").strip()
+    if u and u.lower() not in ("nan", "none"):
+        eu = _html_escape(u, quote=True)
+        return f'<a href="{eu}" target="_blank" style="color:#4fc3f7;text-decoration:none" title="{_html_escape(str(name or ""), quote=True)}">{safe}</a>'
+    return f'<span style="color:#e0e0e0">{safe}</span>'
