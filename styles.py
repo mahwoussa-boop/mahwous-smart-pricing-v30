@@ -139,7 +139,8 @@ def stat_card(icon, label, value, color="#6C63FF"):
     return f'<div class="stat-card" style="border-top:3px solid {color}"><div style="font-size:1.3rem">{icon}</div><div class="num" style="color:{color}">{value}</div><div class="lbl">{label}</div></div>'
 
 
-def vs_card(our_name, our_price, comp_name, comp_price, diff, comp_source="", product_id="", our_img="", comp_img=""):
+def vs_card(our_name, our_price, comp_name, comp_price, diff, comp_source="", product_id="", our_img="", comp_img="",
+            comp_url="", our_url="", accent_border="", row_bg="", compact=False):
     """بطاقة VS الأساسية — المنافس الرئيسي (الأقل سعراً) + صور اختيارية"""
     dc = "#FF1744" if diff > 0 else "#00C853" if diff < 0 else "#FFD600"
     src = f'<div style="font-size:.65rem;color:#666">{comp_source}</div>' if comp_source else ""
@@ -162,11 +163,30 @@ def vs_card(our_name, our_price, comp_name, comp_price, diff, comp_source="", pr
         if cu and cu.lower() not in ("nan", "none")
         else ""
     )
-    return f'''<div class="vs-row">
-<div class="our-s">{our_img_html}<div style="font-size:.7rem;color:#8B8B8B">منتجنا</div><div style="font-weight:700;color:#B8B4FF;font-size:.9rem">{our_name}</div>{pid_html}<div style="font-size:1.1rem;font-weight:900;color:#6C63FF;margin-top:2px">{our_price:.0f} ر.س</div>{sugg_html}</div>
+    # Clickable product names
+    _our_url_s = str(our_url or "").strip()
+    _comp_url_s = str(comp_url or "").strip()
+    our_name_html = (
+        f'<a href="{_html_escape(_our_url_s, quote=True)}" target="_blank" style="color:#B8B4FF;text-decoration:none;font-weight:700;font-size:.9rem">{our_name}</a>'
+        if _our_url_s and _our_url_s.lower() not in ("nan", "none")
+        else f'<div style="font-weight:700;color:#B8B4FF;font-size:.9rem">{our_name}</div>'
+    )
+    comp_name_html = (
+        f'<a href="{_html_escape(_comp_url_s, quote=True)}" target="_blank" style="color:#FFD180;text-decoration:none;font-weight:700;font-size:.9rem">{comp_name}</a>'
+        if _comp_url_s and _comp_url_s.lower() not in ("nan", "none")
+        else f'<div style="font-weight:700;color:#FFD180;font-size:.9rem">{comp_name}</div>'
+    )
+    # Custom border/background
+    _border = accent_border if accent_border else "#333344"
+    _bg = row_bg if row_bg else "#1A1A2E"
+    # Compact mode: smaller padding
+    _pad = "8px" if compact else "12px"
+    return f'''<div class="vs-row" style="padding:{_pad};background:{_bg};border:1px solid {_border};border-radius:8px 8px 0 0;margin:5px 0 0 0;border-bottom:none">
+<div class="our-s">{our_img_html}<div style="font-size:.7rem;color:#8B8B8B">منتجنا</div>{our_name_html}{pid_html}<div style="font-size:1.1rem;font-weight:900;color:#6C63FF;margin-top:2px">{our_price:.0f} ر.س</div>{sugg_html}</div>
 <div class="vs-badge">VS</div>
-<div class="comp-s">{comp_img_html}<div style="font-size:.7rem;color:#8B8B8B">المنافس المتصدر</div><div style="font-weight:700;color:#FFD180;font-size:.9rem">{comp_name}</div><div style="font-size:1.1rem;font-weight:900;color:#ff9800;margin-top:2px">{comp_price:.0f} ر.س</div>{src}</div>
-</div><div style="text-align:center;background:#1A1A2E;padding:4px;border-left:1px solid #333344;border-right:1px solid #333344;margin:0"><span style="color:{dc};font-weight:700;font-size:.9rem">الفرق: {diff:+.0f} ر.س</span></div>'''
+<div class="comp-s">{comp_img_html}<div style="font-size:.7rem;color:#8B8B8B">المنافس المتصدر</div>{comp_name_html}<div style="font-size:1.1rem;font-weight:900;color:#ff9800;margin-top:2px">{comp_price:.0f} ر.س</div>{src}</div>
+</div><div style="text-align:center;background:{_bg};padding:4px;border-left:1px solid {_border};border-right:1px solid {_border};margin:0"><span style="color:{dc};font-weight:700;font-size:.9rem">الفرق: {diff:+.0f} ر.س</span></div>'''
+
 
 
 def comp_strip(all_comps, our_price=None, rank_by_threat=False, show_threat_badge=False):
