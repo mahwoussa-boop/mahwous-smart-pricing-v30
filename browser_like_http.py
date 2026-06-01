@@ -23,8 +23,8 @@ from urllib.parse import urlparse
 
 import requests
 
-_IMPERSONATE = (os.environ.get("SCRAPER_IMPERSONATE") or "chrome131").strip() or "chrome131"
-_ASYNC_IMPERSONATE = (os.environ.get("SCRAPER_ASYNC_IMPERSONATE") or "chrome120").strip() or "chrome120"
+_IMPERSONATE = (os.environ.get("SCRAPER_IMPERSONATE") or "chrome104").strip() or "chrome104"
+_ASYNC_IMPERSONATE = (os.environ.get("SCRAPER_ASYNC_IMPERSONATE") or "chrome104").strip() or "chrome104"
 _DISABLE_CURL = os.environ.get("SCRAPER_DISABLE_CURL_CFFI", "").lower() in ("1", "true", "yes")
 _PW_SETTLE_MS = int(os.environ.get("SCRAPER_PW_SETTLE_MS", "2500"))
 
@@ -96,7 +96,7 @@ def curl_cffi_safe_session(curl_requests_module) -> Any:
     try:
         return curl_requests_module.Session(impersonate=imp)
     except Exception:
-        for fallback in ("chrome124", "chrome120", "safari17_0"):
+        for fallback in ("chrome104", "chrome100", "chrome107", "chrome120", "safari17_0"):
             if fallback == imp:
                 continue
             try:
@@ -361,7 +361,7 @@ class AsyncScraperHTTP:
 
                 imp = _ASYNC_IMPERSONATE
                 session: Any = None
-                for cand in (imp, "chrome120", "chrome124", "chrome131", "safari17_0"):
+                for cand in (imp, "chrome104", "chrome100", "chrome107", "chrome120", "safari17_0"):
                     try:
                         session = AsyncSession(impersonate=cand)
                         break

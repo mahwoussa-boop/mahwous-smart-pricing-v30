@@ -504,7 +504,7 @@ def _product_fields_from_all_json_ld(html: str) -> dict:
 # for this domain and go straight to curl_cffi sync fallback. This prevents
 # concurrent 403 storms from tripping the circuit breaker.
 _DOMAIN_AIOHTTP_403: Dict[str, int] = {}
-_DOMAIN_SKIP_THRESHOLD = 3
+_DOMAIN_SKIP_THRESHOLD = 0  # Skip aiohttp entirely — curl_cffi chrome104 bypasses Cloudflare
 
 
 async def fetch_product(
@@ -633,25 +633,28 @@ async def fetch_product(
             logger.debug(f"Fetch failed for {url}: {traceback.format_exc()}")
             html = None
 
-        # في حال الحظر/الفشل، جرّب Fallback متزامن (curl_cffi/cloudscraper/requests)
-        if not html and _ANTI_BAN_AVAILABLE:
+        # في حال الحظر/الفشل، جرّب async curl_cffi مباشرة (أسرع من sync fallback)
+        if not html:
             try:
-                from scrapers.anti_ban import try_all_sync_fallbacks
-                loop = asyncio.get_running_loop()
-                # Use dedicated executor to prevent default pool exhaustion.
-                # Reduced timeout: 12s instead of 25s — still enough for most
-                # cloudscraper/curl_cffi attempts without blocking the pool.
-                # Hard absolute timeout — protects against sync libs (curl_cffi /
-                # cloudscraper) that ignore their own timeout under Cloudflare.
-                # Without wait_for, a hung thread occupies an executor slot
-                # indefinitely and eventually deadlocks the event loop.
-                html = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        _SYNC_EXECUTOR,
-                        lambda: try_all_sync_fallbacks(url, timeout=10, proxy=_proxy_url),
-                    ),
-                    timeout=15.0,
-                )
+                from browser_like_http import async_scraper_http_stack
+                # Use module-level shared fetcher if available, else quick one-off
+                _blh_fetcher = getattr(fetch_product, '_blh_fetcher', None)
+                if _blh_fetcher is not None:
+                    code, text = await _blh_fetcher.get_text_once(url, timeout=15.0)
+                    if code == 200 and text and len(text) > 500:
+                        html = text
+                else:
+                    # Fallback: sync curl_cffi via thread pool
+                    if _ANTI_BAN_AVAILABLE:
+                        from scrapers.anti_ban import try_all_sync_fallbacks
+                        loop = asyncio.get_running_loop()
+                        html = await asyncio.wait_for(
+                            loop.run_in_executor(
+                                _SYNC_EXECUTOR,
+                                lambda: try_all_sync_fallbacks(url, timeout=10, proxy=_proxy_url),
+                            ),
+                            timeout=15.0,
+                        )
             except (asyncio.TimeoutError, Exception):
                 html = None
 
@@ -912,6 +915,18 @@ async def scrape_one_store(
     # Always defined — code after `finally` and error paths must never hit NameError
     rows: List[dict] = []
     store_http_status: Dict[str, int] = {"403": 0, "429": 0}
+
+    # ── Initialize async curl_cffi fetcher (browser_like_http) ──────────
+    _blh = None
+    try:
+        from browser_like_http import AsyncScraperHTTP
+        _blh = AsyncScraperHTTP()
+        await _blh.__aenter__()
+        fetch_product._blh_fetcher = _blh
+        logger.info(f"🛡️ {domain} — AsyncScraperHTTP (chrome104) مفعّل")
+    except Exception as _blh_err:
+        logger.debug("browser_like_http unavailable: %s", _blh_err)
+        fetch_product._blh_fetcher = None
 
     try:
         if external_session is not None:
@@ -1335,6 +1350,13 @@ async def scrape_one_store(
         if own_session and session is not None and isinstance(session, aiohttp.ClientSession):
             if not session.closed:
                 await session.close()
+        # Close AsyncScraperHTTP (browser_like_http)
+        if _blh is not None:
+            try:
+                await _blh.__aexit__(None, None, None)
+            except Exception:
+                pass
+            fetch_product._blh_fetcher = None
         await asyncio.sleep(0.25)
 
     if not _force_run:

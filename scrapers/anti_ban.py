@@ -590,7 +590,7 @@ _REQ_SESSION   = None
 # doesn't recognise, try these same-family fallbacks so we still get a
 # working session instead of silently falling through to weaker fallbacks.
 _IMPERSONATE_FALLBACKS: Dict[str, Tuple[str, ...]] = {
-    "chrome131": ("chrome131", "chrome124", "chrome120", "chrome110", "chrome107", "chrome104", "chrome100"),
+    "chrome131": ("chrome104", "chrome100", "chrome107", "chrome110", "chrome120", "chrome124", "chrome131"),
     "safari_ios": ("safari_ios", "safari17_2_ios", "safari17_0_ios", "safari15_5"),
 }
 
@@ -633,7 +633,7 @@ def _get_cffi_session(impersonate: Optional[str] = None):
                 try:
                     from curl_cffi import requests as cffi_requests
                     # Try newest Chrome impersonation, fall back gracefully
-                    for imp in ("chrome131", "chrome124", "chrome120", "chrome110", "chrome107", "chrome104", "chrome100"):
+                    for imp in ("chrome104", "chrome100", "chrome107", "chrome110", "chrome120", "chrome124", "chrome131"):
                         try:
                             _CFFI_SESSION = cffi_requests.Session(impersonate=imp)
                             break
