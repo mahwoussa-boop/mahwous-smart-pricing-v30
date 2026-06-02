@@ -291,6 +291,18 @@ st.session_state.setdefault("processed_missing_urls", set())  # FIX: Smart Workf
 # FIX: Relaxed Constraints — التراكم دائم افتراضياً لحماية النتائج السابقة من الفقد.
 st.session_state["dash_accumulate_results"] = True
 
+# ── مسار حفظ الكتالوج التلقائي ──
+_OUR_CATALOG_PATH = os.path.join(os.environ.get("DATA_DIR", "data"), "our_catalog_saved.csv")
+
+# ── تحميل الكتالوج المحفوظ تلقائياً ──
+if st.session_state.get("our_df") is None and os.path.exists(_OUR_CATALOG_PATH):
+    try:
+        _saved_cat = pd.read_csv(_OUR_CATALOG_PATH, encoding="utf-8-sig")
+        if not _saved_cat.empty:
+            st.session_state.our_df = _saved_cat
+    except Exception:
+        pass
+
 # تحميل المنتجات المخفية من قاعدة البيانات عند كل تشغيل
 _db_hidden = get_hidden_product_keys()
 st.session_state.hidden_products = st.session_state.hidden_products | _db_hidden
@@ -2729,12 +2741,12 @@ if page == "📊 لوحة التحكم":
 
     # ── Duplicate-click mutex: UI + DB level ────────────────────────────
     try:
-        release_stale_running_jobs(stale_after_seconds=3600)
+        release_stale_running_jobs(stale_after_seconds=300)  # 5 دقائق كافية
     except Exception:
         pass
     _db_running_job = None
     try:
-        _db_running_job = any_running_job(stale_after_seconds=3600)
+        _db_running_job = any_running_job(stale_after_seconds=300)
     except Exception:
         _db_running_job = None
     _ui_job_running = bool(st.session_state.get("job_running", False))
@@ -2756,6 +2768,16 @@ if page == "📊 لوحة التحكم":
             f"⏳ يوجد تحليل قيد التشغيل (Job: `{_lock_jid}`){_prog_txt} — "
             "زر «بدء التحليل» مُعطَّل حتى الانتهاء."
         )
+        # زر تحرير القفل يدوياً
+        if st.button("🔓 تحرير القفل (إذا التحليل السابق انتهى ولم تظهر النتائج)", key="force_release_lock"):
+            try:
+                release_stale_running_jobs(stale_after_seconds=0)  # تحرير فوري
+                st.session_state.job_running = False
+                st.session_state.job_id = None
+                st.success("✅ تم تحرير القفل — اضغط 'بدء التحليل' الآن")
+                st.rerun()
+            except Exception as _rel_e:
+                st.error(f"❌ فشل تحرير القفل: {_rel_e}")
 
     if st.button(
         "🚀 بدء التحليل" if not _analysis_locked else "⏳ تحليل جارٍ... (يرجى الانتظار)",
@@ -2766,7 +2788,7 @@ if page == "📊 لوحة التحكم":
         # Second-chance re-check right before doing work: covers race between
         # render and click-handler (another replica may have acquired the lock).
         try:
-            _late = any_running_job(stale_after_seconds=3600)
+            _late = any_running_job(stale_after_seconds=300)
         except Exception:
             _late = None
         if _late or st.session_state.get("job_running", False):
@@ -2811,6 +2833,12 @@ if page == "📊 لوحة التحكم":
                     if max_rows > 0:
                         our_df = our_df.head(int(max_rows))
 
+                    # ── حفظ تلقائي للكتالوج ──
+                    try:
+                        our_df.to_csv(_OUR_CATALOG_PATH, index=False, encoding="utf-8-sig")
+                        st.session_state.our_df = our_df
+                    except Exception:
+                        pass
                     comp_dfs = {}
                     if _auto_mode:
                         # ── وضع الكشط التلقائي: تحميل CSV من القرص مع فصل كل متجر كمنافس مستقل ────────
