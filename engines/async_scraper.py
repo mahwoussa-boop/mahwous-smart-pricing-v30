@@ -658,6 +658,24 @@ async def fetch_product(
             except (asyncio.TimeoutError, Exception):
                 html = None
 
+        # Googlebot UA fallback — lightweight Cloudflare bypass for stores
+        # that whitelist Google's crawler (Matjrah-based like niche.sa).
+        # Runs only if all prior methods failed; avoids the heavier Selenium
+        # path that try_all_sync_fallbacks would eventually reach.
+        if not html and _ANTI_BAN_AVAILABLE:
+            try:
+                from scrapers.anti_ban import _try_googlebot_ua
+                loop = asyncio.get_running_loop()
+                html = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _SYNC_EXECUTOR,
+                        lambda: _try_googlebot_ua(url, timeout=15, proxy=_proxy_url),
+                    ),
+                    timeout=18.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                html = None
+
         if not html:
             return None
 

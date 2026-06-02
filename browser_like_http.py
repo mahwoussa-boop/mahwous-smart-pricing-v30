@@ -449,9 +449,37 @@ class AsyncScraperHTTP:
             r = await self._httpx.get(url, **kw)
             code = int(r.status_code)
             body = r.text or ""
-            return code, (body if body else None)
+            if code == 200 and body:
+                return code, body
         except Exception:
-            return 0, None
+            pass
+
+        # Fallback 3: Googlebot UA — bypasses Cloudflare on stores that
+        # whitelist Google's crawler (Matjrah-based stores like niche.sa).
+        try:
+            _gbot_ua = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+            _gbot_headers = {
+                "User-Agent": _gbot_ua,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Cache-Control": "no-cache",
+            }
+            r = await self._httpx.get(url, headers=_gbot_headers, timeout=t)
+            code = int(r.status_code)
+            body = r.text or ""
+            if code == 200 and body and len(body) > 500:
+                # Quick Cloudflare challenge check
+                _head = body[:15000].lower()
+                _cf_markers = ("just a moment", "challenge-platform", "cf_chl_opt",
+                               "cf-browser-verification", "checking your browser")
+                if not any(m in _head for m in _cf_markers):
+                    return code, body
+        except Exception:
+            pass
+
+        return 0, None
 
 
 @asynccontextmanager

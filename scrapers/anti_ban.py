@@ -772,7 +772,64 @@ def try_httpx(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  8b. ZenRows Web Unlocker — paid last-resort fallback
+#  8b. Googlebot UA — Cloudflare bypass for whitelisted crawlers (NEW v3.2)
+# ══════════════════════════════════════════════════════════════════════════
+_GOOGLEBOT_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+
+
+def _try_googlebot_ua(
+    url: str,
+    timeout: int = 20,
+    proxy: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Attempt fetch using Googlebot user-agent.
+
+    Many Cloudflare-protected stores (especially Matjrah-based ones like
+    niche.sa) whitelist Googlebot and serve full HTML without a JS challenge.
+    This is a lightweight fallback that can bypass WAFs that honour
+    Google's crawler identity.
+
+    Returns HTML text on success, None if blocked or on error.
+    """
+    import requests as _requests
+    domain = urlparse(url).netloc
+    headers = {
+        "User-Agent":      _GOOGLEBOT_UA,
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection":      "keep-alive",
+        "Cache-Control":   "no-cache",
+    }
+    try:
+        req_kwargs: dict = dict(
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=True,
+            verify=False,
+        )
+        if proxy:
+            req_kwargs["proxies"] = {"http": proxy, "https": proxy}
+        resp = _requests.get(url, **req_kwargs)
+        if resp.status_code == 200:
+            html = resp.text
+            if html and not looks_like_bot_challenge(html):
+                logger.info("Googlebot UA bypass succeeded: %s", url)
+                return html
+            else:
+                logger.debug("Googlebot UA got 200 but content is bot challenge: %s", url)
+        elif resp.status_code in (403, 429):
+            logger.debug("Googlebot UA blocked (%d): %s", resp.status_code, url)
+        else:
+            logger.debug("Googlebot UA status %d: %s", resp.status_code, url)
+    except Exception as exc:
+        logger.debug("Googlebot UA error %s: %s", url, type(exc).__name__)
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  8c. ZenRows Web Unlocker — paid last-resort fallback
 # ══════════════════════════════════════════════════════════════════════════
 def try_web_unlocker(url: str, timeout: int = 30) -> Optional[str]:
     """
@@ -821,8 +878,11 @@ def try_all_sync_fallbacks(
       1. curl_cffi (Chrome 131 desktop fingerprint)
       2. curl_cffi (Safari iOS fingerprint + XHR/AJAX headers)
       3. cloudscraper (JS-challenge bypass)
+      3b. httpx (HTTP/2 with modern TLS)
+      3c. Googlebot UA (bypasses Cloudflare on Matjrah/whitelisted stores)
       4. requests (rotated browser headers, optional proxy)
       5. ZenRows Web Unlocker (paid, only if ZENROWS_API_KEY is set)
+      6. Selenium / headless Chromium (last resort)
 
     proxy: optional proxy URL forwarded to curl_cffi and requests. The
     ZenRows step uses its own premium proxy pool and ignores this.
@@ -856,6 +916,12 @@ def try_all_sync_fallbacks(
     html_hx = try_httpx(url, timeout=timeout, proxy=proxy)
     if html_hx and not looks_like_bot_challenge(html_hx):
         return html_hx
+
+    # Attempt 3c: Googlebot UA — bypasses Cloudflare on stores that
+    # whitelist Google's crawler (Matjrah-based stores, etc.) (NEW v3.2)
+    html_gbot = _try_googlebot_ua(url, timeout=timeout, proxy=proxy)
+    if html_gbot:
+        return html_gbot  # looks_like_bot_challenge already checked inside
 
     # Attempt 4: requests — rotated browser headers, optional proxy
     html_req: Optional[str] = None
@@ -904,7 +970,7 @@ def try_all_sync_fallbacks(
 
     # Return whatever partial HTML we got rather than None so callers can
     # still try to parse a soft-blocked page.
-    return html or html_mobile or html_cs or html_hx or html_req or html_wu or None
+    return html or html_mobile or html_cs or html_hx or html_gbot or html_req or html_wu or None
 
 
 def looks_like_bot_challenge(html: str) -> bool:

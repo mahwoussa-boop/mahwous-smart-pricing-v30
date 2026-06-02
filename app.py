@@ -5064,6 +5064,250 @@ elif page == "🕷️ كشط المنافسين":
     db_log("scraper", "view")
 
     # ════════════════════════════════════════════════════════════════════════
+    #  ⚡ كشط سريع عبر محلي — Mahally.com (Algolia API)
+    # ════════════════════════════════════════════════════════════════════════
+    with st.expander("⚡ كشط سريع عبر محلي (الأسرع والأدق)", expanded=True):
+        st.caption(
+            "يستخدم منصة **mahally.com** لاستخراج بيانات المنافسين مباشرة — "
+            "**بدون حظر Cloudflare** — بيانات غنية ومنظمة (اسم، سعر، ماركة، تصنيف، صورة) "
+            "في ثوانٍ معدودة."
+        )
+
+        # ── تحميل المحرك ──
+        _mahally_ok = False
+        try:
+            from engines.mahally_scraper import MahallyScraper as _MS
+            _mahally_ok = True
+        except ImportError as _me:
+            st.error(f"❌ تعذّر تحميل محرك محلي: {_me}")
+
+        if _mahally_ok:
+            # ── تحميل المتاجر المُعرَّفة ──
+            import json as _json_mh
+            _mh_comp_file = _os_scraper.path.join(
+                _os_scraper.environ.get("DATA_DIR", "data"), "competitors_list_v30.json"
+            )
+            _mh_stores = {}
+            try:
+                with open(_mh_comp_file, "r", encoding="utf-8") as _f:
+                    _mh_raw = _json_mh.load(_f)
+                for _entry in _mh_raw:
+                    _mid = _entry.get("mahally_store_id")
+                    if _mid:
+                        _mh_stores[_entry.get("name", f"store_{_mid}")] = int(_mid)
+            except Exception:
+                pass
+
+            # ── إحصاءات سريعة ──
+            if _mh_stores:
+                _c1, _c2, _c3 = st.columns(3)
+                _c1.metric("🏪 متاجر مُعرَّفة", len(_mh_stores))
+                _c2.metric("⚡ السرعة", "~1000 منتج / 24 ثانية")
+                _c3.metric("🛡️ بدون حظر", "✅ Cloudflare bypass")
+
+            # ── اختيار المتاجر ──
+            _mh_all_names = list(_mh_stores.keys()) if _mh_stores else []
+            _mh_selected = st.multiselect(
+                "اختر المتاجر للكشط",
+                options=_mh_all_names,
+                default=_mh_all_names,
+                key="mahally_store_select",
+            )
+
+            # ── إضافة متجر جديد ──
+            with st.popover("➕ إضافة متجر جديد"):
+                st.caption("أدخل رابط المتجر من mahally.com مثل:")
+                st.code("https://mahally.com/stores/216339537/")
+                _new_mh_url = st.text_input("رابط محلي", key="new_mahally_url", placeholder="https://mahally.com/stores/...")
+                _new_mh_name = st.text_input("اسم المتجر", key="new_mahally_name", placeholder="اسم المنافس")
+                if st.button("✅ إضافة", key="add_mahally_store"):
+                    import re as _re_mh
+                    _id_match = _re_mh.search(r'/stores/(\d+)', _new_mh_url or "")
+                    if _id_match and _new_mh_name:
+                        _new_id = int(_id_match.group(1))
+                        # اختبار سريع
+                        try:
+                            _test_scraper = _MS()
+                            _test_info = _test_scraper.get_store_info(_new_id)
+                            if _test_info.get("total_products", 0) > 0:
+                                # حفظ في JSON
+                                try:
+                                    with open(_mh_comp_file, "r", encoding="utf-8") as _f:
+                                        _comp_data = _json_mh.load(_f)
+                                except Exception:
+                                    _comp_data = []
+                                # تحقق من عدم التكرار
+                                _exists = any(e.get("mahally_store_id") == _new_id for e in _comp_data)
+                                if not _exists:
+                                    _comp_data.append({
+                                        "name": _new_mh_name,
+                                        "store_url": _new_mh_url,
+                                        "sitemap_url": "",
+                                        "mahally_store_id": _new_id,
+                                    })
+                                    with open(_mh_comp_file, "w", encoding="utf-8") as _f:
+                                        _json_mh.dump(_comp_data, _f, ensure_ascii=False, indent=2)
+                                st.success(
+                                    f"✅ تم إضافة **{_test_info.get('name', _new_mh_name)}** "
+                                    f"({_test_info.get('total_products', 0):,} منتج)"
+                                )
+                                st.rerun()
+                            else:
+                                st.error("❌ لم يتم العثور على منتجات — تأكد من الرابط")
+                        except Exception as _te:
+                            st.error(f"❌ خطأ: {_te}")
+                    else:
+                        st.warning("⚠️ أدخل رابط صحيح واسم المتجر")
+
+            # ── زر الكشط ──
+            st.markdown("---")
+            _col_btn1, _col_btn2 = st.columns(2)
+            _mh_scrape_btn = _col_btn1.button(
+                "🚀 بدء الكشط السريع",
+                type="primary",
+                use_container_width=True,
+                disabled=not _mh_selected,
+                key="mahally_scrape_btn",
+            )
+            _mh_info_btn = _col_btn2.button(
+                "ℹ️ معلومات المتاجر",
+                use_container_width=True,
+                disabled=not _mh_selected,
+                key="mahally_info_btn",
+            )
+
+            # ── معلومات المتاجر ──
+            if _mh_info_btn:
+                _info_scraper = _MS()
+                _info_data = []
+                for _sn in _mh_selected:
+                    _sid = _mh_stores.get(_sn)
+                    if _sid:
+                        _inf = _info_scraper.get_store_info(_sid)
+                        _info_data.append({
+                            "المتجر": _inf.get("name", _sn),
+                            "Store ID": _sid,
+                            "المنتجات": f"{_inf.get('total_products', 0):,}",
+                            "الصفحات": _inf.get("pages", 0),
+                        })
+                if _info_data:
+                    st.dataframe(pd.DataFrame(_info_data), use_container_width=True, hide_index=True)
+
+            # ── تنفيذ الكشط ──
+            if _mh_scrape_btn and _mh_selected:
+                _selected_ids = {n: _mh_stores[n] for n in _mh_selected if n in _mh_stores}
+                _scraper = _MS(
+                    db_path=_os_scraper.path.join(
+                        _os_scraper.environ.get("DATA_DIR", "data"), "pricing_v18.db"
+                    )
+                )
+
+                _progress_bar = st.progress(0, text="جاري التحضير...")
+                _status_text = st.empty()
+                _results_container = st.container()
+
+                _all_results = {}
+                _total_stores = len(_selected_ids)
+                _total_products = 0
+
+                for _i, (_sname, _sid) in enumerate(_selected_ids.items(), 1):
+                    _progress_bar.progress(
+                        (_i - 1) / _total_stores,
+                        text=f"⏳ كشط {_sname} ({_i}/{_total_stores})..."
+                    )
+                    _status_text.info(f"🔄 جاري كشط **{_sname}** (Store ID: {_sid})...")
+
+                    try:
+                        _prods = _scraper.scrape_store(_sid, _sname)
+                        _all_results[_sname] = _prods
+                        _total_products += len(_prods)
+
+                        # حفظ في DB
+                        if _prods:
+                            _scraper.save_to_db(_prods, _sname)
+
+                        _status_text.success(
+                            f"✅ {_sname}: {len(_prods):,} منتج"
+                        )
+                    except Exception as _se:
+                        _status_text.error(f"❌ {_sname}: {_se}")
+                        _all_results[_sname] = []
+
+                _progress_bar.progress(1.0, text="✅ اكتمل الكشط!")
+
+                # ── عرض النتائج ──
+                with _results_container:
+                    st.markdown("### 📊 نتائج الكشط")
+                    _res_cols = st.columns(3)
+                    _res_cols[0].metric("📦 إجمالي المنتجات", f"{_total_products:,}")
+                    _res_cols[1].metric("🏪 المتاجر", f"{len(_all_results)}")
+                    _res_cols[2].metric("⚡ الحالة", "✅ مكتمل")
+
+                    # جدول ملخص
+                    _summary = []
+                    for _sn, _prods in _all_results.items():
+                        _prices = [p["price"] for p in _prods if p.get("price", 0) > 0]
+                        _summary.append({
+                            "المتجر": _sn,
+                            "المنتجات": len(_prods),
+                            "أقل سعر": f"{min(_prices):,.0f}" if _prices else "—",
+                            "أعلى سعر": f"{max(_prices):,.0f}" if _prices else "—",
+                            "متوسط السعر": f"{sum(_prices)/len(_prices):,.0f}" if _prices else "—",
+                        })
+                    st.dataframe(pd.DataFrame(_summary), use_container_width=True, hide_index=True)
+
+                    # تصدير
+                    st.markdown("### 📥 تصدير النتائج")
+                    _exp_dir = _os_scraper.path.join(
+                        _os_scraper.path.dirname(_os_scraper.path.abspath(__file__)), "exports"
+                    )
+
+                    _exp_c1, _exp_c2, _exp_c3 = st.columns(3)
+
+                    # CSV
+                    try:
+                        _csv_path = _scraper.export_csv(_all_results, _exp_dir)
+                        if _csv_path and _os_scraper.path.exists(_csv_path):
+                            with open(_csv_path, "rb") as _cf:
+                                _exp_c1.download_button(
+                                    "📄 تحميل CSV",
+                                    data=_cf.read(),
+                                    file_name="mahally_products.csv",
+                                    mime="text/csv",
+                                    key="dl_mahally_csv",
+                                )
+                    except Exception:
+                        pass
+
+                    # Excel
+                    try:
+                        _xlsx_path = _scraper.export_excel(_all_results, _exp_dir)
+                        if _xlsx_path and _os_scraper.path.exists(_xlsx_path):
+                            with open(_xlsx_path, "rb") as _xf:
+                                _exp_c2.download_button(
+                                    "📊 تحميل Excel",
+                                    data=_xf.read(),
+                                    file_name="mahally_products.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key="dl_mahally_xlsx",
+                                )
+                    except Exception:
+                        pass
+
+                    # عرض عينة
+                    with st.expander("👀 عينة من المنتجات"):
+                        for _sn, _prods in _all_results.items():
+                            if _prods:
+                                st.markdown(f"**{_sn}** ({len(_prods):,} منتج)")
+                                _sample_df = pd.DataFrame(_prods[:20])[
+                                    ["name", "price", "original_price", "brand", "category"]
+                                ]
+                                _sample_df.columns = ["المنتج", "السعر", "السعر الأصلي", "الماركة", "التصنيف"]
+                                st.dataframe(_sample_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+    # ════════════════════════════════════════════════════════════════════════
     #  🚀 التحديث الذكي عبر Sitemap (تزايدي — يكشط فقط ما تغيّر)
     # ════════════════════════════════════════════════════════════════════════
     with st.expander("🚀 تحديث ذكي عبر Sitemap (موصى به)", expanded=True):

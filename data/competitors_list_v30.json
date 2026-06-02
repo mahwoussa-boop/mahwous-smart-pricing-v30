@@ -1,20 +1,133 @@
 [
-  {"name": "سعيد صلاح", "store_url": "https://saeedsalah.com/", "sitemap_url": "https://saeedsalah.com/sitemap.xml"},
-  {"name": "فانيلا", "store_url": "https://vanilla.sa/", "sitemap_url": "https://vanilla.sa/sitemap.xml"},
-  {"name": "سارا ميكب", "store_url": "https://sara-makeup.com/", "sitemap_url": "https://sara-makeup.com/sitemap.xml"},
-  {"name": "خبير العطور", "store_url": "https://alkhabeershop.com/", "sitemap_url": "https://alkhabeershop.com/sitemap.xml"},
-  {"name": "قولدن سنت", "store_url": "https://www.goldenscent.com/", "sitemap_url": "https://www.goldenscent.com/sitemap.xml"},
-  {"name": "لي سانتو", "store_url": "https://leesanto.com/", "sitemap_url": "https://leesanto.com/sitemap.xml"},
-  {"name": "آزال", "store_url": "https://azalperfume.com/", "sitemap_url": "https://azalperfume.com/sitemap.xml"},
-  {"name": "كاندي نيش", "store_url": "https://candyniche.com/", "sitemap_url": "https://candyniche.com/sitemap.xml"},
-  {"name": "الفاخرة للنيش", "store_url": "https://luxuryperfumesnish.com/", "sitemap_url": "https://luxuryperfumesnish.com/sitemap.xml"},
-  {"name": "حنان العطور", "store_url": "https://hanan-store55.com/", "sitemap_url": "https://hanan-store55.com/sitemap.xml"},
-  {"name": "اريج امواج", "store_url": "https://areejamwaj.com/", "sitemap_url": "https://areejamwaj.com/sitemap.xml"},
-  {"name": "نايس ون", "store_url": "https://niceonesa.com/", "sitemap_url": "https://niceonesa.com/sitemap.xml"},
-  {"name": "سيفورا", "store_url": "https://www.sephora.me/sa-ar", "sitemap_url": "https://www.sephora.me/sa-ar/sitemap.xml"},
-  {"name": "وجوه", "store_url": "https://www.faces.sa/ar", "sitemap_url": "https://www.faces.sa/ar/sitemap.xml"},
-  {"name": "نيش", "store_url": "https://niche.sa/", "sitemap_url": "https://niche.sa/sitemap.xml"},
-  {"name": "عالم جيفنشي", "store_url": "https://worldgivenchy.com/", "sitemap_url": "https://worldgivenchy.com/sitemap.xml"},
-  {"name": "ساره ستور", "store_url": "https://sarahmakeup37.com/", "sitemap_url": "https://sarahmakeup37.com/sitemap.xml"},
-  {"name": "اروماتيك كلاود", "store_url": "https://aromaticcloud.com/", "sitemap_url": "https://aromaticcloud.com/sitemap.xml"}
+  {
+    "name": "سعيد صلاح",
+    "store_url": "https://saeedsalah.com/",
+    "sitemap_url": "https://saeedsalah.com/sitemap.xml",
+    "mahally_store_id": 216339537
+  },
+  {
+    "name": "فانيلا",
+    "store_url": "https://vanilla.sa/",
+    "sitemap_url": "https://vanilla.sa/sitemap.xml",
+    "mahally_store_id": 1313514692
+  },
+  {
+    "name": "سارا ميكب",
+    "store_url": "https://sara-makeup.com/",
+    "sitemap_url": "https://sara-makeup.com/sitemap.xml",
+    "mahally_store_id": 1951545756
+  },
+  {
+    "name": "خبير العطور",
+    "store_url": "https://alkhabeershop.com/",
+    "sitemap_url": "https://alkhabeershop.com/sitemap.xml",
+    "mahally_store_id": 1972135409
+  },
+  {
+    "name": "قولدن سنت",
+    "store_url": "https://www.goldenscent.com/",
+    "sitemap_url": "https://www.goldenscent.com/sitemap.xml"
+  },
+  {
+    "name": "لي سانتو",
+    "store_url": "https://leesanto.com/",
+    "sitemap_url": "https://leesanto.com/sitemap.xml",
+    "mahally_store_id": 1849653975
+  },
+  {
+    "name": "آزال",
+    "store_url": "https://azalperfume.com/",
+    "sitemap_url": "https://azalperfume.com/sitemap.xml"
+  },
+  {
+    "name": "كاندي نيش",
+    "store_url": "https://candyniche.com/",
+    "sitemap_url": "https://candyniche.com/sitemap.xml",
+    "mahally_store_id": 1905926999
+  },
+  {
+    "name": "الفاخرة للنيش",
+    "store_url": "https://luxuryperfumesnish.com/",
+    "sitemap_url": "https://luxuryperfumesnish.com/sitemap.xml",
+    "mahally_store_id": 997023036
+  },
+  {
+    "name": "حنان العطور",
+    "store_url": "https://hanan-store55.com/",
+    "sitemap_url": "https://hanan-store55.com/sitemap.xml",
+    "mahally_store_id": 615954461
+  },
+  {
+    "name": "اريج امواج",
+    "store_url": "https://areejamwaj.com/",
+    "sitemap_url": "https://areejamwaj.com/sitemap.xml",
+    "mahally_store_id": 416083448
+  },
+  {
+    "name": "نايس ون",
+    "store_url": "https://niceonesa.com/",
+    "sitemap_url": "https://niceonesa.com/sitemap.xml"
+  },
+  {
+    "name": "سيفورا",
+    "store_url": "https://www.sephora.me/sa-ar",
+    "sitemap_url": "https://www.sephora.me/sa-ar/sitemap.xml"
+  },
+  {
+    "name": "وجوه",
+    "store_url": "https://www.faces.sa/ar",
+    "sitemap_url": "https://www.faces.sa/ar/sitemap.xml"
+  },
+  {
+    "name": "نيش",
+    "store_url": "https://niche.sa/",
+    "sitemap_url": "https://niche.sa/sitemap.xml"
+  },
+  {
+    "name": "عالم جيفنشي",
+    "store_url": "https://worldgivenchy.com/",
+    "sitemap_url": "https://worldgivenchy.com/sitemap.xml",
+    "mahally_store_id": 1891860617
+  },
+  {
+    "name": "ساره ستور",
+    "store_url": "https://sarahmakeup37.com/",
+    "sitemap_url": "https://sarahmakeup37.com/sitemap.xml",
+    "mahally_store_id": 1165709693
+  },
+  {
+    "name": "اروماتيك كلاود",
+    "store_url": "https://aromaticcloud.com/",
+    "sitemap_url": "https://aromaticcloud.com/sitemap.xml"
+  },
+  {
+    "name": "نواعم",
+    "store_url": "https://mahally.com/stores/413235677/",
+    "sitemap_url": "",
+    "mahally_store_id": 413235677
+  },
+  {
+    "name": "أفنوس",
+    "store_url": "https://mahally.com/stores/711221552/",
+    "sitemap_url": "",
+    "mahally_store_id": 711221552
+  },
+  {
+    "name": "الروائح الراقية",
+    "store_url": "https://mahally.com/stores/736338798/",
+    "sitemap_url": "",
+    "mahally_store_id": 736338798
+  },
+  {
+    "name": "بسمة الجمال",
+    "store_url": "https://mahally.com/stores/591387310/",
+    "sitemap_url": "",
+    "mahally_store_id": 591387310
+  },
+  {
+    "name": "باسيلو",
+    "store_url": "https://mahally.com/stores/781082777/",
+    "sitemap_url": "",
+    "mahally_store_id": 781082777
+  }
 ]
