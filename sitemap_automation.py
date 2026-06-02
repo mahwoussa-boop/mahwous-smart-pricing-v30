@@ -153,10 +153,17 @@ def _filter_product_entries(entries, store_url):
 
 
 def _slug_from_url(product_url: str) -> str:
-    slug = product_url.rstrip('/').split('/')[-1].replace('-', ' ').replace('_', ' ')
-    if slug.startswith('p') and any(c.isdigit() for c in slug):
-        slug = "منتج " + slug
-    return slug
+    """استخراج اسم مقروء من الرابط — يُستخدم كبديل إذا فشل استخراج الاسم."""
+    parts = product_url.rstrip('/').split('/')
+    slug = parts[-1] if parts else ""
+    # تنظيف الـ slug
+    slug = slug.replace('-', ' ').replace('_', ' ').replace('+', ' ')
+    # إزالة المعرّفات الرقمية الطويلة (مثل p1234567890)
+    slug = re.sub(r'^p\d{6,}$', '', slug, flags=re.I).strip()
+    # إذا فارغ بعد التنظيف، جرب الجزء السابق من الرابط
+    if not slug and len(parts) >= 2:
+        slug = parts[-2].replace('-', ' ').replace('_', ' ')
+    return slug if slug else ""
 
 
 def _is_real_bot_challenge(html: str) -> bool:

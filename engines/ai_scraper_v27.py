@@ -284,17 +284,64 @@ def scrape_product_ai(
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # استخراج الاسم
-        name = product_name_fallback
+        # ═══════════════════════════════════════════════════════════
+        #  استخراج الاسم — أولوية: JSON-LD > og:title > h1 > title
+        #  متاجر سلة تحمّل المحتوى بـ JS — DOM غالباً فارغ
+        #  لكن JSON-LD و og:title متاحين دائماً في HTML الخام
+        # ═══════════════════════════════════════════════════════════
+        name = ""
+        
+        # (1) JSON-LD — المصدر الأكثر دقة وموثوقية
+        for script_tag in soup.find_all('script', type='application/ld+json'):
+            raw_json = script_tag.string or script_tag.get_text() or ''
+            try:
+                ld_data = json.loads(raw_json)
+                # Handle @graph arrays
+                if isinstance(ld_data, list):
+                    for item in ld_data:
+                        if isinstance(item, dict) and item.get('@type') in ('Product', 'product'):
+                            ld_data = item
+                            break
+                if isinstance(ld_data, dict):
+                    ld_name = ld_data.get('name') or ''
+                    if isinstance(ld_name, str) and len(ld_name.strip()) > 3:
+                        name = ld_name.strip()
+                        break
+            except Exception:
+                continue
+        
+        # (2) og:title — متاح في معظم المتاجر حتى مع JS rendering
         if not name:
-            # محاولة استخراج من العنوان
+            og_title = soup.find('meta', attrs={'property': 'og:title'})
+            if og_title and og_title.get('content'):
+                _og_name = og_title['content'].strip()
+                if len(_og_name) > 3:
+                    name = _og_name
+        
+        # (3) h1 — العنوان الرئيسي (قد يكون فارغاً في متاجر JS)
+        if not name:
+            h1 = soup.find('h1')
+            if h1:
+                _h1_text = h1.get_text(strip=True)
+                if len(_h1_text) > 3:
+                    name = _h1_text
+        
+        # (4) title tag — احتياطي أخير
+        if not name:
             title = soup.find('title')
             if title:
-                name = title.get_text(strip=True)
-            else:
-                h1 = soup.find('h1')
-                if h1:
-                    name = h1.get_text(strip=True)
+                _title_text = title.get_text(strip=True)
+                # إزالة اسم المتجر من العنوان إن وجد
+                for sep in [' | ', ' - ', ' – ', ' — ']:
+                    if sep in _title_text:
+                        _title_text = _title_text.split(sep)[0].strip()
+                        break
+                if len(_title_text) > 3:
+                    name = _title_text
+        
+        # (5) Fallback — استخدام الـ slug من URL
+        if not name:
+            name = product_name_fallback
         
         name = clean_product_name_ai(name)
         
