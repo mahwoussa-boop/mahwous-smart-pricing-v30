@@ -5219,6 +5219,14 @@ elif page == "🕷️ كشط المنافسين":
 
                     try:
                         _prods = _scraper.scrape_store(_sid, _sname)
+
+                        # إعادة محاولة إذا فشل (0 منتجات مع وجود منتجات فعلية)
+                        if not _prods:
+                            import time as _time_mh
+                            _status_text.warning(f"⚠️ {_sname}: 0 منتج — إعادة المحاولة بعد 10 ثوانٍ...")
+                            _time_mh.sleep(10)
+                            _prods = _scraper.scrape_store(_sid, _sname)
+
                         _all_results[_sname] = _prods
                         _total_products += len(_prods)
 
@@ -5232,6 +5240,12 @@ elif page == "🕷️ كشط المنافسين":
                     except Exception as _se:
                         _status_text.error(f"❌ {_sname}: {_se}")
                         _all_results[_sname] = []
+
+                    # تأخير 5 ثوانٍ بين المتاجر لتجنب حظر mahally.com
+                    if _i < _total_stores:
+                        import time as _time_mh2
+                        _status_text.info(f"⏳ انتظار 5 ثوانٍ قبل المتجر التالي...")
+                        _time_mh2.sleep(5)
 
                 _progress_bar.progress(1.0, text="✅ اكتمل الكشط!")
 
