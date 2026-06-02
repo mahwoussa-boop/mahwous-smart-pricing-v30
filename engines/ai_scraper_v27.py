@@ -271,6 +271,7 @@ def scrape_product_ai(
         "name": "",
         "price": 0.0,
         "price_source": "not_found",
+        "image_url": "",
         "size": "",
         "brand": "",
         "gender": "للجنسين",
@@ -303,10 +304,57 @@ def scrape_product_ai(
         # استخراج البيانات الوصفية
         metadata = extract_metadata_ai(html_content, name)
         
+        # ── استخراج صورة المنتج ──────────────────────────────────────
+        image_url = ""
+        try:
+            # (1) OpenGraph og:image — الأكثر شيوعاً وموثوقية
+            og_img = soup.find('meta', attrs={'property': 'og:image'})
+            if og_img and og_img.get('content'):
+                image_url = og_img['content'].strip()
+            
+            # (2) JSON-LD image
+            if not image_url:
+                for s in soup.find_all('script', type='application/ld+json'):
+                    raw = s.string or s.get_text() or ''
+                    try:
+                        data = json.loads(raw)
+                        if isinstance(data, dict):
+                            img = data.get('image') or ''
+                            if isinstance(img, list):
+                                img = img[0] if img else ''
+                            if isinstance(img, dict):
+                                img = img.get('url') or img.get('contentUrl') or ''
+                            if img and isinstance(img, str):
+                                image_url = img.strip()
+                                break
+                    except Exception:
+                        continue
+            
+            # (3) Product image selectors
+            if not image_url:
+                img_selectors = [
+                    'img[class*="product"]',
+                    'img[class*="gallery"]',
+                    'img[itemprop="image"]',
+                    '.product-image img',
+                    '.product-gallery img',
+                    '.main-image img',
+                ]
+                for sel in img_selectors:
+                    img_el = soup.select_one(sel)
+                    if img_el:
+                        src = img_el.get('src') or img_el.get('data-src') or ''
+                        if src and not src.endswith('.svg'):
+                            image_url = src.strip()
+                            break
+        except Exception:
+            pass
+        
         # تعبئة النتيجة
         result["name"] = name
         result["price"] = price
         result["price_source"] = price_source
+        result["image_url"] = image_url
         result["size"] = metadata["size"]
         result["brand"] = metadata["brand"]
         result["gender"] = metadata["gender"]
