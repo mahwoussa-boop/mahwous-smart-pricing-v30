@@ -134,66 +134,100 @@ class MahallyScraper:
         return products
 
     def _scrape_via_algolia(self, store_id: int, store_name: str) -> List[Dict]:
-        """كشط عبر Algolia API مباشرة — بدون mahally.com."""
+        """كشط عبر Algolia API — تقسيم بنطاقات الأسعار لجلب 100% من المنتجات."""
+        seen_ids: set = set()
         products: List[Dict] = []
-        page = 0
 
-        while True:
-            payload = {
-                "query": "",
-                "hitsPerPage": HITS_PER_PAGE,
-                "page": page,
-                "facetFilters": [f"store_id:{store_id}"],
-                "attributesToRetrieve": [
-                    "name", "price", "regular_price", "sale_price",
-                    "brand_name", "image", "categories", "discount_percentage",
-                    "public_product_id", "store_id", "purchasable", "description"
-                ],
-            }
+        # أولاً: عدد المنتجات المتوقع
+        try:
+            r0 = requests.post(
+                ALGOLIA_API_URL, headers=ALGOLIA_HEADERS,
+                json={"query": "", "hitsPerPage": 0,
+                      "facetFilters": [f"store_id:{store_id}"]},
+                timeout=15,
+            )
+            expected = r0.json().get("nbHits", 0) if r0.status_code == 200 else 0
+        except Exception:
+            expected = 0
 
-            ok = False
-            for attempt in range(3):
+        if expected == 0:
+            return []
+
+        log.info("  Algolia: %d منتج متوقع", expected)
+
+        # نطاقات سعرية ذكية
+        ranges = []
+        for s in range(0, 500, 50):
+            ranges.append((s, s + 50))
+        for s in range(500, 2000, 200):
+            ranges.append((s, s + 200))
+        for s in range(2000, 10000, 1000):
+            ranges.append((s, s + 1000))
+        ranges.append((10000, 999999))
+
+        # تنفيذ متوازي — 5 نطاقات في وقت واحد
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _fetch_range(lo, hi):
+            return self._algolia_range(store_id, store_name, lo, hi, seen_ids)
+
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            futures = {ex.submit(_fetch_range, lo, hi): (lo, hi) for lo, hi in ranges}
+            for f in as_completed(futures):
                 try:
-                    resp = requests.post(
-                        ALGOLIA_API_URL, headers=ALGOLIA_HEADERS,
-                        json=payload, timeout=30,
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        hits = data.get("hits", [])
-                        nb_hits = data.get("nbHits", 0)
-                        nb_pages = data.get("nbPages", 0)
+                    prods = f.result()
+                    products.extend(prods)
+                except Exception as e:
+                    log.warning("  range error: %s", e)
 
-                        if page == 0:
-                            log.info("  Algolia: %d منتج | %d صفحة", nb_hits, nb_pages)
+        coverage = (len(products) / expected * 100) if expected else 0
+        self._notify(store_name, 1, 1, f"{len(products):,}/{expected:,} ({coverage:.0f}%)")
+        log.info("  %d/%d (%.1f%%)", len(products), expected, coverage)
+        return products
 
-                        if not hits:
-                            break
+    def _algolia_range(self, store_id, store_name, lo, hi, seen_ids):
+        """جلب منتجات نطاق سعري — تقسيم تلقائي إذا > 1000."""
+        filt = f"store_id:{store_id} AND price.SA.SAR:{lo} TO {hi}"
+        products = []
 
-                        for h in hits:
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    ALGOLIA_API_URL, headers=ALGOLIA_HEADERS,
+                    json={
+                        "query": "", "hitsPerPage": HITS_PER_PAGE, "page": 0,
+                        "filters": filt,
+                        "attributesToRetrieve": [
+                            "name", "price", "regular_price", "sale_price",
+                            "brand_name", "image", "categories", "discount_percentage",
+                            "public_product_id", "store_id", "purchasable",
+                        ],
+                    },
+                    timeout=20,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    hits = data.get("hits", [])
+                    nb = data.get("nbHits", 0)
+
+                    for h in hits:
+                        pid = h.get("public_product_id", h.get("objectID", ""))
+                        if pid and pid not in seen_ids:
+                            seen_ids.add(pid)
                             prod = self._parse_hit(h, store_name)
                             if prod:
                                 products.append(prod)
 
-                        self._notify(
-                            store_name, page + 1, nb_pages,
-                            f"صفحة {page+1}/{nb_pages} — {len(products)} منتج"
-                        )
-                        ok = True
-                        break
-                    else:
-                        time.sleep(2)
-                except Exception as e:
-                    log.warning("  Algolia attempt %d: %s", attempt + 1, e)
-                    time.sleep(2)
-
-            if not ok or not hits:
-                break
-
-            page += 1
-            if page >= nb_pages:
-                break
-            time.sleep(0.2)
+                    # تقسيم تلقائي إذا النطاق > 1000
+                    if nb > 1000 and (hi - lo) > 2:
+                        mid = (lo + hi) / 2
+                        products += self._algolia_range(store_id, store_name, lo, mid, seen_ids)
+                        products += self._algolia_range(store_id, store_name, mid, hi, seen_ids)
+                    break
+                else:
+                    time.sleep(1)
+            except Exception:
+                time.sleep(1)
 
         return products
 
