@@ -570,12 +570,16 @@ def any_running_job(stale_after_seconds: int = 3600):
     within ``stale_after_seconds``. Returns None if no fresh running job.
     Acts as a DB-level mutex to prevent duplicate analysis starts across
     concurrent clicks, reruns, or replicas.
+
+    NOTE: Sitemap scraper jobs (job_id starts with 'sitemap_auto_') are
+    excluded — they should NOT block the analysis button.
     """
     try:
         conn = get_db()
         row = conn.execute(
             "SELECT job_id, processed, total, updated_at, started_at "
             "FROM job_progress WHERE status='running' "
+            "AND job_id NOT LIKE 'sitemap_auto_%' "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
         conn.close()
