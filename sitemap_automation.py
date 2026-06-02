@@ -141,6 +141,11 @@ def _filter_product_entries(entries, store_url):
         if any(url_lower.endswith(ext) for ext in _EXCLUDE_EXT):
             continue
 
+        # استبعاد صفحات الأقسام (Salla/Ecwid: /cNNNNN)
+        last_seg = url_lower.rstrip("/").split("/")[-1]
+        if last_seg and last_seg[0] == "c" and last_seg[1:].isdigit():
+            continue
+
         product_entries.append(entry)
 
     return product_entries
@@ -154,45 +159,99 @@ def _slug_from_url(product_url: str) -> str:
     return slug
 
 
+def _is_real_bot_challenge(html: str) -> bool:
+    """فحص ذكي لـ bot challenge — لا يُطلق إنذار كاذب على صفحات المتاجر.
+
+    الفرق عن looks_like_bot_challenge في anti_ban.py:
+    - لا يتأثر بـ 'enable javascript' في <noscript> tags
+    - لا يتأثر بـ 'access denied' في وصف منتج
+    - يفحص فقط العلامات الحقيقية: CF challenge page, CAPTCHA, DataDome
+    """
+    if not html:
+        return True
+    # صفحات قصيرة جداً = bot challenge أو صفحة خطأ
+    if len(html.strip()) < 500:
+        return True
+    head = html[:15000].lower()
+    # صفحة حقيقية فيها منتج = أكيد مش bot challenge
+    product_signals = [
+        '"@type":"product"', '"@type": "product"',  # JSON-LD
+        'itemprop="price"', "itemprop='price'",      # Schema.org
+        'og:price:amount', 'product:price:amount',   # OpenGraph
+        'add-to-cart', 'addtocart', 'add_to_cart',   # زر شراء
+        'salla.', 'zid.', 'shopify',                 # منصات متاجر
+    ]
+    if any(sig in head for sig in product_signals):
+        return False
+    # علامات bot challenge حقيقية (صريحة جداً)
+    real_challenge_markers = [
+        "cf_chl_opt",           # Cloudflare challenge script
+        "cf-browser-verification",  # Cloudflare verification div
+        "just a moment",        # Cloudflare "Just a moment..."
+        "checking your browser", # Cloudflare checking
+        "attention required! | cloudflare",
+        "px-captcha",           # PerimeterX CAPTCHA
+        "h-captcha",            # hCaptcha
+        "g-recaptcha",          # reCAPTCHA
+        "window._ddc",          # DataDome
+    ]
+    return any(m in head for m in real_challenge_markers)
+
 def _scrape_single_product_sync(product_url: str, store_name: str) -> dict | None:
     """
     جلب وكشط منتج واحد — يعمل في thread منفصل.
 
-    يستخدم سلسلة anti-ban الكاملة:
-      1. curl_cffi (Chrome TLS fingerprint)
-      2. curl_cffi (Safari iOS + XHR)
-      3. cloudscraper (JS challenge bypass)
-      4. httpx (HTTP/2)
-      5. requests (browser headers)
-      6. ZenRows / Selenium (last resort)
+    يستخدم curl_cffi كمحرك أساسي (بصمة TLS حقيقية)
+    ثم يرجع لسلسلة anti-ban الكاملة كـ fallback.
     """
     slug = _slug_from_url(product_url)
     domain = product_url.split("//")[-1].split("/")[0]
 
-    # ── adaptive rate limiting ──
+    # ── adaptive rate limiting (خفيف — curl_cffi بصمة مختلفة عن aiohttp) ──
     rl = get_rate_limiter()
     backoff_remaining = rl.get_backoff_remaining(domain)
     if backoff_remaining > 0:
-        time.sleep(min(backoff_remaining, 30))
+        # حد أقصى 5 ثواني — curl_cffi لا يتأثر بنفس الحظر
+        time.sleep(min(backoff_remaining, 5))
 
-    # ── تأخير عشوائي لمنع burst ──
-    time.sleep(random.uniform(_MIN_DELAY, _MAX_DELAY))
+    # ── تأخير عشوائي خفيف لمنع burst ──
+    time.sleep(random.uniform(0.2, 0.6))
 
     html = None
-    try:
-        # المحرك الرئيسي: سلسلة 6 طبقات ضد الحظر
-        html = try_all_sync_fallbacks(product_url, timeout=20)
-    except Exception as exc:
-        logger.debug(f"anti-ban chain error for {product_url}: {exc}")
 
+    # ── المحاولة 1: curl_cffi مباشرة (أسرع + بدون فحص bot خاطئ) ──
+    try:
+        html = try_curl_cffi(product_url, timeout=20)
+    except Exception:
+        pass
+
+    # ── المحاولة 2: cloudscraper (تجاوز Cloudflare JS) ──
+    if not html or _is_real_bot_challenge(html):
+        try:
+            from scrapers.anti_ban import try_cloudscraper
+            html2 = try_cloudscraper(product_url, timeout=20)
+            if html2 and not _is_real_bot_challenge(html2):
+                html = html2
+        except Exception:
+            pass
+
+    # ── المحاولة 3: httpx HTTP/2 ──
+    if not html or _is_real_bot_challenge(html):
+        try:
+            from scrapers.anti_ban import try_httpx
+            html3 = try_httpx(product_url, timeout=20)
+            if html3 and not _is_real_bot_challenge(html3):
+                html = html3
+        except Exception:
+            pass
+
+    # ── النتيجة ──
     if not html:
         rl.record_error(domain, 403)
-        _ua_rotator.mark_failed(domain, "all")
         return None
 
-    # ── فحص bot challenge ──
-    if looks_like_bot_challenge(html):
-        logger.debug(f"bot challenge detected: {product_url}")
+    # فحص bot challenge حقيقي فقط (ليس noscript tags)
+    if _is_real_bot_challenge(html):
         rl.record_error(domain, 403)
         return None
 
