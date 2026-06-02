@@ -2917,7 +2917,22 @@ if page == "📊 لوحة التحكم":
                         # لا توجد ملفات مرفوعة → تحميل من المخزن التراكمي
                         _db_comp_df = get_competitor_products_df()
                         if not _db_comp_df.empty and "competitor" in _db_comp_df.columns:
-                            for _cname, _cgroup in _db_comp_df.groupby("competitor", sort=False):
+                            # تعيين الأعمدة لتطابق ما يتوقعه المحرك
+                            _db_rename = {
+                                "product_name": "المنتج",
+                                "price": "السعر",
+                                "image_url": "صورة المنتج",
+                                "product_url": "رابط المنتج",
+                                "competitor": "المنافس",
+                            }
+                            _db_comp_df = _db_comp_df.rename(columns={
+                                k: v for k, v in _db_rename.items()
+                                if k in _db_comp_df.columns
+                            })
+                            for _cname, _cgroup in _db_comp_df.groupby(
+                                "المنافس" if "المنافس" in _db_comp_df.columns else "competitor",
+                                sort=False
+                            ):
                                 comp_dfs[str(_cname)] = _cgroup.reset_index(drop=True)
                             st.caption(
                                 f"📂 تم تحميل {len(_db_comp_df):,} منتج منافس من المخزن التراكمي "
@@ -2927,6 +2942,17 @@ if page == "📊 لوحة التحكم":
                         # ملفات مرفوعة + بيانات DB → دمج (الملف الجديد يفوز على التكرارات)
                         _db_comp_df = get_competitor_products_df()
                         if not _db_comp_df.empty and "competitor" in _db_comp_df.columns:
+                            # تعيين الأعمدة لتطابق ما يتوقعه المحرك
+                            _db_rename2 = {
+                                "product_name": "المنتج",
+                                "price": "السعر",
+                                "image_url": "صورة المنتج",
+                                "product_url": "رابط المنتج",
+                            }
+                            _db_comp_df = _db_comp_df.rename(columns={
+                                k: v for k, v in _db_rename2.items()
+                                if k in _db_comp_df.columns
+                            })
                             _db_only_comps = set(_db_comp_df["competitor"].unique()) - set(comp_dfs.keys())
                             _merged_count = 0
                             for _cname in _db_only_comps:

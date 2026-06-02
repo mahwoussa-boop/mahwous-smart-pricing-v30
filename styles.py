@@ -293,7 +293,8 @@ def comp_strip(all_comps, our_price=None, rank_by_threat=False, show_threat_badg
 
 def miss_card(name, price, brand, size, ptype, comp, suggested_price,
               note="", variant_html="", tester_badge="", border_color="#007bff44",
-              confidence_level="green", confidence_score=0, image_url=""):
+              confidence_level="green", confidence_score=0, image_url="",
+              product_id="", comp_url="", title_override=""):
     """بطاقة المنتج المفقود — HTML بدون مسافات بادئة (تجنب تفسير Markdown ككتلة كود)."""
     safe_name = _html_escape(str(name or ""))
     safe_brand = _html_escape(str(brand or "—"))
