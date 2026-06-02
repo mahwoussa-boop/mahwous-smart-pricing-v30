@@ -123,53 +123,71 @@ class MahallyScraper:
 
         while page <= min(total_pages, MAX_PAGES):
             url = BASE_URL.format(store_id=store_id, page=page)
-            try:
-                resp = self.session.get(url, timeout=30)
-                if resp.status_code != 200:
-                    log.warning(
-                        "  صفحة %d — HTTP %d, توقف", page, resp.status_code
+            success = False
+
+            for attempt in range(3):  # 3 محاولات لكل صفحة
+                try:
+                    resp = self.session.get(url, timeout=30)
+
+                    if resp.status_code == 503:
+                        wait = [3, 8, 15][attempt]
+                        log.warning(
+                            "  صفحة %d — HTTP 503 (محاولة %d/3) — انتظار %ds",
+                            page, attempt + 1, wait,
+                        )
+                        time.sleep(wait)
+                        continue
+
+                    if resp.status_code != 200:
+                        log.warning(
+                            "  صفحة %d — HTTP %d, توقف", page, resp.status_code
+                        )
+                        break
+
+                    hits, nb_hits, nb_pages = self._extract_hits(resp.text)
+
+                    if page == 1:
+                        total_pages = min(nb_pages, MAX_PAGES)
+                        log.info(
+                            "  إجمالي المنتجات: %d | الصفحات: %d (max %d)",
+                            nb_hits, nb_pages, total_pages,
+                        )
+
+                    if not hits:
+                        log.info("  صفحة %d فارغة — توقف", page)
+                        break
+
+                    for hit in hits:
+                        prod = self._parse_hit(hit, store_name)
+                        if prod:
+                            products.append(prod)
+
+                    # إشعار التقدم
+                    self._notify(
+                        store_name, page, total_pages,
+                        f"صفحة {page}/{total_pages} — {len(products)} منتج حتى الآن"
                     )
-                    break
 
-                hits, nb_hits, nb_pages = self._extract_hits(resp.text)
-
-                if page == 1:
-                    total_pages = min(nb_pages, MAX_PAGES)
                     log.info(
-                        "  إجمالي المنتجات: %d | الصفحات: %d (max %d)",
-                        nb_hits, nb_pages, total_pages,
+                        "  صفحة %d/%d — %d hit → %d إجمالي",
+                        page, total_pages, len(hits), len(products),
                     )
+                    success = True
+                    break  # نجاح — لا حاجة لإعادة المحاولة
 
-                if not hits:
-                    log.info("  صفحة %d فارغة — توقف", page)
+                except requests.RequestException as e:
+                    log.error("  خطأ في صفحة %d (محاولة %d): %s", page, attempt + 1, e)
+                    time.sleep(3)
+                except Exception as e:
+                    log.error("  خطأ غير متوقع صفحة %d: %s", page, e)
                     break
 
-                for hit in hits:
-                    prod = self._parse_hit(hit, store_name)
-                    if prod:
-                        products.append(prod)
-
-                # إشعار التقدم
-                self._notify(
-                    store_name, page, total_pages,
-                    f"صفحة {page}/{total_pages} — {len(products)} منتج حتى الآن"
-                )
-
-                log.info(
-                    "  صفحة %d/%d — %d hit → %d إجمالي",
-                    page, total_pages, len(hits), len(products),
-                )
-
-            except requests.RequestException as e:
-                log.error("  خطأ في صفحة %d: %s", page, e)
-                break
-            except Exception as e:
-                log.error("  خطأ غير متوقع صفحة %d: %s", page, e)
+            if not success and page > 1:
                 break
 
             page += 1
             if page <= total_pages:
-                time.sleep(PAGE_DELAY)
+                time.sleep(max(PAGE_DELAY, 1.0))  # تأخير 1 ثانية على الأقل
 
         log.info(
             "✔ '%s' — %d منتج من %d صفحة", store_name, len(products), page - 1
