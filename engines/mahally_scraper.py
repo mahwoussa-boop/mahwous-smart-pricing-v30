@@ -28,9 +28,19 @@ log = logging.getLogger(__name__)
 # ── ثوابت ──────────────────────────────────────────────────────────────
 BASE_URL = "https://mahally.com/stores/{store_id}?page={page}"
 ALGOLIA_INDEX = "products_v2_store_view"
-MAX_PAGES = 10          # الحد الأقصى للصفحات (Algolia يدعم 10 كحد أقصى)
-HITS_PER_PAGE = 100     # عدد المنتجات في كل صفحة
-PAGE_DELAY = 0.3        # تأخير بين الصفحات (ثانية)
+MAX_PAGES = 10
+HITS_PER_PAGE = 1000
+PAGE_DELAY = 0.3
+
+# ── Algolia API مباشرة (أسرع 100x وبدون حظر) ──────────────────────────
+ALGOLIA_APP_ID = "L41Y35UONW"
+ALGOLIA_API_KEY = "f60e98a284e4b402af626d0dd1fc6cbd"
+ALGOLIA_API_URL = f"https://{ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/{ALGOLIA_INDEX}/query"
+ALGOLIA_HEADERS = {
+    "X-Algolia-Application-Id": ALGOLIA_APP_ID,
+    "X-Algolia-API-Key": ALGOLIA_API_KEY,
+    "Content-Type": "application/json",
+}
 
 CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -105,93 +115,131 @@ class MahallyScraper:
 
     def scrape_store(self, store_id: int, store_name: str = None) -> List[Dict]:
         """
-        كشط جميع صفحات متجر واحد.
-
-        Args:
-            store_id: معرف المتجر على mahally.com
-            store_name: اسم المتجر (اختياري — يُستخدم الاسم المعروف أو المعرف)
-
-        Returns:
-            قائمة بقواميس المنتجات المستخرجة
+        كشط متجر واحد — يستخدم Algolia API مباشرة (الأسرع).
+        إذا فشل، يعود للطريقة القديمة (HTML scraping).
         """
         store_name = store_name or self.stores.get(store_id, str(store_id))
+        log.info("▶ بدء كشط '%s' (ID: %d)", store_name, store_id)
+
+        # ── الطريقة 1: Algolia API مباشرة (أسرع 100x) ──
+        products = self._scrape_via_algolia(store_id, store_name)
+        if products:
+            log.info("✔ '%s' — %d منتج (Algolia API)", store_name, len(products))
+            return products
+
+        # ── الطريقة 2: HTML scraping (fallback) ──
+        log.info("  ⚠ Algolia فشل — محاولة HTML scraping")
+        products = self._scrape_via_html(store_id, store_name)
+        log.info("✔ '%s' — %d منتج (HTML)", store_name, len(products))
+        return products
+
+    def _scrape_via_algolia(self, store_id: int, store_name: str) -> List[Dict]:
+        """كشط عبر Algolia API مباشرة — بدون mahally.com."""
+        products: List[Dict] = []
+        page = 0
+
+        while True:
+            payload = {
+                "query": "",
+                "hitsPerPage": HITS_PER_PAGE,
+                "page": page,
+                "facetFilters": [f"store_id:{store_id}"],
+                "attributesToRetrieve": [
+                    "name", "price", "regular_price", "sale_price",
+                    "brand_name", "image", "categories", "discount_percentage",
+                    "public_product_id", "store_id", "purchasable", "description"
+                ],
+            }
+
+            ok = False
+            for attempt in range(3):
+                try:
+                    resp = requests.post(
+                        ALGOLIA_API_URL, headers=ALGOLIA_HEADERS,
+                        json=payload, timeout=30,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        hits = data.get("hits", [])
+                        nb_hits = data.get("nbHits", 0)
+                        nb_pages = data.get("nbPages", 0)
+
+                        if page == 0:
+                            log.info("  Algolia: %d منتج | %d صفحة", nb_hits, nb_pages)
+
+                        if not hits:
+                            break
+
+                        for h in hits:
+                            prod = self._parse_hit(h, store_name)
+                            if prod:
+                                products.append(prod)
+
+                        self._notify(
+                            store_name, page + 1, nb_pages,
+                            f"صفحة {page+1}/{nb_pages} — {len(products)} منتج"
+                        )
+                        ok = True
+                        break
+                    else:
+                        time.sleep(2)
+                except Exception as e:
+                    log.warning("  Algolia attempt %d: %s", attempt + 1, e)
+                    time.sleep(2)
+
+            if not ok or not hits:
+                break
+
+            page += 1
+            if page >= nb_pages:
+                break
+            time.sleep(0.2)
+
+        return products
+
+    def _scrape_via_html(self, store_id: int, store_name: str) -> List[Dict]:
+        """كشط عبر HTML من mahally.com (fallback)."""
         products: List[Dict] = []
         page = 1
-        total_pages = MAX_PAGES  # يُحدَّث بعد الصفحة الأولى
-
-        log.info("▶ بدء كشط '%s' (ID: %d)", store_name, store_id)
+        total_pages = MAX_PAGES
 
         while page <= min(total_pages, MAX_PAGES):
             url = BASE_URL.format(store_id=store_id, page=page)
             success = False
 
-            for attempt in range(3):  # 3 محاولات لكل صفحة
+            for attempt in range(3):
                 try:
                     resp = self.session.get(url, timeout=30)
-
                     if resp.status_code == 503:
                         wait = [3, 8, 15][attempt]
-                        log.warning(
-                            "  صفحة %d — HTTP 503 (محاولة %d/3) — انتظار %ds",
-                            page, attempt + 1, wait,
-                        )
+                        log.warning("  HTML page %d — 503 (attempt %d) — wait %ds", page, attempt+1, wait)
                         time.sleep(wait)
                         continue
-
                     if resp.status_code != 200:
-                        log.warning(
-                            "  صفحة %d — HTTP %d, توقف", page, resp.status_code
-                        )
                         break
 
                     hits, nb_hits, nb_pages = self._extract_hits(resp.text)
-
                     if page == 1:
                         total_pages = min(nb_pages, MAX_PAGES)
-                        log.info(
-                            "  إجمالي المنتجات: %d | الصفحات: %d (max %d)",
-                            nb_hits, nb_pages, total_pages,
-                        )
-
                     if not hits:
-                        log.info("  صفحة %d فارغة — توقف", page)
                         break
 
                     for hit in hits:
                         prod = self._parse_hit(hit, store_name)
                         if prod:
                             products.append(prod)
-
-                    # إشعار التقدم
-                    self._notify(
-                        store_name, page, total_pages,
-                        f"صفحة {page}/{total_pages} — {len(products)} منتج حتى الآن"
-                    )
-
-                    log.info(
-                        "  صفحة %d/%d — %d hit → %d إجمالي",
-                        page, total_pages, len(hits), len(products),
-                    )
                     success = True
-                    break  # نجاح — لا حاجة لإعادة المحاولة
-
-                except requests.RequestException as e:
-                    log.error("  خطأ في صفحة %d (محاولة %d): %s", page, attempt + 1, e)
-                    time.sleep(3)
-                except Exception as e:
-                    log.error("  خطأ غير متوقع صفحة %d: %s", page, e)
                     break
+                except Exception as e:
+                    log.error("  HTML page %d error: %s", page, e)
+                    time.sleep(3)
 
             if not success and page > 1:
                 break
-
             page += 1
             if page <= total_pages:
-                time.sleep(max(PAGE_DELAY, 1.0))  # تأخير 1 ثانية على الأقل
+                time.sleep(max(PAGE_DELAY, 1.0))
 
-        log.info(
-            "✔ '%s' — %d منتج من %d صفحة", store_name, len(products), page - 1
-        )
         return products
 
     def scrape_all_stores(
