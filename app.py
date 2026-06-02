@@ -292,10 +292,11 @@ st.session_state.setdefault("processed_missing_urls", set())  # FIX: Smart Workf
 st.session_state["dash_accumulate_results"] = True
 
 # ── مسار حفظ الكتالوج التلقائي ──
-_OUR_CATALOG_PATH = os.path.join(os.environ.get("DATA_DIR", "data"), "our_catalog_saved.csv")
+import os as _os_cat
+_OUR_CATALOG_PATH = _os_cat.path.join(_os_cat.environ.get("DATA_DIR", "data"), "our_catalog_saved.csv")
 
 # ── تحميل الكتالوج المحفوظ تلقائياً ──
-if st.session_state.get("our_df") is None and os.path.exists(_OUR_CATALOG_PATH):
+if st.session_state.get("our_df") is None and _os_cat.path.exists(_OUR_CATALOG_PATH):
     try:
         _saved_cat = pd.read_csv(_OUR_CATALOG_PATH, encoding="utf-8-sig")
         if not _saved_cat.empty:
