@@ -95,20 +95,56 @@ logger = logging.getLogger("SitemapAutomation_v4")
 
 
 def _filter_product_entries(entries, store_url):
-    """تصفية روابط المنتجات فقط بناءً على أنماط شائعة"""
+    """تصفية روابط المنتجات — نستبعد الصفحات غير المنتجات فقط.
+
+    المنطق: أمرّر كل الروابط إلا اللي أكيد مش منتجات.
+    المنتجات اللي ما فيها اسم/سعر سيتم رفضها تلقائياً في الكشط.
+    """
+    # صفحات مستبعدة بشكل قاطع
+    _EXCLUDE = [
+        "/blog/", "/page/", "/category/", "/categories/", "/tag/", "/tags/",
+        "/cart", "/checkout", "/contact", "/account", "/wishlist", "/compare",
+        "/login", "/register", "/search", "/about", "/faq", "/privacy",
+        "/terms", "/policy", "/shipping", "/return", "/sitemap", "/feed",
+        "/wp-content/", "/wp-admin/", "/wp-includes/",
+        "/cdn-cgi/", "/.well-known/",
+    ]
+    # امتدادات ملفات مستبعدة (صور، ملفات)
+    _EXCLUDE_EXT = (
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
+        ".pdf", ".css", ".js", ".xml", ".json", ".txt", ".zip",
+        ".mp4", ".mp3", ".woff", ".woff2", ".ttf", ".eot",
+    )
     product_entries = []
-    patterns = ["/p/", "/product/", "/products/", "/item/", "/shop/", "منتج"]
+    store_domain = store_url.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0].lower()
 
     for entry in entries:
-        url = entry.url.lower()
-        if any(x in url for x in ["/blog/", "/page/", "/category/", "/tag/",
-                                    "/cart", "/checkout", "/contact",
-                                    "/account", "/wishlist", "/compare"]):
+        url = entry.url
+        url_lower = url.lower()
+
+        # استبعاد روابط من دومينات أخرى (CDN/صور)
+        entry_domain = url_lower.replace("https://", "").replace("http://", "").split("/")[0]
+        if entry_domain != store_domain:
             continue
-        if any(p in url for p in patterns) or url.rstrip('/').split('/')[-1].startswith('p'):
-            product_entries.append(entry)
+
+        # استبعاد الصفحة الرئيسية
+        path = url_lower.replace("https://", "").replace("http://", "")
+        path = path[path.find("/"):] if "/" in path else "/"
+        if path.rstrip("/") in ("", "/"):
+            continue
+
+        # استبعاد أنماط الصفحات غير المنتجات
+        if any(x in url_lower for x in _EXCLUDE):
+            continue
+
+        # استبعاد ملفات (صور، CSS، JS)
+        if any(url_lower.endswith(ext) for ext in _EXCLUDE_EXT):
+            continue
+
+        product_entries.append(entry)
 
     return product_entries
+
 
 
 def _slug_from_url(product_url: str) -> str:
