@@ -105,6 +105,7 @@ def test_review_patterns():
     except ImportError as e:
         issues.append(f'❌ دوال مفقودة: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 # ═══════════════════════════════════════════════════════════
@@ -159,6 +160,7 @@ def test_real_reviews_bank():
     except ImportError as e:
         issues.append(f'❌ استيراد فاشل: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 # ═══════════════════════════════════════════════════════════
@@ -218,6 +220,7 @@ def test_anti_repeat():
     except ImportError as e:
         issues.append(f'❌ استيراد فاشل: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 # ═══════════════════════════════════════════════════════════
@@ -247,6 +250,7 @@ def test_short_texts():
     except ImportError as e:
         issues.append(f'❌ استيراد فاشل: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 # ═══════════════════════════════════════════════════════════
@@ -278,6 +282,7 @@ def test_dialects():
     except ImportError as e:
         issues.append(f'❌ استيراد فاشل: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 # ═══════════════════════════════════════════════════════════
@@ -332,6 +337,7 @@ def test_personas():
     except ImportError as e:
         issues.append(f'❌ استيراد فاشل: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 # ═══════════════════════════════════════════════════════════
@@ -377,6 +383,7 @@ def test_database():
     except Exception as e:
         issues.append(f'❌ خطأ: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 def test_engine():
@@ -433,6 +440,7 @@ def test_engine():
     except Exception as e:
         issues.append(f'❌ خطأ: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 # ═══════════════════════════════════════════════════════════
@@ -495,6 +503,7 @@ def test_vocabulary_diversity():
     except ImportError as e:
         issues.append(f'❌ استيراد فاشل: {e}')
     
+    assert not issues, '\n'.join(str(_i) for _i in issues)
     return issues
 
 # ═══════════════════════════════════════════════════════════
