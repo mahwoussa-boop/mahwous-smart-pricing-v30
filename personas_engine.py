@@ -91,12 +91,18 @@ try:
 except ImportError:
     _HAS_SHORT_BANK = False
 
-# محاولة كشف رمضان/العيد هجرياً إن توفّرت المكتبة (اختياري، بدون إلزام)
+# محاولة كشف رمضان/العيد هجرياً إن توفّرت المكتبة (اختياري، بدون إلزام).
+# hijridate الخلف المُصان لـ hijri_converter المهجورة — نجرّب الاثنين للمرونة.
 try:
-    from hijri_converter import convert as _hijri_convert
+    from hijridate import Gregorian as _HijriGregorian
     _HAS_HIJRI = True
 except Exception:
-    _HAS_HIJRI = False
+    try:
+        from hijri_converter import convert as _hijri_convert
+        _HijriGregorian = _hijri_convert.Gregorian
+        _HAS_HIJRI = True
+    except Exception:
+        _HAS_HIJRI = False
 
 # ═══════════════════════════════════════════════════════════
 #  تحميل بيانات المنتجات المُثرية (مكونات + عائلة عطرية)
@@ -901,7 +907,7 @@ def _temporal_signals(now):
     # مناسبة هجرية (رمضان/عيد) — أولوية قصوى إن توفّرت
     if _HAS_HIJRI:
         try:
-            h = _hijri_convert.Gregorian(now.year, now.month, now.day).to_hijri()
+            h = _HijriGregorian(now.year, now.month, now.day).to_hijri()
             if h.month == 9:
                 signals.append('إنك تستخدمه في رمضان (للتراويح/الجمعات/السحور) وريحته هادية تناسب الأجواء الروحانية')
             elif h.month == 10 and h.day <= 4:
