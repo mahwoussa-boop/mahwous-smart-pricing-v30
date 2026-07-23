@@ -535,9 +535,26 @@ from store_review import (
     StoreTopicTracker,
 )
 
-# أسماء معروفة لحذف نداء الاسم + عدّاد مواضيع المتجر لهذه الجلسة (سقف 20%)
+# أسماء معروفة لحذف نداء الاسم
 _STORE_NAMES = set(NAMES.get('male', []) + NAMES.get('female', []) + NAMES.get('family_names', []))
-_store_topics = StoreTopicTracker()
+
+# عدّاد مواضيع المتجر (سقف 20%) — مثبّت في session_state ليتراكم السقف عبر دفعات
+# الجلسة لا داخل الدفعة الواحدة فقط (module-level كان يُعاد إنشاؤه كل rerun).
+_store_topics_fallback = None
+
+
+def _get_store_topics():
+    """يُرجع عدّاد مواضيع المتجر مثبّتًا في session_state (تراكم السقف عبر الدفعات).
+    تدرّج آمن لمثيل وحيد خارج سياق Streamlit (استيراد/اختبار)."""
+    global _store_topics_fallback
+    try:
+        if 'store_topics' not in st.session_state:
+            st.session_state['store_topics'] = StoreTopicTracker()
+        return st.session_state['store_topics']
+    except Exception:
+        if _store_topics_fallback is None:
+            _store_topics_fallback = StoreTopicTracker()
+        return _store_topics_fallback
 
 
 def gen_store_review(persona):
@@ -545,6 +562,7 @@ def gen_store_review(persona):
     طول مُعايَن (35/40/25)، برومبت متكيّف مع النطاق، سقف موضوعي 20%، وحظر
     استعارات الفخامة وحذف نداء الاسم. نفس مسار app.py حرفيًّا كي يتناغم الطرفان."""
     pname = persona.get('name')
+    _store_topics = _get_store_topics()  # مثبّت في session_state — يتراكم عبر الدفعات
     # (1) طول مُعايَن قبل البرومبت  (2) جوانب بعيدًا عن المواضيع المشبعة
     lo, hi, length_desc = sample_length_target()
     band = band_for(hi)
