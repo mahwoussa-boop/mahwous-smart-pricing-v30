@@ -71,10 +71,16 @@ try:
                              format_used_texts_block as ar_format_used)
     USE_ANTI_REPEAT = True
 except ImportError:
+    # بدائل بنفس تواقيع الأصل بالضبط. القديمة كانت تنقص المعاملات التي
+    # يمرّرها المستدعون فعلاً (is_store_review / persona_name / اسم الشخصية)،
+    # وكانت ar_get_used_texts و archive_review بلا بديل أصلاً — فكان أي
+    # سقوط لهذا المسار TypeError/NameError لا تدرّجاً آمناً.
     MAX_ARCHIVE = 200
-    def ar_is_duplicate(t, threshold=0.6): return False
-    def ar_register_text(t): pass
-    def ar_format_used(limit=30): return ''
+    def ar_is_duplicate(new_text, threshold=0.35, is_store_review=False): return False
+    def ar_register_text(text, persona_name=None): pass
+    def ar_format_used(limit=30, persona_name=None): return ''
+    def ar_get_used_texts(limit=40): return []
+    def archive_review(review_text, product_name, persona_name): pass
 
 try:
     from trending import get_trending_brands, get_weight_for_product, blend_selection
