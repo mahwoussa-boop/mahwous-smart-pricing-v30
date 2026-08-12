@@ -17,17 +17,13 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+from scrape_compliance import ScrapePolicy, should_stop_after_response
+
 BASE_DIR = Path(__file__).parent
 OUT_FILE = BASE_DIR / 'competitor_reviews_full.json'
 LOG_FILE = BASE_DIR / 'scrape_log.json'
 
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
-]
+POLICY = ScrapePolicy(min_interval_seconds=5.0)
 
 _DATE_RE = re.compile(r'\d{2}/\d{2}/\d{4}')
 _STAR_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(?:من|out of|/)\s*5')
@@ -48,11 +44,8 @@ KNOWN_STORE_IDS = [
 
 
 def _get_headers():
-    return {
-        'User-Agent': random.choice(USER_AGENTS),
-        'Accept-Language': 'ar,en-US;q=0.8,en;q=0.6',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    }
+    """رأس معلن وثابت؛ لا ينتحل متصفحاً شخصياً."""
+    return POLICY.headers()
 
 
 def _parse_stars(card_text):
@@ -129,18 +122,21 @@ def _get_store_name(html):
     return 'غير معروف'
 
 
-def scrape_store(store_id, max_pages=50, delay_range=(2.0, 4.5), timeout=30):
-    """يكشط كل تقييمات متجر واحد — كل الصفحات حتى النهاية"""
+def scrape_store(store_id, max_pages=50, delay_range=(5.0, 5.0), timeout=30):
+    """يكشط صفحات عامة مسموحاً بها فقط، بتوقف فوري عند الرفض أو الحظر."""
     base = f'https://mahally.com/ar/stores/{store_id}/about/'
     seen, reviews, request_log = set(), [], []
     store_name = ''
     empty_streak = 0
 
+    decision = POLICY.check(base)
+    if not decision.allowed:
+        return reviews, [{'at': datetime.now().isoformat(), 'error': decision.reason}], store_name
+
     print(f'  ⏳ كشط متجر {store_id}...', end='', flush=True)
 
     for page in range(1, max_pages + 1):
-        if page > 1:
-            time.sleep(random.uniform(*delay_range))
+        POLICY.wait_for_slot(base)
 
         params = None if page == 1 else {'page': page}
         t0 = datetime.now()
@@ -152,6 +148,8 @@ def scrape_store(store_id, max_pages=50, delay_range=(2.0, 4.5), timeout=30):
         request_log.append({'page': page, 'at': t0.isoformat(), 'status': resp.status_code})
 
         if resp.status_code != 200:
+            if should_stop_after_response(resp.status_code):
+                request_log[-1]['stopped'] = 'blocked_or_rate_limited'
             break
 
         if page == 1:
@@ -196,15 +194,20 @@ def discover_stores_from_browse():
     # محاولة كشط عدة صفحات من التصفح
     for page in range(1, 6):
         for url in urls:
+            decision = POLICY.check(url)
+            if not decision.allowed:
+                continue
             try:
                 params = {'page': page} if page > 1 else None
+                POLICY.wait_for_slot(url)
                 resp = requests.get(url, params=params, headers=_get_headers(), timeout=25)
                 if resp.status_code != 200:
+                    if should_stop_after_response(resp.status_code):
+                        break
                     continue
                 # استخراج store IDs من الروابط
                 store_ids = re.findall(r'/stores/(\d+)', resp.text)
                 discovered.update(store_ids)
-                time.sleep(random.uniform(1.5, 3.0))
             except Exception:
                 continue
     return list(discovered)
@@ -259,9 +262,6 @@ def main():
 
     for i, sid in enumerate(all_store_ids):
         print(f'[{i+1}/{len(all_store_ids)}]', end='')
-        if i > 0:
-            time.sleep(random.uniform(3.0, 6.0))  # تأخير بين المتاجر
-
         try:
             revs, req_log, store_name = scrape_store(sid, max_pages=50)
         except Exception as e:

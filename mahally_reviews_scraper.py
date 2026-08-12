@@ -23,15 +23,12 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+from scrape_compliance import ScrapePolicy, should_stop_after_response
+
 BASE_DIR = Path(__file__).parent
 OUT_FILE = BASE_DIR / 'competitor_reviews.json'
 
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-]
+POLICY = ScrapePolicy(min_interval_seconds=5.0)
 
 _DATE_RE = re.compile(r'\d{2}/\d{2}/\d{4}')
 
@@ -69,22 +66,25 @@ def _parse_reviews(html, store_id):
     return out
 
 
-def scrape_store(store_id, max_pages=3, delay_range=(2.0, 4.0), timeout=25):
+def scrape_store(store_id, max_pages=3, delay_range=(5.0, 5.0), timeout=25):
     """يكشط تقييمات متجر واحد من «محلي» عبر ترقيم الصفحات.
 
-    - User-Agent متدوّر + تأخير عشوائي ≥2ث بين الصفحات (احترام الخادم).
+    - User-Agent معلن وثابت + فاصل 5 ثوانٍ على الأقل بين الطلبات.
+    - فحص robots.txt والتوقف عند 401/403/429 بدلاً من الالتفاف على الحماية.
     - تدقيق تكرار عند الإدخال عبر hash(store|product|text).
     - يتوقّف عند صفحة فارغة أو max_pages أو صفحة بلا جديد.
     يرجع: (reviews, request_log) حيث request_log طوابع زمنية لإثبات التأخير.
     """
     base = f'https://mahally.com/ar/stores/{store_id}/about/'
     seen, reviews, request_log = set(), [], []
+    decision = POLICY.check(base)
+    if not decision.allowed:
+        return reviews, [{'at': datetime.now().isoformat(), 'error': decision.reason}]
+
     for page in range(1, max_pages + 1):
-        if page > 1:                          # تأخير قبل كل صفحة عدا الأولى
-            time.sleep(random.uniform(*delay_range))
         params = None if page == 1 else {'page': page}
-        headers = {'User-Agent': random.choice(USER_AGENTS),
-                   'Accept-Language': 'ar,en-US;q=0.8,en;q=0.6'}
+        POLICY.wait_for_slot(base)
+        headers = POLICY.headers()
         t0 = datetime.now()
         try:
             resp = requests.get(base, params=params, headers=headers, timeout=timeout)
@@ -93,6 +93,8 @@ def scrape_store(store_id, max_pages=3, delay_range=(2.0, 4.0), timeout=25):
             break
         request_log.append({'page': page, 'at': t0.isoformat(), 'status': resp.status_code})
         if resp.status_code != 200:
+            if should_stop_after_response(resp.status_code):
+                request_log[-1]['stopped'] = 'blocked_or_rate_limited'
             break
         cards = _parse_reviews(resp.text, store_id)
         if not cards:                         # صفحة فارغة → توقّف
@@ -117,14 +119,12 @@ def save_reviews(reviews, path=OUT_FILE):
     return path
 
 
-def scrape_all(competitors_path, max_pages=3, store_delay=(2.0, 4.0), page_delay=(2.0, 4.0)):
+def scrape_all(competitors_path, max_pages=3, store_delay=(5.0, 5.0), page_delay=(5.0, 5.0)):
     """يكشط كل متجر له mahally_store_id في قائمة المنافسين، بتدقيق تكرار عالمي وتحمّل أخطاء المتجر."""
     comps = json.loads(Path(competitors_path).read_text(encoding='utf-8'))
     targets = [c for c in comps if c.get('mahally_store_id')]
     all_reviews, seen, logs = [], set(), []
     for i, c in enumerate(targets):
-        if i > 0:
-            time.sleep(random.uniform(*store_delay))     # تأخير محترم بين المتاجر
         sid = c['mahally_store_id']
         try:
             revs, req_log = scrape_store(sid, max_pages=max_pages, delay_range=page_delay)

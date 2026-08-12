@@ -6,76 +6,17 @@ import logging
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
+from scrape_compliance import ScrapePolicy
+
 logger = logging.getLogger(__name__)
 
 
 class PerfumeScraper:
-    """متصفح آلي للمتاجر السعودية - Automated browser for Saudi perfume stores"""
-
-    # Rotating user agents for stealth
-    USER_AGENTS = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    ]
-
-    # Anti-detection JavaScript payload
-    STEALTH_SCRIPT = """
-        // Remove webdriver flag
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-
-        // Fake plugins array
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => {
-                const plugins = [
-                    {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
-                    {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
-                    {name: 'Native Client', filename: 'internal-nacl-plugin'},
-                ];
-                plugins.length = 3;
-                return plugins;
-            }
-        });
-
-        // Fake languages
-        Object.defineProperty(navigator, 'languages', {get: () => ['ar-SA', 'ar', 'en-US', 'en']});
-
-        // Fake Chrome runtime
-        window.chrome = {
-            runtime: {},
-            loadTimes: function() { return {}; },
-            csi: function() { return {}; },
-        };
-
-        // Override permissions query
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) =>
-            parameters.name === 'notifications'
-                ? Promise.resolve({state: Notification.permission})
-                : originalQuery(parameters);
-
-        // Fake connection info
-        Object.defineProperty(navigator, 'connection', {
-            get: () => ({
-                downlink: 10,
-                effectiveType: '4g',
-                rtt: 50,
-                saveData: false,
-            })
-        });
-
-        // Override iframe contentWindow detection
-        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
-            get: function() {
-                return window;
-            }
-        });
-    """
+    """متصفح للصفحات العامة المسموح بسحبها من المتاجر السعودية."""
 
     def __init__(self, stores_config_path='stores_config.json'):
         self.stores_config = self._load_config(stores_config_path)
+        self.scrape_policy = ScrapePolicy(min_interval_seconds=5.0)
         self.browser = None
         self.context = None
         self.page = None
@@ -105,25 +46,21 @@ class PerfumeScraper:
         return None
 
     async def start_browser(self, headless=False):
-        """Start Playwright browser with stealth settings and anti-detection"""
-        logger.info('🚀 Starting stealth browser...')
+        """شغّل متصفحاً معلناً بلا إخفاء للأتمتة أو تجاوز لحماية الموقع."""
+        logger.info('🚀 Starting browser...')
         self.playwright = await async_playwright().start()
 
         self.browser = await self.playwright.chromium.launch(
             headless=headless,
             args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
                 '--lang=ar-SA',
                 '--window-size=1366,768',
             ]
         )
 
-        user_agent = random.choice(self.USER_AGENTS)
-        logger.info(f'Using User-Agent: {user_agent[:50]}...')
+        headers = self.scrape_policy.headers()
+        user_agent = headers.pop('User-Agent')
+        logger.info('Using declared research User-Agent')
 
         self.context = await self.browser.new_context(
             viewport={'width': 1366, 'height': 768},
@@ -134,13 +71,11 @@ class PerfumeScraper:
             geolocation={'latitude': 24.7136, 'longitude': 46.6753},  # Riyadh
             color_scheme='light',
             java_script_enabled=True,
+            extra_http_headers=headers,
         )
 
-        # Inject anti-detection scripts before any page loads
-        await self.context.add_init_script(self.STEALTH_SCRIPT)
-
         self.page = await self.context.new_page()
-        logger.info('✅ Stealth browser started successfully')
+        logger.info('✅ Browser started successfully')
 
     async def close_browser(self):
         """Close browser and cleanup resources"""
@@ -163,8 +98,10 @@ class PerfumeScraper:
 
     async def _handle_cloudflare(self, timeout=30000):
         """
-        Detect and wait for Cloudflare challenge pages to resolve.
-        Waits for the challenge to pass automatically (browser solving).
+        Detect an anti-bot challenge and report it to the caller.
+
+        لا ننتظر محاولة الحل ولا نغير خصائص المتصفح لتجاوز الحماية. يجب على
+        المستخدم الرجوع لشروط الموقع أو استخدام واجهة بيانات رسمية متى توفرت.
         """
         cf_indicators = [
             'text="Checking your browser"',
@@ -179,15 +116,7 @@ class PerfumeScraper:
             try:
                 el = await self.page.query_selector(indicator)
                 if el:
-                    logger.info('☁️ Cloudflare challenge detected, waiting for resolution...')
-                    # Wait for the challenge to resolve (page navigates away)
-                    try:
-                        await self.page.wait_for_load_state('networkidle', timeout=timeout)
-                    except PlaywrightTimeout:
-                        pass
-                    # Extra wait for any redirects
-                    await self._random_delay(3, 6)
-                    logger.info('✅ Cloudflare challenge passed')
+                    logger.warning('☁️ Cloudflare challenge detected; stopping this request')
                     return True
             except Exception:
                 continue
@@ -393,6 +322,14 @@ class PerfumeScraper:
         products = []
 
         try:
+            decision = await asyncio.to_thread(self.scrape_policy.check, trending_url)
+            if not decision.allowed:
+                return {
+                    'error': f'لم يبدأ السحب: {decision.reason}',
+                    'products': [],
+                    'store': store.get('name', store_name),
+                }
+            await asyncio.to_thread(self.scrape_policy.wait_for_slot, trending_url)
             if not self.browser:
                 await self.start_browser(headless=False)
 
@@ -400,8 +337,12 @@ class PerfumeScraper:
             await self.page.goto(trending_url, wait_until='domcontentloaded', timeout=30000)
             await self._random_delay(3, 6)
 
-            # Handle Cloudflare challenge if present
-            await self._handle_cloudflare()
+            if await self._handle_cloudflare():
+                return {
+                    'error': 'أوقف الموقع الطلب للتحقق؛ لم تتم محاولة تجاوزه',
+                    'products': [],
+                    'store': store.get('name', store_name),
+                }
 
             # Scroll to trigger lazy loading
             await self._scroll_page(scrolls=3)
@@ -517,6 +458,10 @@ class PerfumeScraper:
             }
 
         try:
+            decision = await asyncio.to_thread(self.scrape_policy.check, product_url)
+            if not decision.allowed:
+                return {'success': False, 'message': f'لم يبدأ الطلب: {decision.reason}'}
+            await asyncio.to_thread(self.scrape_policy.wait_for_slot, product_url)
             if not self.browser:
                 await self.start_browser(headless=False)
 
@@ -524,8 +469,11 @@ class PerfumeScraper:
             await self.page.goto(product_url, wait_until='domcontentloaded', timeout=30000)
             await self._random_delay(3, 5)
 
-            # Handle Cloudflare
-            await self._handle_cloudflare()
+            if await self._handle_cloudflare():
+                return {
+                    'success': False,
+                    'message': 'أوقف الموقع الطلب للتحقق؛ لم تتم محاولة تجاوزه',
+                }
 
             # Try to click Add to Cart
             selectors = store.get('selectors', {})
