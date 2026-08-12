@@ -85,6 +85,43 @@ def test_topic_tracker_reset():
     assert tr.total == 0 and all(v == 0 for v in tr.counts.values())
 
 
+def test_aspect_not_reused_within_recency_window():
+    """انحدار: نفس الجانب الحرفي لا يُعرَض على النموذج مرتين في جلسة قصيرة.
+
+    سقف الموضوع الإحصائي (٪) لا يعمل قبل تجميع 5 تقييمات متجر (_TOPIC_FLOOR)،
+    فكانت جلسة من 2-3 تقييمات (الشائعة فعليًّا) تُعيد نفس الجانب الحرفي
+    (مثل التقسيط) بلا أي مانع، فينتج نصّان بصياغة شبه واحدة رغم اختلاف
+    الشخصية. هذا يُثبت أن الاستبعاد يعمل *قبل* بلوغ تلك العتبة.
+    """
+    tr = sr.StoreTopicTracker()
+    seen_pairs = []
+    for _ in range(4):
+        recent = tr.recently_used_aspects()
+        pool = [a for a in sr.STORE_ASPECTS if a not in recent]
+        assert len(pool) >= 2, 'استُنفد كامل جوانب المتجر قبل انتهاء النافذة'
+        aspects = pool[:2]
+        assert not (set(aspects) & recent), 'أُعيد عرض جانب مستخدم مؤخراً'
+        tr.record_aspects(aspects)
+        seen_pairs.append(tuple(aspects))
+    # لا يزال بإمكان الجانب أن يتكرر بعد خروجه من نافذة الحداثة (ليس حظراً دائماً)
+    assert tr.recently_used_aspects()
+
+
+def test_installment_aspect_is_not_a_ready_made_sentence():
+    """انحدار: جانب التقسيط لم يعد يحمل عبارة إعلانية جاهزة يكررها النموذج حرفياً.
+
+    الصياغة القديمة «التقسيط — تابي وتمارا بدون فوائد» كانت تُمرَّر حرفياً في
+    البرومبت، فكرّرها النموذج شبه حرفياً عبر شخصيات مختلفة (رُصد فعلياً: نفس
+    عبارة «تابي وتمارا» في تقييمي متجر منفصلين). التصنيف بالكلمات الدالّة
+    يجب أن يبقى يعمل مهما اختار النموذج الصياغة.
+    """
+    installment_aspect = next(a for a, t in sr.ASPECT_TOPIC.items() if t == 'تقسيط')
+    assert 'بدون فوائد' not in installment_aspect
+    assert not ('تابي' in installment_aspect and 'تمارا' in installment_aspect)
+    tr = sr.StoreTopicTracker()
+    assert tr.classify('استخدمت تابي وسهل علي التقسيط') == 'تقسيط'
+
+
 def test_app_binds_shared_store_module():
     """حارس التناغم: app.py يستورد منطق المتجر من store_review (لا نسخة inline).
 

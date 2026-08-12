@@ -688,12 +688,17 @@ def _ai_store_review(persona):
     # (1) هدف الطول — يُعيَّن قبل البرومبت (35% قصير جدًا · 40% قصير · 25% متوسط)
     lo, hi, length_desc = sample_length_target()
     band = band_for(hi)
-    # (2) اختيار الجوانب بعيدًا عن المواضيع المشبعة (≥20%)
+    # (2) اختيار الجوانب بعيدًا عن المواضيع المشبعة (≥20%) وعن الجوانب الحرفية
+    # المستخدمة مؤخراً (سقف الموضوع لا يعمل قبل 5 تقييمات متراكمة — استبعاد
+    # الجانب نفسه يمنع تكرار الصياغة في الجلسات القصيرة قبل بلوغ تلك العتبة)
     blocked = _store_topics.blocked()
-    pool = [a for a in STORE_ASPECTS if ASPECT_TOPIC.get(a) not in blocked]
+    recent_aspects = _store_topics.recently_used_aspects()
+    pool = [a for a in STORE_ASPECTS
+            if ASPECT_TOPIC.get(a) not in blocked and a not in recent_aspects]
     if len(pool) < 2:
-        pool = list(STORE_ASPECTS)
+        pool = [a for a in STORE_ASPECTS if a not in recent_aspects] or list(STORE_ASPECTS)
     aspects = random.sample(pool, k=2)
+    _store_topics.record_aspects(aspects)
     opener = random.choice(STORE_OPENERS)
     used_block = _used_texts_block(limit=15, persona_name=persona.get('name'))
     avoid_line = (f"\n- ممنوع الحديث عن: {'، '.join(sorted(blocked))} (تكرّرت كثيرًا)" if blocked else '')

@@ -553,11 +553,16 @@ def gen_store_review(persona):
     # (1) طول مُعايَن قبل البرومبت  (2) جوانب بعيدًا عن المواضيع المشبعة
     lo, hi, length_desc = sample_length_target()
     band = band_for(hi)
+    # سقف الموضوع (٪) لا يعمل قبل 5 تقييمات متراكمة — استبعاد الجانب الحرفي
+    # نفسه يمنع تكرار الصياغة في الجلسات القصيرة قبل بلوغ تلك العتبة
     blocked = _store_topics.blocked()
-    pool = [a for a in STORE_ASPECTS if ASPECT_TOPIC.get(a) not in blocked]
+    recent_aspects = _store_topics.recently_used_aspects()
+    pool = [a for a in STORE_ASPECTS
+            if ASPECT_TOPIC.get(a) not in blocked and a not in recent_aspects]
     if len(pool) < 2:
-        pool = list(STORE_ASPECTS)
+        pool = [a for a in STORE_ASPECTS if a not in recent_aspects] or list(STORE_ASPECTS)
     aspects = random.sample(pool, k=2)
+    _store_topics.record_aspects(aspects)
     opener = random.choice(STORE_OPENERS)
     ub = ar_format_used(15, persona_name=pname) if USE_ANTI_REPEAT else ''
     avoid_line = (f"\n- ممنوع الحديث عن: {'، '.join(sorted(blocked))} (تكرّرت كثيرًا)" if blocked else '')
