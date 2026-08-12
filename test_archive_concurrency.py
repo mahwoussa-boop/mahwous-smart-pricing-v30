@@ -16,7 +16,9 @@ archive_batch تقرآن الملف، تعدّلانه في الذاكرة، ث�
 """
 import itertools
 import json
+import os
 import threading
+import time
 
 import anti_repeat as ar
 
@@ -230,3 +232,42 @@ def test_archive_batch_catches_duplicates_within_the_same_batch():
     arc = json.loads(ar.ARCHIVE_FILE.read_text(encoding='utf-8'))
     matches = [r for r in arc['reviews'] if r['text'] == text]
     assert len(matches) == 1, f'يفترض نسخة واحدة فقط محفوظة، وُجد {len(matches)}'
+
+
+def test_abandoned_lock_is_reclaimed_not_permanently_disabled(tmp_path):
+    """بلاغ مراجعة كودية مُتحقَّق منه مباشرة: عملية سابقة انهارت وهي تملك
+    القفل تترك ملف .lock بلا حذف أبداً. كان السلوك القديم يستسلم بعد
+    استنفاد المهلة *بلا حذف الملف العالق* — فكل استدعاء لاحق، للأبد، ينتظر
+    المهلة ثم يمضي بلا حماية، معطّلاً إصلاح التزامن (Phase 4) نهائياً.
+
+    الإصلاح: بعد استنفاد المهلة نستعيد القفل بالقوة بدل الاستسلام الدائم.
+    مهلة قصيرة (0.3s) هنا فقط لسرعة الاختبار — المنطق مطابق للمهلة الحقيقية.
+    """
+    archive_file = tmp_path / 'archive.json'
+    lock_path = f'{archive_file}.lock'
+    open(lock_path, 'w').close()  # يحاكي قفلاً عالقاً من عملية منهارة
+
+    with ar._ArchiveLock(archive_file, timeout=0.3, poll=0.02) as lock:
+        assert lock._held is True, (
+            'القفل العالق لم يُستعَد — السلوك القديم كان يمضي بلا حماية للأبد')
+        assert os.path.exists(lock_path), 'يفترض امتلاك القفل الآن فعلياً'
+
+    assert not os.path.exists(lock_path), (
+        'الملف يجب أن يُحذَف بعد الخروج طالما امتُلك القفل فعلياً')
+
+
+def test_lock_reclaim_actually_restores_protection_for_next_caller(tmp_path):
+    """بعد استعادة قفل عالق مرة، الاستدعاء التالي يُحمى بشكل طبيعي — لا يبقى
+    النظام «معطَّلاً بشكل متقطّع» بل يُصلح نفسه بالكامل."""
+    archive_file = tmp_path / 'archive.json'
+    open(f'{archive_file}.lock', 'w').close()
+
+    with ar._ArchiveLock(archive_file, timeout=0.3, poll=0.02):
+        pass  # يستعيد وتُحذَف عند الخروج
+
+    # استدعاء ثانٍ فوري: لا قفل عالق بعد الآن، يُمتلَك فوراً بلا انتظار
+    t0 = time.monotonic()
+    with ar._ArchiveLock(archive_file, timeout=0.3, poll=0.02) as lock2:
+        elapsed = time.monotonic() - t0
+        assert lock2._held is True
+    assert elapsed < 0.2, f'يفترض امتلاكاً فورياً بلا قفل عالق متبقٍّ، استغرق {elapsed:.2f}s'
