@@ -122,6 +122,66 @@ def test_installment_aspect_is_not_a_ready_made_sentence():
     assert tr.classify('استخدمت تابي وسهل علي التقسيط') == 'تقسيط'
 
 
+def test_scrub_before_check_catches_the_collision(monkeypatch):
+    """انحدار حرج: مراجعة كودية خارجية أثبتت هذا — scrub_luxury_metaphor كان
+    يُستدعى *بعد* آخر فحص تفرّد في app.py/streamlit_app.py (كخطوة أخيرة منفصلة)
+    ثم يُخزَّن الناتج المُعدَّل بلا إعادة فحص.
+
+    برهان المراجعة: «التغليف مثل الذهب مرتب» و«التغليف مثل الالماس مرتب»
+    نصّان مختلفان تماماً قبل scrub، وكلاهما ينهار لنفس النص «التغليف مرتب»
+    بعده. الإصلاح: scrub صار جزءاً من finalize، فتفحصه بوابة التفرّد على
+    النتيجة النهائية المُنظَّفة لا الخام — فيُكتشف الثاني كمكرر فعلياً.
+    """
+    import anti_repeat as ar
+    ar.reset_session_texts()
+
+    def _finalize(raw):
+        # نفس ترتيب _finalize المُصلَح في app.py/streamlit_app.py: تنظيف بشري
+        # ← حذف الاستعارة ← قصّ الطول (الترتيب هو ما يضمن فحص النتيجة النهائية)
+        text = sr.scrub_luxury_metaphor(raw)
+        return text.strip()
+
+    raw_a = 'التغليف مثل الذهب مرتب'
+    raw_b = 'التغليف مثل الالماس مرتب'
+    assert raw_a != raw_b, 'النصّان الخامّان مختلفان فعلاً'
+
+    final_a = _finalize(raw_a)
+    final_b = _finalize(raw_b)
+    assert final_a == final_b == 'التغليف مرتب', 'يفترض أن يتطابقا بعد الحذف'
+
+    # الأول: يُسجَّل كنص جديد (لا سابق له)
+    assert ar.is_duplicate(final_a) is False
+    ar.register_text(final_a)
+
+    # الثاني: بعد الإصلاح، الفحص يقع على النتيجة النهائية المتطابقة فعلياً
+    assert ar.is_duplicate(final_b) is True, (
+        'الثاني كان يمرّ كـ"غير مكرر" لأن الفحص القديم كان يقع على الخام '
+        'المختلف قبل scrub، لا على "التغليف مرتب" المُخزَّن فعلياً')
+
+
+def test_scrub_runs_inside_finalize_not_after_the_check():
+    """حارس بنيوي: يمنع عودة scrub_luxury_metaphor كخطوة منفصلة بعد آخر فحص تفرّد.
+
+    كل من app.py وstreamlit_app.py كانا يستدعيان scrub_luxury_metaphor مرتين:
+    مرة كشرط لإعادة التوليد (has_luxury_metaphor)، ومرة كـ«ضمان حتمي أخير»
+    بعد خروج النص من بوابة التفرّد — تلك الثانية هي مصدر الخلل (تعديل بعد
+    الفحص). الإصلاح استدعاء واحد فقط، داخل _finalize، قبل استدعاء بوابة
+    التوليد (_ai_write_json / ai_write_unique) في نص المصدر.
+    """
+    for path in ('app.py', 'streamlit_app.py'):
+        src = open(path, encoding='utf-8').read()
+        calls = src.count('scrub_luxury_metaphor(')
+        assert calls == 1, f'{path}: توقّعت استدعاءً واحداً لـscrub_luxury_metaphor، وُجد {calls}'
+
+        finalize_pos = src.index('def _finalize(text):')
+        scrub_pos = src.index('scrub_luxury_metaphor(')
+        gate_pos = (src.find('_ai_write_json(prompt, max_tokens=200, finalize=_finalize')
+                    if path == 'app.py' else
+                    src.find('ai_write_unique(prompt, max_tokens=200, finalize=_finalize'))
+        assert finalize_pos < scrub_pos < gate_pos, (
+            f'{path}: scrub_luxury_metaphor يجب أن يقع داخل _finalize وقبل استدعاء بوابة التوليد')
+
+
 def test_app_binds_shared_store_module():
     """حارس التناغم: app.py يستورد منطق المتجر من store_review (لا نسخة inline).
 

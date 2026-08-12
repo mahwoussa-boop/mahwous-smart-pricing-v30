@@ -518,7 +518,7 @@ def gen_reviews(persona, perfumes):
 from store_review import (
     STORE_ASPECTS, STORE_OPENERS, ASPECT_TOPIC,
     sample_length_target, band_for, build_store_prompt,
-    strip_store_vocatives, has_luxury_metaphor, scrub_luxury_metaphor,
+    strip_store_vocatives, scrub_luxury_metaphor,
     StoreTopicTracker,
 )
 
@@ -569,12 +569,21 @@ def gen_store_review(persona):
     prompt = build_store_prompt(persona, band, aspects, opener, ub, avoid_line)
 
     def _finalize(text):
-        """النص النهائي لتقييم المتجر — يشمل سقف الطول كي تفحص البوابة المخزَّن فعلاً."""
+        """النص النهائي لتقييم المتجر — كل تحويل يقع هنا كي تفحص بوابة التفرّد
+        (ai_write_unique) النص المخزَّن فعلياً حرفياً، لا نصاً يُعدَّل بعد الفحص.
+
+        scrub_luxury_metaphor يقع هنا عمداً (لا بعد الحلقة كخطوة منفصلة): كان
+        يُستدعى بعد آخر فحص تفرّد في المسار القديم فيحذف كلمات (مثل «مثل
+        الذهب») بلا إعادة فحص — نصّان مختلفان تماماً قبل الحذف («التغليف مثل
+        الذهب مرتب» و«التغليف مثل الالماس مرتب») ينهاران لنفس النص بعده
+        («التغليف مرتب») ويُخزَّن الثاني رغم كونه مكرراً فعلياً.
+        """
         if USE_HUMANIZER:
             text = hz_humanize_output(text or '', kind='store')  # إزالة إطار المساعد/الماركداون
         text = _humanize(text or '')  # بلا ترقيم أو رموز
         text = re.sub(r'\s+', ' ', re.sub(r'[0-9٠-٩]+', ' ', text)).strip()  # صفر أرقام
         text = strip_store_vocatives(text, pname, _STORE_NAMES)  # منع النداء حتميًّا
+        text = scrub_luxury_metaphor(text)  # صفر استعارة فخامة — قبل قصّ الطول عمداً
         words = text.split()
         if len(words) > hi:
             words = words[:hi]
@@ -584,11 +593,10 @@ def gen_store_review(persona):
 
     rv, txt = ai_write_unique(prompt, max_tokens=200, finalize=_finalize, is_store=True)
 
-    # (3) حارس موحّد: استعارة فخامة / موضوع مشبع / تجاوز الطول → إعادة توليد موجَّهة
+    # (3) حارس موحّد: موضوع مشبع / تجاوز الطول → إعادة توليد موجَّهة
+    # (استعارة الفخامة صارت مضمونة الغياب حتمياً داخل _finalize — لا حاجة لطلب إعادة كتابة لأجلها)
     for _k in range(3):
         problems = []
-        if has_luxury_metaphor(txt):
-            problems.append('استعارة فخامة (كنز/صندوق/مجوهرات/ذهب) ممنوعة')
         blocked_now = _store_topics.blocked()
         if _store_topics.classify(txt) in blocked_now:
             fresh = [a for a in STORE_ASPECTS if ASPECT_TOPIC.get(a) not in blocked_now]
@@ -607,9 +615,6 @@ def gen_store_review(persona):
         if not nxt_txt.strip():
             break
         rv, txt = (nxt if isinstance(nxt, dict) else rv), nxt_txt
-
-    # (4) ضمان حتمي أخير: صفر استعارة فخامة (سقف الطول مطبَّق داخل _finalize)
-    txt = scrub_luxury_metaphor(txt)
 
     if not txt.strip():
         # قانون 4: لا نص وهمي — نتوقف ونُظهر خطأ بدل الفبركة.
