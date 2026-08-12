@@ -70,6 +70,39 @@ def test_normalize_folds_arabic_letter_variants(monkeypatch):
     assert ar._normalize('أحلى') == ar._normalize('احلي')
 
 
+def test_normalize_folds_letter_elongation(monkeypatch):
+    """انحدار (مرحلة 6 #4): تمطيط الحروف («رهييييب») لا يُنتج نصاً «فريداً»
+    مصطنعاً يتفادى به الكاتب فحص التكرار."""
+    monkeypatch.setattr(ar, 'get_used_texts', lambda limit=100: [])
+    reset_session_texts()
+    register_text('العطر رهيب جدا وثابت')
+    assert is_duplicate('العطر رهييييب جدا وثابت') is True
+    assert ar._normalize('رهييييب') == ar._normalize('رهيب')
+
+
+def test_fuzzy_match_strips_common_prefixes(monkeypatch):
+    """انحدار (مرحلة 6 #4): بادئتا و/ال لا تُخفيان تطابق نص أطول من عتبة
+    الكلمات القصيرة عبر jaccard/bigram."""
+    monkeypatch.setattr(ar, 'get_used_texts', lambda limit=100: [])
+    reset_session_texts()
+    register_text('العطر جميل جدا وثابت')
+    assert is_duplicate('عطر جميل جدا ثابت') is True
+
+
+def test_short_text_duplicate_ignores_word_order_and_prefixes(monkeypatch):
+    """انحدار (مرحلة 6 #4): نص قصير (≤3 كلمات) بإعادة ترتيب مع عطف بـ«و»
+    («فخم وثابت وفواح» مقابل «فواح وثابت فخم») هو نفس المعنى — كان الفرع
+    القصير يقارن السلاسل حرفياً بعد الترتيب فقط، فتُخفيه «و» العطف."""
+    monkeypatch.setattr(ar, 'get_used_texts', lambda limit=100: [])
+    reset_session_texts()
+    register_text('فخم وثابت وفواح')
+    assert is_duplicate('فواح وثابت فخم') is True
+    # ضابط سلبي: قصيران مختلفان فعلاً لا يُخلطان رغم مرور الفرع نفسه
+    reset_session_texts()
+    register_text('ريحته حلوة')
+    assert is_duplicate('التغليف ممتاز') is False
+
+
 def test_burned_openings_flagged_and_surfaced():
     """تكرار البداية نفسها يُرصَد ويظهر في كتلة البرومبت (منع تكرار البدايات)."""
     reset_session_texts()

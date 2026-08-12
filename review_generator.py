@@ -19,18 +19,18 @@ from collections import deque, Counter
 # تطبيع عربي موحّد لكشف التكرار — نفس الدالة المستخدمة في anti_repeat.py
 # (مصدر واحد بدل نسختين قد تتباعدان؛ راجع anti_repeat._normalize لتوثيق
 # القرار: توحيد أ/إ/آ↔ا، ة↔ه، ى/ئ↔ي، ؤ↔و، وإسقاط التشكيل والتطويل وغير العربي).
+# التطويل (راااائع) صار مطويّاً داخل anti_repeat._normalize نفسها (لا هنا) —
+# maybe_elongate (realism_calibrator.py) يستبدل حرفاً بنسخته المكرّرة
+# (ر→ررر) كنسيج بشري متعمّد، وكان _normalize يزيل التطويل ـ الحرف الموحّد
+# فقط لا تكرار حرف عادي، فيتباعد «كنت أدور» عن «كنت أدوررر» عند الفحص —
+# أُصلح عند المصدر المشترك كي يستفيد منه مسار الأرشيف الحيّ أيضاً لا هذه
+# الأداة الإحصائية وحدها.
 import anti_repeat as _ar
-
-# طيّ تمطيط الحرف (راااائع) إلى نسخة واحدة — خاص بهذه الوحدة: maybe_elongate
-# (realism_calibrator.py) يستبدل حرفاً بنسخته المكرّرة (ر→ررر) كنسيج بشري
-# متعمّد، وanti_repeat._normalize لا يطويه (يزيل التطويل ـ الحرف الموحّد
-# فقط، لا تكرار حرف عادي). بلا هذا الطيّ: «كنت أدور» و«كنت أدوررر» نصّان
-# مختلفان عند الفحص رغم كونهما نفس النص فعلياً — مثال رصدته المراجعة.
-_ELONGATION_RE = re.compile(r'([ء-ي])\1{1,}')
 
 
 def _fold_elongation(text):
-    return _ELONGATION_RE.sub(r'\1', text)
+    """مرادف توافقي: anti_repeat._normalize تطوي التمطيط الآن ضمنياً."""
+    return _ar._normalize(text)
 
 # ضمان ترميز UTF-8 للطباعة
 try:
@@ -901,7 +901,7 @@ class ReviewGenerator:
         مثال حقيقي رُصد في generated_audience_1000.json: «لبسته في عزيمة
         عشاء يعطيك حضور» و«...حضور🙌» عُدّا نصّين مختلفين.
         """
-        normalized = _fold_elongation(_ar._normalize(text))[:50]
+        normalized = _ar._normalize(text)[:50]
         if not normalized:
             return True
         if normalized in self._recent_hashes:
@@ -1214,7 +1214,7 @@ class ReviewGenerator:
             if not text:
                 continue
             if len(text.split()) <= 4:
-                normalized = _fold_elongation(_ar._normalize(text))
+                normalized = _ar._normalize(text)
                 if not normalized:
                     continue
                 cap = max(2, min(5, round(count * 0.01)))

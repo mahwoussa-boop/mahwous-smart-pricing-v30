@@ -288,22 +288,46 @@ _FOLD_MAP = str.maketrans({
     'ؤ': 'و',
 })
 
+# طيّ تمطيط الحرف (رهييييب ← رهيب) — نفس المصدر المستخدم في review_generator.py
+# (راجع _fold_elongation هناك)، هنا في المصدر الموحّد كي يستفيد منه مسار
+# الأرشيف الحيّ (app.py/streamlit_app.py) لا الأداة الإحصائية offline وحدها.
+# بلا هذا: «العطر رهيب جدا وثابت» و«العطر رهييييب جدا وثابت» — الفارق الوحيد
+# تمطيط كلمة واحدة — نصّان «مختلفان» عند is_duplicate.
+_ELONGATION_RE = re.compile(r'([ء-ي])\1{1,}')
+
 
 def _normalize(text):
-    """تطبيع إملائي عربي: يُسقط غير العربي والتشكيل ويوحّد صور الحروف."""
+    """تطبيع إملائي عربي: يُسقط غير العربي والتشكيل، يطوي تمطيط الحرف،
+    ويوحّد صور الحروف."""
     if not text:
         return ''
     t = re.sub(r'[^؀-ۿ\s]', ' ', text)
     t = _DIACRITICS_RE.sub('', t)
+    t = _ELONGATION_RE.sub(r'\1', t)
     t = t.translate(_FOLD_MAP)
     return re.sub(r'\s+', ' ', t).strip()
 
+
+# \u0625\u0633\u0642\u0627\u0637 \u0628\u0627\u062F\u0626\u062A\u064E\u064A \u00AB\u0648\u00BB \u0627\u0644\u0639\u0637\u0641 \u0648\u00AB\u0627\u0644\u00BB \u0627\u0644\u062A\u0639\u0631\u064A\u0641 \u2014 \u0644\u0644\u0645\u0642\u0627\u0631\u0646\u0629 \u0627\u0644\u0636\u0628\u0627\u0628\u064A\u0629 (jaccard/bigram)
+# \u0641\u0642\u0637\u060C \u0644\u0627 \u0627\u0644\u062A\u0637\u0628\u064A\u0639 \u0627\u0644\u0623\u0633\u0627\u0633\u064A \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0644\u0645\u0641\u062A\u0627\u062D \u0627\u0644\u062A\u062E\u0632\u064A\u0646/\u0627\u0644\u062A\u0637\u0627\u0628\u0642 \u0627\u0644\u062D\u0631\u0641\u064A\u060C \u062A\u0641\u0627\u062F\u064A\u0627\u064B
+# \u0644\u062A\u0635\u0627\u062F\u0645 \u0643\u0644\u0645\u0627\u062A \u062C\u0630\u0631\u0647\u0627 \u0627\u0644\u062D\u0642\u064A\u0642\u064A \u064A\u0628\u062F\u0623 \u0628\u0648 (\u0645\u062B\u0644 \u00AB\u0648\u0631\u062F\u0629\u00BB) \u0641\u064A \u0633\u064A\u0627\u0642 \u0627\u0644\u062A\u0637\u0627\u0628\u0642 \u0627\u0644\u0635\u0627\u0631\u0645.
+# \u0647\u0646\u0627 (\u0639\u062A\u0628\u0629 \u062A\u0634\u0627\u0628\u0647 \u0644\u0627 \u062A\u0637\u0627\u0628\u0642 \u062A\u0627\u0645) \u0623\u064A \u0625\u0633\u0642\u0627\u0637 \u0646\u0627\u062F\u0631 \u062E\u0627\u0637\u0626 \u0644\u0627 \u064A\u0642\u0644\u0628 \u062D\u0643\u0645 \u0627\u0644\u062A\u0634\u0627\u0628\u0647 \u0627\u0644\u0639\u0627\u0645.
+# \u0628\u0644\u0627 \u0647\u0630\u0627: \u00AB\u0627\u0644\u0639\u0637\u0631 \u062C\u0645\u064A\u0644 \u062C\u062F\u0627 \u0648\u062B\u0627\u0628\u062A\u00BB \u0648\u00AB\u0639\u0637\u0631 \u062C\u0645\u064A\u0644 \u062C\u062F\u0627 \u062B\u0627\u0628\u062A\u00BB \u064A\u064F\u062D\u0633\u0628\u0627\u0646 \u0645\u062E\u062A\u0644\u0641\u064A\u0646
+# \u0631\u063A\u0645 \u0623\u0646 \u0627\u0644\u0641\u0627\u0631\u0642 \u0627\u0644\u0648\u062D\u064A\u062F \u0628\u0627\u062F\u0626\u062A\u0627\u0646 (\u0627\u0644/\u0648).
+def _strip_common_prefixes(token):
+    if len(token) > 4 and token.startswith('\u0648'):
+        token = token[1:]
+    if len(token) > 4 and token.startswith('\u0627\u0644'):
+        token = token[2:]
+    return token
+
+
 def _tokenize_arabic(text):
-    """\u0645\u062C\u0645\u0648\u0639\u0629 \u0643\u0644\u0645\u0627\u062A \u0627\u0644\u0646\u0635 \u0628\u0639\u062F \u0627\u0644\u062A\u0637\u0628\u064A\u0639 (\u062A\u0639\u0645\u0644 \u0639\u0644\u0649 \u0627\u0644\u0646\u0635 \u0627\u0644\u062E\u0627\u0645 \u0623\u0648 \u0627\u0644\u0645\u0637\u0628\u0651\u0639 \u0633\u0648\u0627\u0621\u064B)."""
-    return set(_normalize(text).split())
+    """\u0645\u062C\u0645\u0648\u0639\u0629 \u0643\u0644\u0645\u0627\u062A \u0627\u0644\u0646\u0635 \u0628\u0639\u062F \u0627\u0644\u062A\u0637\u0628\u064A\u0639 + \u0625\u0633\u0642\u0627\u0637 \u0628\u0627\u062F\u0626\u062A\u064E\u064A \u0648/\u0627\u0644 (\u0644\u0644\u0645\u0642\u0627\u0631\u0646\u0629 \u0627\u0644\u0636\u0628\u0627\u0628\u064A\u0629)."""
+    return {_strip_common_prefixes(w) for w in _normalize(text).split()}
 
 def _get_bigrams(text):
-    tokens = _normalize(text).split()
+    tokens = [_strip_common_prefixes(w) for w in _normalize(text).split()]
     return set(zip(tokens, tokens[1:]))
 
 def _jaccard_similarity(text1, text2):
@@ -413,7 +437,14 @@ def _matches_any_normalized(norm, prior_texts, threshold=0.35):
         return True
     n_words = len(norm.split())
     if n_words <= SHORT_MAX_WORDS:
-        return any(_normalize(old) == norm for old in prior_texts)
+        # مطابقة بمجموعة الكلمات المرتّبة (بعد إسقاط بادئتَي و/ال لكل كلمة)
+        # لا سلسلة حرفية — «فخم وثابت وفواح» و«فواح وثابت فخم» نفس المعنى
+        # بترتيب مختلف («وفواح» بعطف القائمة = «فواح» بلا عطف). النص القصير
+        # جداً (≤3 كلمات) لا يحمل عادةً بنية نحوية يغيّر ترتيبها المعنى.
+        key = tuple(sorted(_strip_common_prefixes(w) for w in norm.split()))
+        return any(
+            tuple(sorted(_strip_common_prefixes(w) for w in _normalize(old).split())) == key
+            for old in prior_texts)
     thr, min_bigrams = _thresholds_for(n_words, threshold)
     for old in prior_texts:
         on = _normalize(old)
