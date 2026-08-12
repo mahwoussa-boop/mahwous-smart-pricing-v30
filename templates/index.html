@@ -106,13 +106,16 @@ function esc(s){return (s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')}
 async function gen(){
   const b=$('goBtn');b.disabled=true;b.textContent='⏳ جاري التوليد...';
   try{
-    // نقل الحالية للمحفوظات
+    const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    if(!r.ok){const e=await r.json().catch(()=>({}));tw('❌ '+(e.message||('خطأ '+r.status)));b.disabled=false;b.textContent='✨ ولّد شخصية جديدة';return;}
+    // نقل الحالية للمحفوظات — **بعد** نجاح الطلب لا قبله: كان النقل يتم أولاً،
+    // فعند فشل الطلب تبقى الشخصية الحالية في D (لم تُستبدل) وقد صارت أيضاً في
+    // ARC — وكل محاولة فاشلة تُضيف نسخة أخرى منها. فشلان متتاليان = نسختان
+    // حرفيتان لنفس الشخصية في المحفوظات (أعيد إنتاجه: archiveRows=2).
     if(D.length>0){
       D.forEach(d=>ARC.unshift(d));
       saveArch();
     }
-    const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-    if(!r.ok){const e=await r.json().catch(()=>({}));tw('❌ '+(e.message||('خطأ '+r.status)));b.disabled=false;b.textContent='✨ ولّد شخصية جديدة';return;}
     D=[await r.json()];
     render();saveSession();updateArchBtn();
   }catch(e){tw('❌ تعذّر الاتصال بالخادم')}
@@ -220,7 +223,7 @@ function render(){
       h+='<div class="pf"><span class="pf-n" onclick="cc(\''+esc(pf.name)+'\')">'+pf.name+'</span><span class="pf-g '+gc(pf.g)+'">'+gl(pf.g)+'</span><span class="pf-p">'+pf.price+'</span><button class="sm" onclick="cc(\''+esc(pf.name)+'\')">📋</button></div>';
     });
     h+='</div>'+
-      '<button class="sm smg" style="display:block;width:100%;text-align:center;padding:6px;margin:6px 0;font-size:.78rem" onclick="addMore('+ci+')">➕ أضف عطور وتعليقات</button>'+
+      '<button class="sm smg" style="display:block;width:100%;text-align:center;padding:6px;margin:6px 0;font-size:.78rem" onclick="addMore('+ci+',this)">➕ أضف عطور وتعليقات</button>'+
       '<div class="sep"></div><div class="lb">💬 التقييمات</div><div id="rl'+ci+'">';
     d.reviews.forEach((r,ri)=>{
       h+=rvHTML(ci,ri,r);
@@ -269,7 +272,11 @@ async function newPh(ci){
   }catch(e){tw('❌')}
 }
 
-async function addMore(ci){
+async function addMore(ci,btn){
+  // حماية من النقر المزدوج (نفس منطق reRev): بلا هذا تُطلق نقرتان سريعتان
+  // طلبين متزامنين يلتقطان قائمة existing **نفسها**، فلا يستبعد أيٌّ منهما
+  // ما أضافه الآخر — أعيد إنتاجه: ["OLD","DUP","DUP"] بمنتج وتقييم مكررين.
+  if(btn){ if(btn.disabled) return; btn.disabled=true; }
   const d=D[ci];const existing=d.perfumes.map(p=>p.name);
   try{const res=await fetch('/api/add-perfumes',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({archId:d.persona.archId,existing:existing})});
@@ -282,6 +289,7 @@ async function addMore(ci){
     nv.reviews.forEach((rv,i)=>{const ri=d.reviews.length-nv.reviews.length+i;rlE.insertAdjacentHTML('beforeend',rvHTML(ci,ri,rv));});
     $('pc'+ci).textContent=d.perfumes.length;saveSession();tw('✅ أضيف '+nv.perfumes.length+' عطور');
   }catch(e){tw('❌')}
+  finally{ if(btn) btn.disabled=false; }
 }
 
 function cpOne(i){
