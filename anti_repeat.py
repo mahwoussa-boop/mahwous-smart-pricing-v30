@@ -707,6 +707,10 @@ def register_review_full(review_text, persona_name=None):
     register_text(review_text, persona_name)
 
 def format_used_texts_block(limit=30, persona_name=None):
+    # نقطة المزامنة بين عمال Gunicorn: تُستدعى مرة في بداية كل توليد من
+    # كلا المدخلين (app.py:_used_texts_block و streamlit_app)، فهي الموضع
+    # الطبيعي لالتقاط ما حرقه عامل آخر منذ آخر قراءة.
+    sync_burn_memory_if_archive_changed()
     used = get_used_texts(limit)
     burned = get_burned_words()
     fingerprint = get_persona_fingerprint(persona_name) if persona_name else []
@@ -745,17 +749,43 @@ def format_used_texts_block(limit=30, persona_name=None):
 # تشغيل سابق تعود متاحة فوراً في عامل أو تشغيل جديد رغم أن الأرشيف نفسه —
 # المصدر المشترك الوحيد بين العمليات — لا يزال يحمل الدليل على استخدامها.
 
+# بصمة آخر أرشيف زُومنت منه ذاكرة الحرق — لمزامنة العمال فيما بينهم.
+_last_sync = {'key': None}
+
+
 def _rebuild_session_from_archive():
-    """يعيد تشغيل register_text على كل نص محفوظ في الأرشيف — مرة واحدة عند
-    استيراد الوحدة (بداية كل عملية) — فتبدأ كل عملية (عامل Gunicorn جديد أو
-    تشغيل مُعاد) بذاكرة حرق مطابقة لآخر حالة معروفة من المصدر المشترك، بدل
-    ذاكرة فارغة. لا يفشل الاستيراد لو تعذّرت القراءة (أرشيف غائب/تالف ابتدائياً)."""
+    """يعيد تشغيل register_text على كل نص محفوظ في الأرشيف — فتبدأ كل عملية
+    (عامل Gunicorn جديد أو تشغيل مُعاد) بذاكرة حرق مطابقة لآخر حالة معروفة من
+    المصدر المشترك، بدل ذاكرة فارغة. لا يفشل الاستيراد لو تعذّرت القراءة
+    (أرشيف غائب/تالف ابتدائياً)."""
     try:
         arc = _load_archive()
         for r in arc.get('reviews', []):
             register_text(r.get('text', ''), r.get('persona'))
+        _last_sync['key'] = _archive_key()
     except Exception:
         pass
+
+
+def sync_burn_memory_if_archive_changed():
+    """يعيد بناء ذاكرة الحرق إن كتب عامل آخر في الأرشيف منذ آخر مزامنة.
+
+    الإنتاج يعمل بعاملَي Gunicorn (render.yaml: --workers 2) بذاكرتين
+    منفصلتين، وكانت إعادة البناء تقع **مرة واحدة عند الاستيراد فقط**. فعامل
+    بدأ قبل أن يكتب الآخر ثلاثة نصوص يبقى إلى الأبد بـburned_words=[] رغم أن
+    الأرشيف المشترك يحمل الدليل — فيكرّر الكلمات والافتتاحيات التي حرقها
+    زميله (فحص النص الكامل لا يتأثر: is_duplicate يقرأ الملف في كل استدعاء).
+
+    المزامنة مربوطة ببصمة الملف (mtime+size) المتتبَّعة أصلاً للذاكرة
+    المؤقتة، فلا تقع إلا بعد كتابة فعلية — لا كلفة على القراءات المتكررة.
+    register_text صارت idempotent، فإعادة تشغيلها على نصوص سبق تسجيلها لا
+    تُضاعف عدّادات الحرق.
+    """
+    key = _archive_key()
+    if key == _last_sync['key']:
+        return False
+    _rebuild_session_from_archive()
+    return True
 
 
 _rebuild_session_from_archive()
