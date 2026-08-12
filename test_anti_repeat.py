@@ -320,6 +320,41 @@ def test_corrupted_archive_is_quarantined_not_silently_emptied(tmp_path, monkeyp
         'النسخة الاحتياطية يجب أن تحفظ محتوى الملف الفاسد كاملاً كما كان')
 
 
+def test_corrupted_archive_salvages_intact_history_for_dedup(tmp_path, monkeypatch):
+    """الحالة الواقعية للفساد: مدخلات سليمة ثم قطع في المنتصف. النسخة
+    الاحتياطية وحدها كانت تحفظ البيانات من الضياع لكن **فحص التكرار يفقد
+    رؤية التاريخ القديم** حتى يستعيدها المالك يدوياً، فيُعاد توليد نصوص سبق
+    نشرها. الآن يُستخرج ما أمكن فيستمر منع التكرار فوراً."""
+    archive_file = tmp_path / 'archive.json'
+    archive_file.write_text(
+        '{"reviews": [{"text": "ريحته تجنن وثباته ممتاز جدا", "product": "أ"},'
+        ' {"text": "العلبة وصلت مرتبة والتغليف محكم", "product": "ب"},'
+        ' {"text": "نص مقطوع في المن',                      # القطع هنا عمداً
+        encoding='utf-8')
+    monkeypatch.setattr(ar, 'ARCHIVE_FILE', archive_file, raising=False)
+    ar._archive_cache['key'] = None
+    ar._archive_cache['data'] = None
+    reset_session_texts()
+
+    arc = ar._load_archive()
+
+    texts = [r['text'] for r in arc['reviews']]
+    assert 'ريحته تجنن وثباته ممتاز جدا' in texts, 'لم يُنقذ أول تقييم سليم'
+    assert 'العلبة وصلت مرتبة والتغليف محكم' in texts, 'لم يُنقذ ثاني تقييم سليم'
+    assert len(list(tmp_path.glob('archive.json.corrupt-*'))) == 1, 'النسخة الاحتياطية لا تزال لازمة'
+
+    # الأثر الفعلي: منع التكرار يرى التاريخ المُنقَذ فوراً
+    assert is_duplicate('ريحته تجنن وثباته ممتاز جدا', against_archive_only=True) is True, (
+        'التاريخ المُنقَذ لا يُستخدم في فحص التكرار — يُعاد توليد نص سبق نشره')
+
+
+def test_salvage_handles_escaped_quotes_without_truncating_text():
+    """الاقتباس المهروب داخل النص (\\") لا يقطع الاستخراج عند أول اقتباس."""
+    raw = r'{"reviews": [{"text": "قال \"ممتاز\" وانصح فيه", "product": "أ"}, {"text": "مقط'
+    texts = ar._salvage_texts_from_corrupted(raw)
+    assert 'قال "ممتاز" وانصح فيه' in texts, f'فُقد النص أو قُطع: {texts}'
+
+
 def test_missing_archive_file_is_not_treated_as_corrupted(tmp_path, monkeypatch):
     """ضابط سلبي: ملف غير موجود أصلاً (تشغيل أول) هو حالة فارغة مشروعة —
     لا يجب أن يُنتج أي نسخة احتياطية أو تحذير فساد زائف."""

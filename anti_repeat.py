@@ -184,20 +184,64 @@ def _archive_key():
         return None
 
 
+# استخراج نصوص التقييمات من JSON فاسد — يلتقط "text": "..." مع دعم الهروب
+# (\" و \\) كي لا يُقطَع النص عند أول اقتباس مهروب داخله.
+_SALVAGE_TEXT_RE = re.compile(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _salvage_texts_from_corrupted(raw):
+    """أفضل جهد لاستخراج نصوص التقييمات من محتوى أرشيف تالف.
+
+    بلا هذا: النسخة الاحتياطية تحفظ البيانات من الضياع، لكن **فحص التكرار
+    يتوقف عن رؤية التاريخ القديم** حتى يستعيدها المالك يدوياً — فيبدأ الأرشيف
+    النشط من الصفر ويُعاد توليد نصوص سبق نشرها. الاستخراج هنا يُبقي الحماية
+    فعّالة فوراً بلا تدخّل.
+    """
+    texts = []
+    seen = set()
+    for m in _SALVAGE_TEXT_RE.finditer(raw or ''):
+        try:
+            text = json.loads(f'"{m.group(1)}"')   # فكّ الهروب بمحلّل JSON نفسه
+        except ValueError:
+            continue
+        norm = _normalize(text)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        texts.append(text)
+    return texts
+
+
 def _quarantine_corrupted_archive(error):
-    """يعزل archive.json الفاسد بنسخة احتياطية بدل إفراغه بصمت.
+    """يعزل archive.json الفاسد بنسخة احتياطية، ثم ينقذ ما أمكن من تاريخه.
 
     قبل هذا: ملف موجود لكن غير قابل للتحليل (JSON مقطوع، تدخّل يدوي، تعطّل
     نادر أثناء كتابة قديمة غير ذرّية) كان يُعامَل مطابقاً تماماً لملف غير
     موجود أصلاً — يُستبدَل بأرشيف فارغ بصمت والكتابة التالية تمحو كل تاريخ
-    التقييمات فعلياً. الآن: نُبقي نسخة الأدلة قبل الإفراغ ونُبلِّغ بصوت عالٍ
-    (نفس أسلوب طباعة ⚠️ المستخدم في مسارات الفشل الأخرى بالمشروع)."""
+    التقييمات فعلياً. الآن: نُبقي نسخة الأدلة، ونُبلِّغ بصوت عالٍ، **ونستخرج
+    نصوص التقييمات السليمة** فيستمر منع التكرار برؤية التاريخ القديم بدل
+    البدء من الصفر بانتظار استعادة يدوية.
+
+    يرجع قائمة التقييمات المُنقَذة (قد تكون فارغة) لتُبذَر في الأرشيف الجديد.
+    """
+    raw = ''
+    try:
+        raw = ARCHIVE_FILE.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        pass
     try:
         backup = f'{ARCHIVE_FILE}.corrupt-{int(time.time())}'
         shutil.copy2(ARCHIVE_FILE, backup)
         print(f'⚠️ archive.json فاسد ({error}) — نسخة احتياطية محفوظة في: {backup}', flush=True)
     except OSError as backup_err:
         print(f'⚠️ archive.json فاسد ({error}) ويتعذّر نسخه احتياطياً: {backup_err}', flush=True)
+
+    salvaged = [{'text': t, 'product': '', 'persona': '', 'ts': int(time.time())}
+                for t in _salvage_texts_from_corrupted(raw)]
+    if salvaged:
+        print(f'♻️ أُنقذ {len(salvaged)} تقييماً من الأرشيف الفاسد — منع التكرار '
+              f'يواصل رؤية التاريخ القديم', flush=True)
+    return salvaged
 
 
 def _load_archive():
@@ -210,11 +254,14 @@ def _load_archive():
         with open(ARCHIVE_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except (OSError, ValueError) as e:
-        _quarantine_corrupted_archive(e)
-        return _empty_archive()
+        recovered = _empty_archive()
+        recovered['reviews'] = _quarantine_corrupted_archive(e)
+        return recovered
     if not isinstance(data, dict):
-        _quarantine_corrupted_archive(TypeError(f'جذر JSON ليس كائناً: {type(data).__name__}'))
-        return _empty_archive()
+        recovered = _empty_archive()
+        recovered['reviews'] = _quarantine_corrupted_archive(
+            TypeError(f'جذر JSON ليس كائناً: {type(data).__name__}'))
+        return recovered
     data.setdefault('reviews', [])
     data.setdefault('store_reviews', [])
     data.setdefault('personas', [])
