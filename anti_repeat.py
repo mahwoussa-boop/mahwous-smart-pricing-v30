@@ -340,7 +340,10 @@ def is_duplicate(new_text, threshold=0.35, is_store_review=False):
     if norm in _session_norm:
         return True
 
-    prior = list(get_used_texts(limit=100)) + list(_session_recent)
+    # MAX_ARCHIVE لا رقماً ثابتاً أصغر: كان limit=100 يحجب 400 مدخلة من كل
+    # أرشيف يتجاوز 100 تقييم (والأرشيف يحتفظ حتى MAX_ARCHIVE=500) — نص
+    # مكرر حرفياً في المدخلة رقم 101 وما قبلها كان يمرّ كـ«غير مكرر».
+    prior = list(get_used_texts(limit=MAX_ARCHIVE)) + list(_session_recent)
     n_words = len(norm.split())
 
     # النص القصير: التطابق بعد التطبيع هو المعيار الصالح الوحيد.
@@ -539,6 +542,33 @@ def format_used_texts_block(limit=30, persona_name=None):
         block += f"\nسياقات متاحة للاستخدام (اختر واحد فقط إذا احتجت): {', '.join(available_contexts[:5])}\n"
         
     return block
+
+# ═══════════════════════════════════════════════════════════
+#  إعادة بناء ذاكرة الحرق من الأرشيف عند بدء كل عملية
+# ═══════════════════════════════════════════════════════════
+# الكلمات المحروقة (_word_usage_history) وبصمة الشخصية (_persona_keywords)
+# والبدايات المحروقة (_opening_usage) والسياقات (_context_usage) وبنية
+# الأفكار (_pattern_structure_usage) كلها ذاكرة عملية Python صرفة — بلا أي
+# نسخة في archive.json. الإنتاج الفعلي يعمل بعاملَي Gunicorn منفصلَي الذاكرة
+# (Procfile/render.yaml: --workers 2)، وكل إعادة تشغيل (نشر جديد، انهيار،
+# إعادة تدوير) تصفّر هذه الذاكرة أيضاً. النتيجة: كلمة/بداية حرقها عامل أو
+# تشغيل سابق تعود متاحة فوراً في عامل أو تشغيل جديد رغم أن الأرشيف نفسه —
+# المصدر المشترك الوحيد بين العمليات — لا يزال يحمل الدليل على استخدامها.
+
+def _rebuild_session_from_archive():
+    """يعيد تشغيل register_text على كل نص محفوظ في الأرشيف — مرة واحدة عند
+    استيراد الوحدة (بداية كل عملية) — فتبدأ كل عملية (عامل Gunicorn جديد أو
+    تشغيل مُعاد) بذاكرة حرق مطابقة لآخر حالة معروفة من المصدر المشترك، بدل
+    ذاكرة فارغة. لا يفشل الاستيراد لو تعذّرت القراءة (أرشيف غائب/تالف ابتدائياً)."""
+    try:
+        arc = _load_archive()
+        for r in arc.get('reviews', []):
+            register_text(r.get('text', ''), r.get('persona'))
+    except Exception:
+        pass
+
+
+_rebuild_session_from_archive()
 
 if __name__ == '__main__':
     print(f'✅ Anti-Repeat loaded')

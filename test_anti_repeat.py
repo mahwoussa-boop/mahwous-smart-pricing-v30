@@ -9,6 +9,8 @@ is_duplicate إطلاقاً** — حارس زائف لا يفشل. هذه الا
 عزل: is_duplicate يقرأ get_used_texts (من archive.json المتغيّر) — تأكيدات
 «ليس مكرراً»/التشابه تُعزَل بـmonkeypatch لأرشيف فارغ؛ الباقي حتمي عبر reset.
 """
+import json
+
 import anti_repeat as ar
 from anti_repeat import (
     is_duplicate, register_text, reset_session_texts, is_registered,
@@ -152,3 +154,59 @@ def test_unused_contexts_stay_available():
     reset_session_texts()
     register_text('العلبة وصلت مرتبة والتغليف ممتاز جدا')
     assert 'مسجد' in ar.get_available_contexts()
+
+
+def test_duplicate_check_covers_full_archive_not_just_last_100(monkeypatch):
+    """انحدار حرج: is_duplicate كان يفحص آخر 100 فقط بينما الأرشيف يحتفظ
+    حتى MAX_ARCHIVE=500 — نص في المدخلة رقم 101 وما قبلها (الأقدم) كان
+    يمرّ كـ«غير مكرر» رغم تطابقه الحرفي مع نص محفوظ فعلاً في الأرشيف.
+
+    نصوص الحشو مختلفة معجمياً بعمد (لا تشترك مفردات) لعزل نافذة الطول عن
+    تشابه jaccard/bigram العرضي — الفحص هنا لتطابق حرفي بعد التطبيع فقط.
+    """
+    reset_session_texts()
+    target = 'ريحته حلوة وثابتة طول اليوم بشكل رهيب'
+    word_bank = ['كتاب', 'سيارة', 'طاولة', 'حاسوب', 'شجرة', 'بحر', 'جبل',
+                'نافذة', 'مصباح', 'كرسي', 'هاتف', 'ساعة', 'مفتاح', 'باب',
+                'حائط', 'سقف', 'أرض', 'سماء', 'شمس', 'قمر']
+    import random
+    rnd = random.Random(3)
+    fillers = [' '.join(rnd.sample(word_bank, 5)) + f' رقم{i}' for i in range(100)]
+    archive = [target] + fillers  # target هو الأقدم (المدخلة 101 من النهاية)
+
+    def _fake_get_used_texts(limit=100):
+        return archive[-limit:] if len(archive) > limit else archive
+
+    monkeypatch.setattr(ar, 'get_used_texts', _fake_get_used_texts)
+    assert is_duplicate(target) is True, (
+        'النص الأقدم (خارج نافذة الـ100 القديمة) لم يُكتشف كمكرر رغم '
+        'تطابقه الحرفي مع مدخلة أرشيف فعلية')
+
+
+def test_session_memory_rebuilds_from_archive_at_startup(tmp_path, monkeypatch):
+    """يعيد إنتاج برهان المراجعة بالضبط: كلمة محروقة قبل «إعادة التشغيل»
+    (تصفير الذاكرة) تعود محروقة بعده — بشرط أن الأرشيف لا يزال يحمل الدليل.
+
+    قبل الإصلاح: reset_session_texts (يحاكي عملية Gunicorn جديدة أو إعادة
+    تشغيل) يمحو الكلمات/البدايات المحروقة كلياً بلا رجعة، رغم بقاء الدليل
+    في archive.json — فيكرر عامل أو تشغيل جديد صياغة حرقها عامل آخر بالفعل.
+    """
+    archive_file = tmp_path / 'archive.json'
+    w = next(iter(ar.TRACKED_WORDS))
+    reviews = [
+        {'text': f'هذا عطر {w} جدا ومميز رقم {i}', 'product': 'م', 'persona': 'شخص1', 'ts': i}
+        for i in range(3)
+    ]
+    archive_file.write_text(
+        json.dumps({'reviews': reviews, 'store_reviews': [], 'personas': []}, ensure_ascii=False),
+        encoding='utf-8')
+    monkeypatch.setattr(ar, 'ARCHIVE_FILE', archive_file, raising=False)
+
+    # محاكاة عملية Gunicorn جديدة / إعادة تشغيل: ذاكرة فارغة تماماً
+    reset_session_texts()
+    assert w not in get_burned_words(), 'الحالة الابتدائية يجب أن تكون فارغة قبل إعادة البناء'
+
+    ar._rebuild_session_from_archive()
+
+    assert w in get_burned_words(), (
+        'الكلمة المحروقة في أرشيف سابق لم تُستعَد بعد محاكاة بدء عملية جديدة')
