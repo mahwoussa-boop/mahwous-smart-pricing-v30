@@ -243,11 +243,15 @@ function rvHTML(ci,ri,r){
     '<div class="rv-act">'+
       '<button class="sm" onclick="cc($(\'t'+id+'\').textContent)">📋 تقييم</button>'+
       '<button class="sm" onclick="cc(\''+esc(r.product)+'\')">📋 منتج</button>'+
-      '<button class="sm smr" onclick="reRev('+ci+','+ri+')">🔄 استبدال</button>'+
+      '<button class="sm smr" onclick="reRev('+ci+','+ri+',this)">🔄 استبدال</button>'+
     '</div></div>';
 }
 
-async function reRev(ci,ri){
+async function reRev(ci,ri,btn){
+  // حماية من النقر المزدوج: بلا هذا يُطلق نقرتان سريعتان طلبين متزامنين
+  // لتوليد وأرشفة نفس التقييم (كلاهما يمرّ فحص التفرّد قبل أن يكتب أيّ
+  // منهما) — الزر معطّل طوال الطلب فلا يصدر أكثر من طلب واحد فعلي لكل نقرة.
+  if(btn){ if(btn.disabled) return; btn.disabled=true; }
   const d=D[ci],r=d.reviews[ri];
   try{
     const res=await fetch('/api/regen-review',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -256,6 +260,7 @@ async function reRev(ci,ri){
     const id='r'+ci+'_'+ri;$('t'+id).textContent=nv.text;$('s'+id).textContent=st(nv.rating);
     saveSession();tw('✅ تقييم جديد');
   }catch(e){tw('❌')}
+  finally{ if(btn) btn.disabled=false; }
 }
 
 async function newPh(ci){
