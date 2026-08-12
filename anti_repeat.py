@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """نظام مكافحة التكرار المتقدم"""
-import sys, os, json, time, re, threading
+import sys, os, json, time, re, threading, shutil
 from pathlib import Path
 from collections import OrderedDict, deque
 
@@ -138,6 +138,22 @@ def _archive_key():
         return None
 
 
+def _quarantine_corrupted_archive(error):
+    """يعزل archive.json الفاسد بنسخة احتياطية بدل إفراغه بصمت.
+
+    قبل هذا: ملف موجود لكن غير قابل للتحليل (JSON مقطوع، تدخّل يدوي، تعطّل
+    نادر أثناء كتابة قديمة غير ذرّية) كان يُعامَل مطابقاً تماماً لملف غير
+    موجود أصلاً — يُستبدَل بأرشيف فارغ بصمت والكتابة التالية تمحو كل تاريخ
+    التقييمات فعلياً. الآن: نُبقي نسخة الأدلة قبل الإفراغ ونُبلِّغ بصوت عالٍ
+    (نفس أسلوب طباعة ⚠️ المستخدم في مسارات الفشل الأخرى بالمشروع)."""
+    try:
+        backup = f'{ARCHIVE_FILE}.corrupt-{int(time.time())}'
+        shutil.copy2(ARCHIVE_FILE, backup)
+        print(f'⚠️ archive.json فاسد ({error}) — نسخة احتياطية محفوظة في: {backup}', flush=True)
+    except OSError as backup_err:
+        print(f'⚠️ archive.json فاسد ({error}) ويتعذّر نسخه احتياطياً: {backup_err}', flush=True)
+
+
 def _load_archive():
     key = _archive_key()
     if key is None:
@@ -147,9 +163,11 @@ def _load_archive():
     try:
         with open(ARCHIVE_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        _quarantine_corrupted_archive(e)
         return _empty_archive()
     if not isinstance(data, dict):
+        _quarantine_corrupted_archive(TypeError(f'جذر JSON ليس كائناً: {type(data).__name__}'))
         return _empty_archive()
     data.setdefault('reviews', [])
     data.setdefault('store_reviews', [])

@@ -297,3 +297,38 @@ def test_archive_review_no_longer_double_registers(monkeypatch):
     ar.archive_review(text, 'منتج', 'شخص1')  # الأرشفة بعده (تُسجِّل أيضاً لو لزم)
 
     assert len(ar._session_recent) == 1, 'الأرشفة بعد تسجيل مسبق للنص نفسه ضاعفت العدّاد'
+
+
+def test_corrupted_archive_is_quarantined_not_silently_emptied(tmp_path, monkeypatch):
+    """بلاغ مراجعة كودية خارجية مُتحقَّق منه (مرحلة 5، البند 3): archive.json
+    فاسد (JSON مقطوع) كان يُعامَل مطابقاً تماماً لملف غير موجود أصلاً —
+    _load_archive تعيد أرشيفاً فارغاً بصمت في الحالتين، فتمحو الكتابة
+    التالية (_save_archive) تاريخ التقييمات الحقيقي بلا أي أثر أو تحذير.
+    """
+    archive_file = tmp_path / 'archive.json'
+    archive_file.write_text('{"reviews": [{"text": "نص حقيقي فقد', encoding='utf-8')  # JSON مقطوع عمداً
+    monkeypatch.setattr(ar, 'ARCHIVE_FILE', archive_file, raising=False)
+    ar._archive_cache['key'] = None
+    ar._archive_cache['data'] = None
+
+    arc = ar._load_archive()
+
+    assert arc == ar._empty_archive(), 'يجب المتابعة بأرشيف فارغ (لا حظر) رغم الفساد'
+    backups = list(tmp_path.glob('archive.json.corrupt-*'))
+    assert len(backups) == 1, 'يجب حفظ نسخة احتياطية من الملف الفاسد قبل إفراغه'
+    assert 'نص حقيقي فقد' in backups[0].read_text(encoding='utf-8'), (
+        'النسخة الاحتياطية يجب أن تحفظ محتوى الملف الفاسد كاملاً كما كان')
+
+
+def test_missing_archive_file_is_not_treated_as_corrupted(tmp_path, monkeypatch):
+    """ضابط سلبي: ملف غير موجود أصلاً (تشغيل أول) هو حالة فارغة مشروعة —
+    لا يجب أن يُنتج أي نسخة احتياطية أو تحذير فساد زائف."""
+    archive_file = tmp_path / 'archive.json'  # لم يُكتَب إطلاقاً
+    monkeypatch.setattr(ar, 'ARCHIVE_FILE', archive_file, raising=False)
+    ar._archive_cache['key'] = None
+    ar._archive_cache['data'] = None
+
+    arc = ar._load_archive()
+
+    assert arc == ar._empty_archive()
+    assert list(tmp_path.glob('archive.json.corrupt-*')) == []
