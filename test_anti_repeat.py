@@ -18,12 +18,67 @@ from anti_repeat import (
 _BASE = 'العطر فخم جدا وثابت ورائع ويدوم'
 
 
-def test_empty_or_too_short_is_duplicate():
-    """فارغ أو أقل من 3 كلمات = غير صالح (يُرفَض كمكرر) — قبل أي قراءة أرشيف."""
+def test_empty_is_duplicate():
+    """الفارغ فقط يُرفَض بلا قراءة أرشيف."""
     reset_session_texts()
     assert is_duplicate('') is True
-    assert is_duplicate('كلمة') is True
-    assert is_duplicate('كلمتان اثنتان') is True
+    assert is_duplicate('   ') is True
+    assert is_duplicate('!!!') is True  # بلا عربي بعد التطبيع
+
+
+def test_short_text_is_not_duplicate_by_length_alone(monkeypatch):
+    """انحدار: النص القصير الفريد ليس مكرراً.
+
+    السلوك القديم كان «أقل من 3 كلمات ⇒ مكرر» بينما 43% من len_target المعاير
+    هو 1–2 كلمة، فكانت كل محاولات التوليد القصير تفشل ويُقبل المكرر حتماً —
+    وهو المولّد المباشر لتكرار «ريحته حلوة وثابتة» في الأرشيف.
+    """
+    monkeypatch.setattr(ar, 'get_used_texts', lambda limit=100: [])
+    reset_session_texts()
+    assert is_duplicate('حلو') is False
+    assert is_duplicate('ريحته تجنن') is False
+
+
+def test_short_text_exact_repeat_is_duplicate(monkeypatch):
+    """القصير المكرر حرفياً يُكشَف (المعيار الصالح الوحيد على هذا الطول)."""
+    monkeypatch.setattr(ar, 'get_used_texts', lambda limit=100: [])
+    reset_session_texts()
+    register_text('ريحته حلوة وثابتة')
+    assert is_duplicate('ريحته حلوة وثابتة') is True
+
+
+def test_short_texts_sharing_a_word_are_not_duplicates(monkeypatch):
+    """القصيران المختلفان معنى لا يُخلطان لمجرد كلمة مشتركة (jaccard 0.5)."""
+    monkeypatch.setattr(ar, 'get_used_texts', lambda limit=100: [])
+    reset_session_texts()
+    register_text('ريحته حلوة')
+    assert is_duplicate('ريحته تفتح النفس') is False
+
+
+def test_normalize_folds_arabic_letter_variants(monkeypatch):
+    """انحدار: ة/ه و أ/ا و ى/ي صور للحرف نفسه.
+
+    بدون التوحيد احتفظ الأرشيف بـ«ريحتة حلوة وثابتة» و«ريحته حلوة وثابتة»
+    كمدخلتين منفصلتين رغم أنهما النص نفسه إملائياً.
+    """
+    monkeypatch.setattr(ar, 'get_used_texts', lambda limit=100: [])
+    reset_session_texts()
+    register_text('ريحته حلوة وثابتة')
+    assert is_duplicate('ريحتة حلوه وثابته') is True
+    assert ar._normalize('أحلى') == ar._normalize('احلي')
+
+
+def test_burned_openings_flagged_and_surfaced():
+    """تكرار البداية نفسها يُرصَد ويظهر في كتلة البرومبت (منع تكرار البدايات)."""
+    reset_session_texts()
+    # ثلاث بدايات تشترك في الكلمة الأولى — بصمة آلية وإن اختلفت الكلمة الثانية
+    for t in ('ريحته حلوة وثابتة جدا', 'ريحته تملى المكان كله', 'ريحته تفتح النفس مرة'):
+        register_text(t)
+    assert ar.is_opening_burned('ريحته تدوخ الراس') is True
+    assert 'ريحته' in ar.get_burned_openings()
+    assert 'بدايات محروقة' in ar.format_used_texts_block(limit=5)
+    # بداية مختلفة تماماً لا تُحرَق
+    assert ar.is_opening_burned('العلبة وصلت مرتبة') is False
 
 
 def test_exact_registered_is_duplicate():

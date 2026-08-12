@@ -58,20 +58,52 @@ TRACKED_CONTEXTS = [
 _context_usage = deque(maxlen=50)
 _pattern_structure_usage = deque(maxlen=30)
 
+def _empty_archive():
+    return {'reviews': [], 'store_reviews': [], 'personas': []}
+
+
+# ذاكرة قراءة الأرشيف — is_duplicate يُستدعى حتى 5 مرات لكل منتج، وكل استدعاء
+# كان يعيد تحليل ملف JSON كامل (~115KB). المفتاح (mtime, size) فيبطل تلقائياً
+# عند أي كتابة، ويُبطَل صراحةً في _save_archive.
+_archive_cache = {'key': None, 'data': None}
+
+
+def _archive_key():
+    try:
+        stat = ARCHIVE_FILE.stat()
+        return (str(ARCHIVE_FILE), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
 def _load_archive():
-    if ARCHIVE_FILE.exists():
-        try:
-            with open(ARCHIVE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {'reviews':[], 'store_reviews':[], 'personas':[]}
-    return {'reviews':[], 'store_reviews':[], 'personas':[]}
+    key = _archive_key()
+    if key is None:
+        return _empty_archive()
+    if _archive_cache['key'] == key and _archive_cache['data'] is not None:
+        return _archive_cache['data']
+    try:
+        with open(ARCHIVE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return _empty_archive()
+    if not isinstance(data, dict):
+        return _empty_archive()
+    data.setdefault('reviews', [])
+    data.setdefault('store_reviews', [])
+    data.setdefault('personas', [])
+    _archive_cache['key'] = key
+    _archive_cache['data'] = data
+    return data
+
 
 def _save_archive(archive):
     if len(archive.get('reviews', [])) > MAX_ARCHIVE:
         archive['reviews'] = archive['reviews'][-MAX_ARCHIVE:]
     with open(ARCHIVE_FILE, 'w', encoding='utf-8') as f:
         json.dump(archive, f, ensure_ascii=False, indent=1)
+    _archive_cache['key'] = _archive_key()
+    _archive_cache['data'] = archive
 
 def get_used_texts(limit=40):
     arc = _load_archive()
@@ -113,18 +145,33 @@ def get_archive_stats():
                     for r in arc.get('reviews',[])[-10:]]
     }
 
+# تشكيل + تطويل: زخرفة إملائية لا تغيّر الكلمة
+_DIACRITICS_RE = re.compile(r'[ً-ْٰـ]')
+# توحيد صور الحرف الواحد — بدونه «ريحتة» و«ريحته» نصّان مختلفان تماماً، وهو ما
+# جعل الأرشيف يحتفظ بـ«ريحتة حلوة وثابتة» و«ريحته حلوة وثابتة» كمدخلتين منفصلتين.
+_FOLD_MAP = str.maketrans({
+    'أ': 'ا', 'إ': 'ا', 'آ': 'ا', 'ٱ': 'ا',
+    'ة': 'ه',
+    'ى': 'ي', 'ئ': 'ي',
+    'ؤ': 'و',
+})
+
+
 def _normalize(text):
+    """تطبيع إملائي عربي: يُسقط غير العربي والتشكيل ويوحّد صور الحروف."""
     if not text:
         return ''
-    t = re.sub(r'[^؀-ۿ\s]', '', text)
+    t = re.sub(r'[^؀-ۿ\s]', ' ', text)
+    t = _DIACRITICS_RE.sub('', t)
+    t = t.translate(_FOLD_MAP)
     return re.sub(r'\s+', ' ', t).strip()
 
 def _tokenize_arabic(text):
-    text = re.sub(r'[^\u0600-\u06FF\s]', '', text)
-    return set(text.split())
+    """\u0645\u062C\u0645\u0648\u0639\u0629 \u0643\u0644\u0645\u0627\u062A \u0627\u0644\u0646\u0635 \u0628\u0639\u062F \u0627\u0644\u062A\u0637\u0628\u064A\u0639 (\u062A\u0639\u0645\u0644 \u0639\u0644\u0649 \u0627\u0644\u0646\u0635 \u0627\u0644\u062E\u0627\u0645 \u0623\u0648 \u0627\u0644\u0645\u0637\u0628\u0651\u0639 \u0633\u0648\u0627\u0621\u064B)."""
+    return set(_normalize(text).split())
 
 def _get_bigrams(text):
-    tokens = text.split()
+    tokens = _normalize(text).split()
     return set(zip(tokens, tokens[1:]))
 
 def _jaccard_similarity(text1, text2):
@@ -158,7 +205,10 @@ def register_text(text, persona_name=None):
     while len(_session_norm) > _SESSION_CAP:
         _session_norm.popitem(last=False)
     _session_recent.append(text)
-    
+
+    # Track opening (منع تكرار البدايات) — المسار الحيّ يستدعي register_text
+    track_opening(text)
+
     # Track words for burnout
     _word_usage_history.append(text)
     
@@ -178,27 +228,62 @@ def reset_session_texts():
     _session_recent.clear()
     _word_usage_history.clear()
     _persona_keywords.clear()
+    _opening_usage.clear()
+
+# ── عتبات حسب الطول ──────────────────────────────────────────────────────
+# التشابه النسبي بلا معنى على النص القصير: كلمة مشتركة واحدة من كلمتين =
+# jaccard 0.5، فعتبة 0.35 ترفض كل تقييم قصير تقريباً. و43% من len_target
+# المعاير من بيانات المنافسين هو 1–2 كلمة، فكان الفرع القديم (<3 كلمات ⇒ مكرر)
+# يستنفد كل المحاولات ويقبل المكرر حتماً في نحو نصف التوليدات.
+SHORT_MAX_WORDS = 3
+
+
+def _thresholds_for(n_words, base_threshold):
+    """(عتبة jaccard، أدنى تداخل bigram) حسب طول النص."""
+    if n_words <= 6:
+        return 0.65, 3
+    if n_words <= 11:
+        return 0.50, 3
+    return base_threshold, 3
+
 
 def is_duplicate(new_text, threshold=0.35, is_store_review=False):
-    if not new_text or len(new_text.split()) < 3:
-        return True # Empty or too short
-        
+    """هل النص مكرر مقابل الأرشيف + الجلسة؟
+
+    يجب أن يُستدعى على **النص النهائي** (بعد التطبيع والأنسنة والقصّ) لا على
+    مخرج الـAI الخام؛ القصّ إلى بضع كلمات يجعل مخرجات مختلفة تنهار لنفس النص.
+    """
+    if not new_text or not new_text.strip():
+        return True
+
     norm = _normalize(new_text)
     if not norm:
         return True
-        
+
+    # تطابق حرفي بعد التطبيع: مكرر مهما كان الطول
     if norm in _session_norm:
         return True
-        
-    for old in list(get_used_texts(limit=100)) + list(_session_recent):
+
+    prior = list(get_used_texts(limit=100)) + list(_session_recent)
+    n_words = len(norm.split())
+
+    # النص القصير: التطابق بعد التطبيع هو المعيار الصالح الوحيد.
+    # («ريحته حلوة» و«ريحته تفتح النفس» يتشاركان كلمة — ليسا تكراراً.)
+    if n_words <= SHORT_MAX_WORDS:
+        return any(_normalize(old) == norm for old in prior)
+
+    thr, min_bigrams = _thresholds_for(n_words, threshold)
+    for old in prior:
         on = _normalize(old)
-        if on and on == norm:
+        if not on:
+            continue
+        if on == norm:
             return True
-        if _jaccard_similarity(new_text, old) > threshold:
+        if _jaccard_similarity(norm, on) > thr:
             return True
-        if _bigram_overlap(new_text, old) >= 3:
+        if _bigram_overlap(norm, on) >= min_bigrams:
             return True
-            
+
     return False
 
 def get_burned_words():
@@ -290,24 +375,79 @@ def extract_pattern_structure(review_text):
         structures.append('first_impression')
     return '_'.join(structures) if structures else 'generic'
 
+# ── تتبّع البدايات ───────────────────────────────────────────────────────
+# تكرار الافتتاحية أظهر بصمة آلية حتى حين يختلف باقي النص («ريحته حلوة»،
+# «ريحته تملى المكان»، «ريحته تفتح النفس» — كلها تبدأ بـ«ريحته»).
+_opening_usage = deque(maxlen=40)
+OPENING_WORDS = 2
+
+
+def opening_of(text, words=OPENING_WORDS):
+    """بصمة بداية النص: أوّل كلمتين بعد التطبيع."""
+    toks = _normalize(text).split()
+    return ' '.join(toks[:words]) if toks else ''
+
+
+def track_opening(text):
+    op = opening_of(text)
+    if op:
+        _opening_usage.append(op)
+
+
+# بداية بكلمتين متطابقتين تكفي مرّتان لحرقها؛ الكلمة الأولى وحدها أوسع فتُمنَح
+# سماحاً أكبر (ثلاث مرات) — «ريحته حلوة/ريحته تملى/ريحته تفتح» بدايات مختلفة
+# بكلمتين لكن تكرار «ريحته» ثلاث مرات بصمة آلية واضحة.
+OPENING_MAX_USES = 2
+FIRST_WORD_MAX_USES = 3
+
+
+def is_opening_burned(text, lookback=12, max_uses=OPENING_MAX_USES,
+                      first_word_max=FIRST_WORD_MAX_USES):
+    """هل تكرّرت هذه البداية (بكلمتين أو بالكلمة الأولى) كثيراً مؤخراً؟"""
+    op = opening_of(text)
+    if not op:
+        return False
+    recent = list(_opening_usage)[-lookback:]
+    if recent.count(op) >= max_uses:
+        return True
+    first = op.split()[0]
+    return sum(1 for o in recent if o.split()[:1] == [first]) >= first_word_max
+
+
+def get_burned_openings(lookback=12, max_uses=OPENING_MAX_USES,
+                        first_word_max=FIRST_WORD_MAX_USES):
+    """البدايات المحروقة: عبارات الكلمتين المتكرّرة + الكلمات الأولى المتكرّرة."""
+    recent = list(_opening_usage)[-lookback:]
+    burned = {op for op in recent if recent.count(op) >= max_uses}
+    firsts = [o.split()[0] for o in recent if o.split()]
+    burned |= {w for w in firsts if firsts.count(w) >= first_word_max}
+    return sorted(burned)
+
+
+def reset_openings():
+    _opening_usage.clear()
+
+
 def register_review_full(review_text, persona_name=None):
-    """تسجيل كامل للتقييم: نص + سياق + نمط"""
+    """تسجيل كامل للتقييم: نص + سياق + نمط + بداية"""
     register_text(review_text, persona_name)
-    
+
     # Track context
     ctx = extract_context_from_review(review_text)
     if ctx:
         track_context(ctx)
-    
+
     # Track pattern structure
     structure = extract_pattern_structure(review_text)
     track_pattern_structure(structure)
+    # البداية تُسجَّل داخل register_text أعلاه (المسار الحيّ) — لا تكرّرها هنا
 
 def format_used_texts_block(limit=30, persona_name=None):
     used = get_used_texts(limit)
     burned = get_burned_words()
     fingerprint = get_persona_fingerprint(persona_name) if persona_name else []
     available_contexts = get_available_contexts()
+    burned_openings = get_burned_openings()
     
     block = ""
     if used:
@@ -319,7 +459,11 @@ def format_used_texts_block(limit=30, persona_name=None):
         
     if fingerprint:
         block += f"\nهذا الشخص استخدم هذه الكلمات في تقييمات سابقة له، لا تجعله يكررها: {', '.join(fingerprint)}\n"
-    
+
+    if burned_openings:
+        block += ("\nبدايات محروقة (ممنوع أن يبدأ التقييم بأي منها — ابدأ بكلمة أخرى تماماً): "
+                  f"{'، '.join(burned_openings)}\n")
+
     if available_contexts:
         block += f"\nسياقات متاحة للاستخدام (اختر واحد فقط إذا احتجت): {', '.join(available_contexts[:5])}\n"
         
