@@ -466,6 +466,7 @@ def gen_reviews(persona, perfumes):
     if USE_NEW_PERSONAS:
         # === برومبت متقدم لكل منتج (بارتي كامل مع app.py) ===
         all_reviews = []
+        retry_ctx = []  # (prompt, max_tokens, finalize) لكل عنصر — لإعادة محاولة عند رفض الأرشفة
         for pf in perfumes:
             review_params = generate_review_params(persona)
             # تنبيهات الجنس/الهدية/نوع المنتج — نفس منطق Flask (مكياج/معطر شعر/هدية...)
@@ -518,7 +519,23 @@ def gen_reviews(persona, perfumes):
             if USE_ANTI_REPEAT:
                 ar_register_text(txt, pname)
             all_reviews.append(entry)
-        archive_batch(all_reviews, pname or '')
+            retry_ctx.append((prompt, mx, _finalize))
+        # الحفظ قد يرفض عنصراً كمكرر فعلياً (تصادم نادر مع عملية أخرى بين
+        # آخر فحص أثناء التوليد وبين الحفظ) رغم اجتيازه فحوص التوليد — كانت
+        # القيمة المُرجَعة تُهمَل دائماً فيصل المكرر للمستخدم بصمت.
+        results = archive_batch(all_reviews, pname or '')
+        if results is not None:
+            for i, saved in enumerate(results):
+                if saved is False:
+                    r_prompt, r_mx, r_finalize = retry_ctx[i]
+                    hint = "\n\n⚠️ المحاولة الأخيرة: النص السابق تصادم مع تقييم حُفظ للتوّ. اكتب صياغة مختلفة كلياً."
+                    r_rv, r_txt = ai_write_unique(r_prompt + hint, max_tokens=r_mx,
+                                                  finalize=r_finalize, attempts=2)
+                    if r_txt.strip() and archive_review(r_txt, all_reviews[i].get('product', ''), pname or '') is not False:
+                        all_reviews[i]['text'] = r_txt
+                        if isinstance(r_rv, dict) and 'rating' in r_rv:
+                            all_reviews[i]['rating'] = r_rv['rating']
+                    # فشلت المحاولة الأخيرة أيضاً: نُبقي أفضل جهد.
         return all_reviews
     else:
         # المسار الدفعي القديم أُغلق (توحيد المنظومة): بلا personas_engine
@@ -640,10 +657,27 @@ def gen_store_review(persona):
     _store_topics.record(txt)
     if USE_ANTI_REPEAT:
         ar_register_text(txt, pname)
+        saved = None
         try:
-            archive_review(txt, 'متجر مهووس', pname or '')
-        except Exception:
-            pass
+            saved = archive_review(txt, 'متجر مهووس', pname or '')
+        except Exception as e:
+            # كان يُهمَل صمتاً بالكامل — لا أثر حتى للتشخيص. فشل الأرشفة
+            # يعني عدم وصول النص لـarchive.json المشترك، فلا يراه عامل
+            # Gunicorn آخر ولا يمنعه من توليد نفس النص لاحقاً.
+            print(f'⚠️ فشل أرشفة تقييم المتجر: {e}', flush=True)
+        if saved is False:
+            # رُفض كمكرر فعلياً في الفحص الأخير تحت القفل — محاولة أخيرة
+            # بدل تسليم مكرر بصمت للمستخدم.
+            hint = "\n\n⚠️ المحاولة الأخيرة: النص السابق تصادم مع تقييم حُفظ للتوّ. اكتب صياغة مختلفة كلياً."
+            nxt, nxt_txt = ai_write_unique(prompt + hint, max_tokens=200,
+                                           finalize=_finalize, is_store=True)
+            if nxt_txt.strip():
+                try:
+                    if archive_review(nxt_txt, 'متجر مهووس', pname or '') is not False:
+                        rv, txt = (nxt if isinstance(nxt, dict) else rv), nxt_txt
+                except Exception as e:
+                    print(f'⚠️ فشل أرشفة محاولة إعادة تقييم المتجر: {e}', flush=True)
+            # فشلت المحاولة الأخيرة أيضاً: نُبقي أفضل جهد (لا حظر كامل، لا فبركة).
     return mark_synthetic_output({
         'rating': rv.get('rating', 5) if isinstance(rv, dict) else 5,
         'text': txt,

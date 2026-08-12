@@ -222,10 +222,17 @@ def _get_used_texts(archive, limit=40):
     return texts[-limit:] if len(texts)>limit else texts
 
 def _archive_review(review_text, product_name, persona_name):
-    """حفظ تقييم في الأرشيف"""
+    """حفظ تقييم في الأرشيف.
+
+    يرجع القيمة الفعلية من anti_repeat.archive_review: True (حُفظ)،
+    False (رُفض كمكرر في الفحص الأخير تحت القفل)، أو None في المسار
+    الاحتياطي بلا anti_repeat (لا إشارة تفرّد متاحة أصلاً). كانت هذه الدالة
+    تُهمل القيمة المُرجَعة دائماً — فحتى لو رفض الأرشيف نصاً مكرراً فعلياً
+    (تصادم نادر بين آخر فحص أثناء التوليد وبين الحفظ الفعلي بسبب عملية
+    أخرى)، يستمر الاستدعاء وكأن الحفظ نجح، ويصل النص المكرر للمستخدم بصمت.
+    """
     if USE_ANTI_REPEAT:
-        ar_archive_review(review_text, product_name, persona_name)
-        return
+        return ar_archive_review(review_text, product_name, persona_name)
     arc = _load_archive()
     arc['reviews'].append({
         'text': review_text,
@@ -234,12 +241,12 @@ def _archive_review(review_text, product_name, persona_name):
         'ts': int(time.time())
     })
     _save_archive(arc)
+    return None
 
 def _archive_batch(reviews, persona_name):
-    """حفظ مجموعة تقييمات"""
+    """حفظ مجموعة تقييمات — يرجع قائمة bool (anti_repeat) أو None (احتياطي)."""
     if USE_ANTI_REPEAT:
-        ar_archive_batch(reviews, persona_name)
-        return
+        return ar_archive_batch(reviews, persona_name)
     arc = _load_archive()
     for rv in reviews:
         arc['reviews'].append({
@@ -652,8 +659,21 @@ def _ai_reviews(persona, perfumes):
     for pf in perfumes:
         prompt, params = _plan_review(persona, pf, perfumes, used_block)
         all_reviews.append(_write_review(persona, pf, prompt, params))
-    # حفظ في الأرشيف
-    _archive_batch(all_reviews, persona.get('name', ''))
+    # حفظ في الأرشيف — قد يرفض عنصراً كمكرر فعلياً (تصادم نادر مع عملية
+    # أخرى بين آخر فحص أثناء التوليد وبين الحفظ) رغم اجتيازه فحوص التوليد.
+    # كانت القيمة المُرجَعة تُهمَل دائماً فيصل المكرر للمستخدم بصمت.
+    person_name = persona.get('name', '')
+    results = _archive_batch(all_reviews, person_name)
+    if results is not None:
+        for i, saved in enumerate(results):
+            if saved is False:
+                pf = perfumes[i]
+                prompt2, params2 = _plan_review(persona, pf, perfumes, used_block)
+                retry_rv = _write_review(persona, pf, prompt2, params2)
+                if _archive_review(retry_rv.get('text', ''), pf['name'], person_name) is not False:
+                    all_reviews[i] = retry_rv
+                # فشلت المحاولة الأخيرة أيضاً: نُبقي أفضل جهد (نفس فلسفة
+                # استنفاد المحاولات — لا حظر كامل للتوليد، لا فبركة).
     return all_reviews
 
 def _ai_single_review(persona, product):
@@ -661,7 +681,16 @@ def _ai_single_review(persona, product):
     used_block = _used_texts_block(limit=15, persona_name=persona.get('name'))
     prompt, params = _make_master_prompt(persona, product['name'], used_block, product=product)
     rv = _write_review(persona, product, prompt, params)
-    _archive_review(rv.get('text', ''), product['name'], persona.get('name', ''))
+    person_name = persona.get('name', '')
+    if _archive_review(rv.get('text', ''), product['name'], person_name) is False:
+        # رُفض كمكرر فعلياً في الفحص الأخير تحت القفل (تصادم نادر مع عملية
+        # أخرى) — محاولة أخيرة بصياغة جديدة بدل تسليم مكرر بصمت للمستخدم.
+        used_block2 = _used_texts_block(limit=15, persona_name=person_name)
+        prompt2, params2 = _make_master_prompt(persona, product['name'], used_block2, product=product)
+        retry_rv = _write_review(persona, product, prompt2, params2)
+        if _archive_review(retry_rv.get('text', ''), product['name'], person_name) is not False:
+            rv = retry_rv
+        # فشلت المحاولة الأخيرة أيضاً: نُبقي أفضل جهد (لا حظر كامل، لا فبركة).
     return rv
 
 # ═══════════════════════════════════════════════════════════
@@ -766,9 +795,27 @@ def _ai_store_review(persona):
     _register(text)
     if USE_ANTI_REPEAT:
         try:
-            ar_archive_review(text, 'متجر مهووس', persona.get('name', ''))
-        except Exception:
-            pass
+            saved = ar_archive_review(text, 'متجر مهووس', persona.get('name', ''))
+        except Exception as e:
+            # كان يُهمَل صمتاً بالكامل — لا أثر في السجلّ حتى للتشخيص. فشل
+            # الأرشفة يعني عدم وصول النص لـarchive.json المشترك، فلا يراه
+            # عامل Gunicorn آخر ولا يمنعه من توليد نفس النص لاحقاً.
+            saved = None
+            print(f'⚠️ فشل أرشفة تقييم المتجر: {e}', flush=True)
+        if saved is False:
+            # رُفض كمكرر فعلياً في الفحص الأخير تحت القفل (تصادم نادر مع
+            # عملية أخرى) — محاولة أخيرة بدل تسليم مكرر بصمت للمستخدم.
+            hint = "\n\n⚠️ المحاولة الأخيرة: النص السابق تصادم مع تقييم حُفظ للتوّ. اكتب صياغة مختلفة كلياً."
+            nxt, nxt_text = _ai_unique_json(prompt + hint, max_tokens=200,
+                                            finalize=_finalize, attempts=2)
+            if nxt and nxt_text:
+                try:
+                    if ar_archive_review(nxt_text, 'متجر مهووس', persona.get('name', '')) is not False:
+                        rv, text = nxt, nxt_text
+                        rv['text'] = text
+                except Exception as e:
+                    print(f'⚠️ فشل أرشفة محاولة إعادة تقييم المتجر: {e}', flush=True)
+            # فشلت المحاولة الأخيرة أيضاً: نُبقي أفضل جهد (لا حظر كامل، لا فبركة).
     return rv
 
 # ملاحظة: لا توجد كتابة احتياطية بالقوالب — الـ AI وحده يكتب.
