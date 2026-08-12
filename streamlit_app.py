@@ -281,10 +281,15 @@ def archive_batch(reviews, persona_name):
     كانت هذه الدالة تقرأ archive.json وتكتبه مباشرة بلا قفل ولا كتابة
     ذرّية — كتابتان متزامنتان (محاكاة معزولة) كانتا تفقدان إحداهما. الحقل
     rating لم يعد يُخزَّن (لم يقرأه أي كود فعلياً — تحقّق: بحث شامل بلا نتائج).
+
+    تُرجع قائمة True/False لكل عنصر (True = حُفظ، False = رُفض كمكرر) عند
+    توفّر anti_repeat، وNone عند المسار الاحتياطي. إهمال القيمة المُرجَعة هنا
+    (`ar_archive_batch(...)` ثم `return` مجرّد) كان يجعل `results` عند
+    المُستدعي None **دائماً**، فكتلة إعادة التوليد عند الرفض في gen_reviews
+    لا تعمل إطلاقاً — كود ميت بصمت، ويصل النص المكرر للمستخدم.
     """
     if USE_ANTI_REPEAT:
-        ar_archive_batch(reviews, persona_name)
-        return
+        return ar_archive_batch(reviews, persona_name)
     arc = load_archive()
     for rv in reviews:
         entry = {
