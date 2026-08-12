@@ -172,7 +172,23 @@ def get_used_texts(limit=40):
     texts = [r.get('text','') for r in arc.get('reviews',[])]
     return texts[-limit:] if len(texts) > limit else texts
 
-def archive_review(review_text, product_name, persona_name):
+def archive_review(review_text, product_name, persona_name, threshold=0.35, is_store_review=False):
+    """يحفظ تقييماً — فحص التكرار والحفظ عملية ذرّية واحدة تحت القفل نفسه.
+
+    كان الفحص (is_duplicate) يقع خارج أي قفل، والحفظ لاحقاً تحت قفل منفصل —
+    فعاملا Gunicorn يمكن أن يفحصا النص نفسه معاً (كلاهما «غير مكرر» لأن لا
+    أحد كتب بعد)، ثم يحفظانه بالتتابع تحت القفل: القفل يمنع فقدان الكتابة
+    لا تكرار المحتوى. الفحص الآن يقع *داخل* القفل على أحدث حالة فعلية
+    للأرشيف، فلا ينجو تكرار ولد من تسابق فحصين متزامنين.
+
+    التسجيل (register_text) يقع بعد نجاح الكتابة (كالسابق) كشبكة أمان
+    للمستدعين الذين لا يسجّلون بأنفسهم أثناء التوليد — آمن حتى لو استُدعي
+    register_text على النص نفسه مسبقاً، لأنه صار idempotent (راجع تعليقه).
+
+    يرجع True إن حُفظ فعلاً، False إن اكتُشف مكرراً في الفحص الأخير تحت
+    الحماية فلم يُحفظ (لا يفشل الاستدعاء — المستدعون القدامى الذين يتجاهلون
+    القيمة المُرجَعة يبقون آمنين: تكرار مكتشف يعني ببساطة عدم حفظ مضاعف).
+    """
     entry = {
         'text': review_text,
         'product': product_name,
@@ -180,24 +196,42 @@ def archive_review(review_text, product_name, persona_name):
         'ts': int(time.time())
     }
     with _ArchiveLock(ARCHIVE_FILE):
+        if is_duplicate(review_text, threshold=threshold, is_store_review=is_store_review,
+                        against_archive_only=True):
+            return False
         arc = _load_archive()
         arc['reviews'].append(entry)
         _save_archive(arc)
     register_text(review_text, persona_name)
+    return True
 
-def archive_batch(reviews, persona_name):
-    entries = [{
-        'text': rv.get('text', ''),
-        'product': rv.get('product', ''),
-        'persona': persona_name,
-        'ts': int(time.time())
-    } for rv in reviews]
+def archive_batch(reviews, persona_name, threshold=0.35):
+    """يحفظ دفعة تقييمات — نفس ضمان archive_review الذرّي، بقفل واحد للدفعة
+    كاملة لا قفل لكل عنصر. يرجع قائمة bool بترتيب reviews (True = حُفظ)."""
+    results = []
+    saved_texts = []
     with _ArchiveLock(ARCHIVE_FILE):
         arc = _load_archive()
-        arc['reviews'].extend(entries)
-        _save_archive(arc)
-    for rv in reviews:
-        register_text(rv.get('text', ''), persona_name)
+        changed = False
+        for rv in reviews:
+            text = rv.get('text', '')
+            if is_duplicate(text, threshold=threshold, against_archive_only=True):
+                results.append(False)
+                continue
+            arc['reviews'].append({
+                'text': text,
+                'product': rv.get('product', ''),
+                'persona': persona_name,
+                'ts': int(time.time())
+            })
+            changed = True
+            saved_texts.append(text)
+            results.append(True)
+        if changed:
+            _save_archive(arc)
+    for text in saved_texts:
+        register_text(text, persona_name)
+    return results
 
 def clear_archive():
     with _ArchiveLock(ARCHIVE_FILE):
@@ -264,8 +298,23 @@ _word_usage_history = deque(maxlen=20)
 _persona_keywords = {}
 
 def register_text(text, persona_name=None):
+    """يسجّل نصاً في ذاكرة الجلسة (تتبّع الاستخدام/الحرق) — **مؤمَّن ضد
+    التسجيل المزدوج**: نفس التقييم الحقيقي كان يُسجَّل مرتين فعلياً (مرة
+    عند التوليد عبر _register/ar_register_text، ومرة أخرى داخل
+    archive_review/archive_batch عند الحفظ) — فتحرق الكلمات والبدايات
+    بضعف السرعة الحقيقية (بداية واحدة بعد تقييم واحد فقط كانت تُصبح
+    «محروقة» رغم أن عتبة الحرق تفترض استخدامَين حقيقيَّين مختلفَين).
+
+    بدل تتبّع كل موضع استدعاء لإزالة الاستدعاء «الزائد» (هش، يعتمد على تذكّر
+    كل مسار مستقبلي)، الدالة نفسها idempotent: نص طُبِّع مسبقاً وسُجِّل هذه
+    الجلسة لا يُعاد عدّه في أي عدّاد حرق — يُلمَس فقط ترتيب LRU في
+    _session_norm (غير مؤثّر على الحرق).
+    """
     n = _normalize(text)
     if not n:
+        return
+    if n in _session_norm:
+        _session_norm.move_to_end(n)
         return
     _session_norm[n] = True
     _session_norm.move_to_end(n)
@@ -323,11 +372,18 @@ def _thresholds_for(n_words, base_threshold):
     return base_threshold, 3
 
 
-def is_duplicate(new_text, threshold=0.35, is_store_review=False):
+def is_duplicate(new_text, threshold=0.35, is_store_review=False, against_archive_only=False):
     """هل النص مكرر مقابل الأرشيف + الجلسة؟
 
     يجب أن يُستدعى على **النص النهائي** (بعد التطبيع والأنسنة والقصّ) لا على
     مخرج الـAI الخام؛ القصّ إلى بضع كلمات يجعل مخرجات مختلفة تنهار لنفس النص.
+
+    against_archive_only: يتجاهل ذاكرة الجلسة (_session_norm/_session_recent)
+    ويفحص ملف الأرشيف فقط. تستخدمه archive_review/archive_batch كفحص أخير
+    تحت القفل قبل الكتابة — النص الذي وصل لهنا سُجِّل في الجلسة أثناء
+    التوليد للتوّ (لمنع تكرار داخل الدفعة نفسها)، فمقارنته بذاكرة جلسته
+    الخاصة تُعطي «مكرر» دائماً وتُبطل الفحص. الهدف الحقيقي هنا اكتشاف عملية
+    *أخرى* كتبت النص نفسه للتوّ — وهذا لا يظهر إلا في ملف الأرشيف المشترك.
     """
     if not new_text or not new_text.strip():
         return True
@@ -337,13 +393,15 @@ def is_duplicate(new_text, threshold=0.35, is_store_review=False):
         return True
 
     # تطابق حرفي بعد التطبيع: مكرر مهما كان الطول
-    if norm in _session_norm:
+    if not against_archive_only and norm in _session_norm:
         return True
 
     # MAX_ARCHIVE لا رقماً ثابتاً أصغر: كان limit=100 يحجب 400 مدخلة من كل
     # أرشيف يتجاوز 100 تقييم (والأرشيف يحتفظ حتى MAX_ARCHIVE=500) — نص
     # مكرر حرفياً في المدخلة رقم 101 وما قبلها كان يمرّ كـ«غير مكرر».
-    prior = list(get_used_texts(limit=MAX_ARCHIVE)) + list(_session_recent)
+    prior = list(get_used_texts(limit=MAX_ARCHIVE))
+    if not against_archive_only:
+        prior += list(_session_recent)
     n_words = len(norm.split())
 
     # النص القصير: التطابق بعد التطبيع هو المعيار الصالح الوحيد.

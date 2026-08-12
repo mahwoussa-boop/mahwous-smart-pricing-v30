@@ -14,10 +14,28 @@ archive_batch تقرآن الملف، تعدّلانه في الذاكرة، ث�
 اختبار حتمي وقابل للتكرار للقفل الفعلي بلا حاجة لعمليات منفصلة (multiprocessing
 على وندوز يحتاج spawn وimport معقّد، والخيوط تكفي لاختبار قفل نظام الملفات).
 """
+import itertools
 import json
 import threading
 
 import anti_repeat as ar
+
+# كلمات مختلفة فعلياً لبناء نصوص فريدة — لا الاعتماد على رقم لاحق وحده:
+# _normalize يُسقط الأرقام تماماً (ليست عربية)، فـ«نص متزامن 1» و«نص متزامن 2»
+# ينهاران لنفس النص المُطبَّع «نص متزامن» ويُعامَلان كمكرَّرين فعلياً — الآن
+# بعد أن صارت archive_review/archive_batch تفحصان التكرار وقت الحفظ (إصلاح
+# سباق الفحص-ثم-الكتابة)، هذا التطابق حقيقي لا خطأ في القفل. التباديل (لا
+# صيغة حسابية يدوية) تضمن عدم تصادم أي فهرسَين ضمن المدى المستخدم.
+_WORD_BANK = ['كتاب', 'سيارة', 'طاولة', 'حاسوب', 'شجرة', 'بحر', 'جبل', 'نافذة',
+             'مصباح', 'كرسي', 'هاتف', 'ساعة', 'مفتاح', 'باب', 'حائط', 'سقف',
+             'أرض', 'سماء', 'شمس', 'قمر', 'نجمة', 'غيمة', 'مطر', 'ريح',
+             'وردة', 'حديقة', 'شارع', 'مدرسة', 'مستشفى', 'مكتبة']
+_PAIRS = list(itertools.permutations(_WORD_BANK, 2))
+
+
+def _distinct_text(idx):
+    a, b = _PAIRS[idx % len(_PAIRS)]
+    return f'{a} {b}'
 
 
 def test_concurrent_archive_review_writes_lose_nothing():
@@ -26,10 +44,11 @@ def test_concurrent_archive_review_writes_lose_nothing():
     ar.reset_session_texts()
     n = 12
     errors = []
+    texts = [_distinct_text(i) for i in range(n)]
 
     def worker(idx):
         try:
-            ar.archive_review(f'نص متزامن {idx}', 'منتج تجريبي', f'شخص{idx}')
+            ar.archive_review(texts[idx], 'منتج تجريبي', f'شخص{idx}')
         except Exception as e:
             errors.append((idx, e))
 
@@ -41,9 +60,8 @@ def test_concurrent_archive_review_writes_lose_nothing():
 
     assert not errors, f'أخطاء أثناء الكتابة المتزامنة: {errors}'
     arc = json.loads(ar.ARCHIVE_FILE.read_text(encoding='utf-8'))
-    texts = {r['text'] for r in arc['reviews']}
-    expected = {f'نص متزامن {i}' for i in range(n)}
-    missing = expected - texts
+    saved = {r['text'] for r in arc['reviews']}
+    missing = set(texts) - saved
     assert not missing, f'كتابات مفقودة تحت التزامن: {missing} (السباق القديم يفقد كتابات)'
     assert len(arc['reviews']) == n, f"توقّعت {n} مدخلة، وُجد {len(arc['reviews'])} — مدخلات مضاعَفة أو مفقودة"
 
@@ -53,11 +71,12 @@ def test_concurrent_archive_batch_writes_lose_nothing():
     ar.reset_session_texts()
     n = 8
     errors = []
+    batches = [[_distinct_text(idx * 3 + j) for j in range(3)] for idx in range(n)]
 
     def worker(idx):
         try:
             ar.archive_batch(
-                [{'text': f'دفعة {idx}-{j}', 'product': 'م'} for j in range(3)],
+                [{'text': t, 'product': 'م'} for t in batches[idx]],
                 f'شخص{idx}',
             )
         except Exception as e:
@@ -71,9 +90,9 @@ def test_concurrent_archive_batch_writes_lose_nothing():
 
     assert not errors, f'أخطاء أثناء الكتابة المتزامنة: {errors}'
     arc = json.loads(ar.ARCHIVE_FILE.read_text(encoding='utf-8'))
-    texts = {r['text'] for r in arc['reviews']}
-    expected = {f'دفعة {i}-{j}' for i in range(n) for j in range(3)}
-    missing = expected - texts
+    saved = {r['text'] for r in arc['reviews']}
+    expected = {t for batch in batches for t in batch}
+    missing = expected - saved
     assert not missing, f'كتابات مفقودة تحت التزامن: {missing}'
 
 
@@ -101,3 +120,40 @@ def test_archive_lock_serializes_the_critical_section():
         save_pos = src.index('_save_archive(')
         assert lock_pos < load_pos < save_pos, (
             f'{fn.__name__}: القفل يجب أن يسبق القراءة والكتابة كلتيهما (دورة كاملة محمية)')
+
+
+def test_check_then_write_race_cannot_insert_two_duplicates():
+    """بلاغ مراجعة كودية مُتحقَّق منه: القفل كان يحمي الكتابة فقط، بينما
+    is_duplicate يقع قبله وخارجه تماماً. عاملان يفحصان النص نفسه معاً
+    (كلاهما «غير مكرر» لأن لا أحد كتب بعد)، ثم يحفظانه بالتتابع تحت القفل:
+    القفل يمنع فقدان الكتابة لا تكرار المحتوى.
+
+    الإصلاح: الفحص الأخير صار *داخل* القفل نفسه (is_duplicate(..,
+    against_archive_only=True) قبل الكتابة مباشرة) — فحصان متزامنان قد
+    يريان كلاهما «غير مكرر» قبل أي كتابة (كالسابق تماماً، هذا لا يتغيّر
+    ولا يمكن منعه بلا تنسيق مُسبَق)، لكن عند الكتابة الفعلية تحت القفل لن
+    ينجح إلا أحدهما — الآخر يكتشف الأرشيف تغيّر ويرفض الحفظ.
+    """
+    ar.reset_session_texts()
+    text = 'نص التسابق بين الفحص والحفظ يجب ألا يتكرر أبداً مهما حدث'
+    barrier = threading.Barrier(2)
+    outcomes = {}
+
+    def worker(idx):
+        outcomes[f'dup_before_{idx}'] = ar.is_duplicate(text)
+        barrier.wait(timeout=5)
+        outcomes[f'saved_{idx}'] = ar.archive_review(text, 'منتج', f'شخص{idx}')
+
+    t1 = threading.Thread(target=worker, args=(1,))
+    t2 = threading.Thread(target=worker, args=(2,))
+    t1.start(); t2.start()
+    t1.join(timeout=10); t2.join(timeout=10)
+
+    arc = json.loads(ar.ARCHIVE_FILE.read_text(encoding='utf-8'))
+    matches = [r for r in arc['reviews'] if r['text'] == text]
+    assert len(matches) == 1, (
+        f'يفترض دخول نسخة واحدة فقط رغم أن كلا الفحصين المسبقين رأى "غير مكرر" — '
+        f'وُجد {len(matches)}. outcomes={outcomes}')
+    # بالضبط أحد الطلبين قُبل والآخر رُفض عند الكتابة الفعلية
+    saved_flags = [outcomes.get('saved_1'), outcomes.get('saved_2')]
+    assert sorted(saved_flags) == [False, True], f'outcomes={outcomes}'

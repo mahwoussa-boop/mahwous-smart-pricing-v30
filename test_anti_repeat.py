@@ -125,11 +125,20 @@ def test_persona_fingerprint_tracks_used_words():
 
 
 def test_burned_words_after_three_uses():
-    """كلمة متتبَّعة تظهر ≥3 مرات في السجل تُصبح «محروقة»."""
+    """كلمة متتبَّعة تظهر ≥3 مرات في السجل تُصبح «محروقة».
+
+    ثلاث جمل مختلفة فعلياً (لا نفس النص الحرفي مكرراً) — منذ أن صار
+    register_text idempotent (لا يُعيد عدّ نفس النص المُطبَّع مرتين، إصلاح
+    التسجيل المزدوج) لم يعد تكرار النص الحرفي نفسه يُحتسَب كثلاث مراجعات."""
     reset_session_texts()
     w = next(iter(TRACKED_WORDS))
-    for _ in range(3):
-        register_text(f'تقييم فيه {w} وكلمات أخرى مختلفة')
+    sentences = [
+        f'تقييم فيه {w} وكلمات أخرى مختلفة',
+        f'هذا العطر {w} بصراحة وأنصح فيه',
+        f'صراحة {w} جدا ويستاهل التجربة',
+    ]
+    for s in sentences:
+        register_text(s)
     assert w in get_burned_words()
 
 
@@ -193,9 +202,17 @@ def test_session_memory_rebuilds_from_archive_at_startup(tmp_path, monkeypatch):
     """
     archive_file = tmp_path / 'archive.json'
     w = next(iter(ar.TRACKED_WORDS))
+    # ثلاث جمل مختلفة فعلياً — لا الاعتماد على رقم لاحق (_normalize يُسقط
+    # الأرقام تماماً، فتنهار «...رقم 0/1/2» لنفس النص المُطبَّع فيُبطل
+    # الغرض من الاختبار بعد أن صار register_text idempotent)
+    texts = [
+        f'هذا عطر {w} جدا ومميز',
+        f'العطر ده {w} بجد وعجيب',
+        f'صراحة عطر {w} ما توقعته',
+    ]
     reviews = [
-        {'text': f'هذا عطر {w} جدا ومميز رقم {i}', 'product': 'م', 'persona': 'شخص1', 'ts': i}
-        for i in range(3)
+        {'text': t, 'product': 'م', 'persona': 'شخص1', 'ts': i}
+        for i, t in enumerate(texts)
     ]
     archive_file.write_text(
         json.dumps({'reviews': reviews, 'store_reviews': [], 'personas': []}, ensure_ascii=False),
@@ -210,3 +227,40 @@ def test_session_memory_rebuilds_from_archive_at_startup(tmp_path, monkeypatch):
 
     assert w in get_burned_words(), (
         'الكلمة المحروقة في أرشيف سابق لم تُستعَد بعد محاكاة بدء عملية جديدة')
+
+
+def test_register_text_is_idempotent_for_the_same_normalized_text():
+    """بلاغ مراجعة كودية مُتحقَّق منه: تقييم حقيقي واحد كان يُسجَّل مرتين —
+    مرة عند التوليد (_register/ar_register_text) ومرة أخرى داخل
+    archive_review/archive_batch عند الحفظ — فتُحرَق الكلمات والبدايات
+    بضعف السرعة الحقيقية (بداية واحدة بعد تقييم واحد فقط تصبح «محروقة»
+    رغم أن عتبة الحرق تفترض استخدامَين حقيقيَّين مختلفَين).
+
+    الإصلاح: register_text صارت idempotent — تسجيل النص نفسه (بعد التطبيع)
+    مرتين في نفس الجلسة لا يُضاعف عدّادات الحرق.
+    """
+    reset_session_texts()
+    text = 'ريحته عود فخم يذكرني بالمجلس دائما'
+
+    register_text(text, 'شخص1')
+    assert len(ar._session_recent) == 1
+    assert ar.is_opening_burned(text) is False  # استخدام واحد فقط حتى الآن
+
+    register_text(text, 'شخص1')  # التسجيل «الزائد» الذي كان يحدث عند الأرشفة
+    assert len(ar._session_recent) == 1, 'تسجيل نفس النص مرة ثانية يجب ألا يُضاعف السجل'
+    assert ar.is_opening_burned(text) is False, (
+        'تقييم واحد حقيقي (مسجَّل مرتين بالخطأ) لا يجب أن يحرق البداية '
+        'وكأنه استخدامان حقيقيان مختلفان')
+
+
+def test_archive_review_no_longer_double_registers(monkeypatch):
+    """تكامل: استدعاء register_text قبل archive_review (كما يفعل المسار
+    الحيّ فعلياً) ثم أرشفة النص نفسه لا يُضاعف تتبّع الحرق."""
+    reset_session_texts()
+    monkeypatch.setattr(ar, 'get_used_texts', lambda limit=100: [])
+    text = 'هذا عطر رهيب جدا ويستاهل كل ريال فيه'
+
+    ar.register_text(text, 'شخص1')  # التسجيل أثناء التوليد (كما في _write_review)
+    ar.archive_review(text, 'منتج', 'شخص1')  # الأرشفة بعده (تُسجِّل أيضاً لو لزم)
+
+    assert len(ar._session_recent) == 1, 'الأرشفة بعد تسجيل مسبق للنص نفسه ضاعفت العدّاد'
