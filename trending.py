@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """نظام العطور الترند — TOP 100 عطر في السوق السعودي"""
 import random
+import re
 from datetime import datetime
 
 # === TOP 50 رجالي ===
@@ -236,16 +237,30 @@ def smart_blend(pool, count):
     t_ids = {id(p) for p in trending}
     others = [p for p in pool if id(p) not in c_ids and id(p) not in t_ids]
 
-    selected, used = [], set()
+    selected, used, used_names = [], set(), set()
+
+    def _display_key(p):
+        """اسم العرض بعد تطبيع المسافات.
+
+        id(p) وحده يميّز الكائنات لا ما يراه المستخدم: الكتالوج يحوي فعلاً
+        منتجات لا تختلف إلا بمسافة مضاعفة (تحقّق مباشر: 3 أزواج بأسماء
+        متطابقة بعد التطبيع، 0 متطابقة حرفياً)، والمتصفح يطوي المسافات
+        فيعرضها بصورة واحدة — فتظهر «نسختان» من العطر نفسه في سلة واحدة.
+        """
+        return re.sub(r'\s+', ' ', (p.get('name') or '')).strip()
 
     def _take(items, k):
-        avail = [p for p in items if id(p) not in used]
-        k = min(k, len(avail))
-        if k <= 0:
+        avail = [p for p in items
+                 if id(p) not in used and _display_key(p) not in used_names]
+        if k <= 0 or not avail:
             return
-        for p in random.sample(avail, k):
+        for p in random.sample(avail, min(k, len(avail))):
+            key = _display_key(p)
+            if key in used_names:   # نسخة أخرى بنفس الاسم ظهرت داخل العيّنة نفسها
+                continue
             selected.append(p)
             used.add(id(p))
+            used_names.add(key)
 
     # (1) كربتك — أولوية قصوى: 1-3 منتجات، مع ترك خانة واحدة على الأقل لغيرها
     if cryptic:
