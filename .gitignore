@@ -6,6 +6,10 @@ venv/
 .env
 .streamlit/secrets.toml
 archive.json
+# نسخ الأرشيف الاحتياطية: *.corrupt-* يولّدها anti_repeat تلقائياً عند رصد
+# فساد (عزل قبل الإفراغ)، و*.bak-* تُؤخذ يدوياً قبل عمليات التنظيف.
+archive.json.corrupt-*
+archive.json.bak-*
 mahalli_cache.json
 mahalli_history.json
 test_ai.py
