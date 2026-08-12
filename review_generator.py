@@ -1213,10 +1213,15 @@ class ReviewGenerator:
             text = review['text']
             if not text:
                 continue
-            if len(text.split()) <= 4:
-                normalized = _ar._normalize(text)
-                if not normalized:
-                    continue
+            normalized = _ar._normalize(text)
+            if not normalized:
+                continue  # بلا محتوى عربي — يرفضه _is_duplicate أصلاً (يعدّه مكرراً)
+            # قرار «قصير أم لا» على النص المُطبَّع لا الخام: _post_process يضيف
+            # إيموجي كتوكن مستقل، فنص من 4 كلمات فعلية يُعدّ 5 فيهرب للفرع
+            # الآخر ويتجاوز سقف التكرار القصير كلياً (رُصد فعلياً: 6 نسخ من
+            # نص مُطبَّع واحد رغم سقف 5). المفتاح كان مُطبَّعاً منذ إصلاح سابق —
+            # وبقي الطول خاماً، وهو ما أبقى الثغرة مفتوحة.
+            if len(normalized.split()) <= 4:
                 cap = max(2, min(5, round(count * 0.01)))
                 if self._short_freq[normalized] < cap:
                     self._short_freq[normalized] += 1
