@@ -34,7 +34,6 @@ def test_imports():
         except Exception as e:
             results[mod] = f'❌ {e}'
     
-    return results
 
 # ═══════════════════════════════════════════════════════════
 #  اختبار الطبقة 1: أنماط التقييمات
@@ -106,7 +105,6 @@ def test_review_patterns():
         issues.append(f'❌ دوال مفقودة: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 # ═══════════════════════════════════════════════════════════
 #  اختبار الطبقة 2: بنك التقييمات الحقيقية
@@ -161,7 +159,6 @@ def test_real_reviews_bank():
         issues.append(f'❌ استيراد فاشل: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 # ═══════════════════════════════════════════════════════════
 #  اختبار الطبقة 3: مكافحة التكرار
@@ -221,7 +218,6 @@ def test_anti_repeat():
         issues.append(f'❌ استيراد فاشل: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 # ═══════════════════════════════════════════════════════════
 #  اختبار الطبقة 4: النصوص القصيرة
@@ -251,7 +247,6 @@ def test_short_texts():
         issues.append(f'❌ استيراد فاشل: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 # ═══════════════════════════════════════════════════════════
 #  اختبار الطبقة 5: اللهجات
@@ -283,7 +278,6 @@ def test_dialects():
         issues.append(f'❌ استيراد فاشل: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 # ═══════════════════════════════════════════════════════════
 #  اختبار الطبقة 6: الشخصيات
@@ -338,7 +332,6 @@ def test_personas():
         issues.append(f'❌ استيراد فاشل: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 # ═══════════════════════════════════════════════════════════
 #  اختبار الطبقة 7: قاعدة البيانات والمحرك
@@ -384,7 +377,6 @@ def test_database():
         issues.append(f'❌ خطأ: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 def test_engine():
     """فحص محرك جمهور حي"""
@@ -441,7 +433,6 @@ def test_engine():
         issues.append(f'❌ خطأ: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 # ═══════════════════════════════════════════════════════════
 #  اختبار التكامل: فحص التنوع في 50 تقييم
@@ -504,7 +495,6 @@ def test_vocabulary_diversity():
         issues.append(f'❌ استيراد فاشل: {e}')
     
     assert not issues, '\n'.join(str(_i) for _i in issues)
-    return issues
 
 # ═══════════════════════════════════════════════════════════
 #  التشغيل الرئيسي

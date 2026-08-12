@@ -12,6 +12,7 @@
 مفتاح API حقيقي ودون اتصال — يتحقق من مسار الكود لا من جودة نص الذكاء.
 """
 import json
+import os
 import unittest.mock as mock
 
 from streamlit.testing.v1 import AppTest
@@ -31,7 +32,8 @@ def _fake_post(url, headers=None, json=None, timeout=None, **kw):
 def test_generate_button_no_tuple_crash():
     """انحدار: build_master_prompt يرجع (prompt, params) — عدم فكّها كان يفجّر
     TypeError عند أي توليد فعلي عبر زر «✨ ولّد شخصيات جديدة»."""
-    with mock.patch('requests.post', side_effect=_fake_post):
+    with mock.patch.dict(os.environ, {'AI_KEY': 'test-only-key'}), \
+            mock.patch('requests.post', side_effect=_fake_post):
         at = AppTest.from_file('streamlit_app.py', default_timeout=120)
         at.run()
         assert not at.exception

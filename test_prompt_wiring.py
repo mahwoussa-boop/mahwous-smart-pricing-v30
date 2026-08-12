@@ -67,3 +67,11 @@ def test_wiring_never_crashes_build():
         params = generate_review_params(p)
         prompt, _ = build_master_prompt(p, 'عطر تجريبي', params, extra_block='x')
         assert isinstance(prompt, str) and len(prompt) > 0
+
+
+def test_prompt_never_claims_an_unverified_purchase():
+    p = generate_persona()
+    params = generate_review_params(p)
+    prompt, _ = build_master_prompt(p, 'عطر تجريبي', params)
+    assert 'is_verified_purchase' not in prompt
+    assert 'شراء موثق' not in prompt
