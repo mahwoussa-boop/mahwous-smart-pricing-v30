@@ -474,8 +474,18 @@ from review_text import (humanize as _humanize, finalize_review_text,
 # ═══════════════════════════════════════════════════════════
 
 def _is_dup(text):
-    """هل النص مكرر؟ (يعمل فقط عند توفّر anti_repeat)."""
-    return bool(USE_ANTI_REPEAT and text and is_duplicate(text))
+    """هل النص مكرر؟ — البوابة الوحيدة لفحص كل نص مولَّد (يمرّ عبرها كل
+    استدعاء إلى rt_write_unique في _ai_unique_json/_ai_unique_text).
+
+    قبل هذا: تعذّر استيراد anti_repeat كان يجعلها تعيد False دائماً بصمت،
+    فيستمر التوليد كأن كل نص فريد ضمانة لم تُفحص إطلاقاً — بلا أي رصد أو
+    تحذير، للأبد. نفس فلسفة personas_engine (راجع _make_master_prompt):
+    محرك أساسي مفقود = توقّف بخطأ واضح (503 عبر AIUnavailable) لا استمرار
+    صامت بحماية وهمية (قانون 4).
+    """
+    if not USE_ANTI_REPEAT:
+        raise AIUnavailable('وحدة منع التكرار anti_repeat غير محمّلة — لا توليد بلا حماية من التكرار')
+    return bool(text and is_duplicate(text))
 
 
 def _register(text):

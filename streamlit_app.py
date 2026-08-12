@@ -211,6 +211,21 @@ def _extract_json(result):
 from review_text import humanize as _humanize, finalize_review_text, write_unique
 
 
+def _is_dup_guarded(text, is_store=False):
+    """بوابة التفرّد الفعلية — تتوقف بخطأ واضح إن تعذّر تحميل anti_repeat بدل
+    الاستمرار وكأن كل نص مولَّد «فريد» ضمانة لم تُفحص إطلاقاً.
+
+    قبل هذا: is_dup=(lambda t: bool(USE_ANTI_REPEAT and ...)) كانت تعيد False
+    دائماً بصمت عند فشل الاستيراد — بلا أي رصد أو تحذير، للأبد (مطابق لبلاغ
+    مراجعة كودية خارجية عن نفس الخلل في app.py). st.error+st.stop() هو نفس
+    أسلوب «قانون 4» المتّبع أصلاً هنا عند تعذّر الـAI كلياً (راجع gen_reviews).
+    """
+    if not USE_ANTI_REPEAT:
+        st.error('وحدة منع التكرار anti_repeat غير محمّلة — لا توليد بلا حماية من التكرار.')
+        st.stop()
+    return bool(ar_is_duplicate(text, is_store_review=is_store))
+
+
 def ai_write_unique(prompt, max_tokens, finalize, attempts=5, is_store=False,
                     base_temp=0.9, temp_step=0.06):
     """يكتب عبر AI مع بوابة تفرّد تفحص **النص النهائي** (بعد الأنسنة والقصّ).
@@ -224,7 +239,7 @@ def ai_write_unique(prompt, max_tokens, finalize, attempts=5, is_store=False,
         call=lambda p, mt, temp: ai_call(p, max_tokens=mt, temperature=temp),
         parse=_extract_json,
         finalize=finalize,
-        is_dup=(lambda t: bool(USE_ANTI_REPEAT and ar_is_duplicate(t, is_store_review=is_store))),
+        is_dup=(lambda t: _is_dup_guarded(t, is_store=is_store)),
         prompt=prompt, max_tokens=max_tokens, attempts=attempts,
         base_temp=base_temp, temp_step=temp_step,
     )
