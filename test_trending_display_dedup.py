@@ -48,3 +48,29 @@ def test_dedup_does_not_break_normal_selection():
     ]
     assert len(trending.smart_blend(distinct, 3)) == 3, (
         'منتجات مختلفة فعلاً يجب أن تُختار كلها — الفلترة تجاوزت هدفها')
+
+
+def test_campaign_basket_also_dedupes_by_display_name():
+    """mahalli_campaign يبني السلة يدوياً (شرائح من مجمعين) ولا يمرّ بـ
+    smart_blend، فلا تشمله حمايتها تلقائياً — ويكتب في الأرشيف الحيّ عبر
+    _ai_reviews، فأي نسختين تدخلان سلته تُنتجان تقييمين لعطر واحد."""
+    import mahalli_campaign as mc
+
+    basket = [
+        {'name': 'عطر  فخم  100مل'},
+        {'name': 'عطر فخم 100مل'},     # نفس الاسم المعروض
+        {'name': 'عطر مختلف تماما'},
+    ]
+    out = mc._dedupe_by_display_name(basket)
+    names = [_norm(p['name']) for p in out]
+
+    assert len(names) == len(set(names)), f'بقيت نسختان بنفس الاسم: {names}'
+    assert len(out) == 2, f'يفترض عطرين فريدين بصرياً، النتيجة {len(out)}'
+
+
+def test_campaign_dedupe_keeps_products_without_names_untouched():
+    """ضابط: مدخل بلا اسم لا يُسقط الآخرين ولا يُبتلع صامتاً."""
+    import mahalli_campaign as mc
+
+    out = mc._dedupe_by_display_name([{'name': ''}, {'name': ''}, {'name': 'عطر'}])
+    assert len(out) == 3, 'المدخلات بلا اسم لا يجوز أن تُطوى في بعضها'

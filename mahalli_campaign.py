@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """حملة "محلي" العبقرية لتصدر ماركة كربتك بجانب الترند العالمي"""
 
-import sys, os, json, random, time
+import sys, os, json, random, re, time
 from pathlib import Path
 
 # Fix encoding
@@ -14,8 +14,31 @@ except:
 BASE_DIR = Path(__file__).parent
 DATA_DIR = Path(os.environ.get('DATA_DIR', str(BASE_DIR)))
 
-from app import _ai_reviews, PRODUCTS, _archive_batch
+# _archive_batch كان مستورداً بلا أي استخدام (تحقّق شامل: لا استدعاء، ولا
+# getattr/importlib/__all__، ولا وحدة تستورد هذه الوحدة) — الأرشفة تقع داخل
+# _ai_reviews نفسها. أُزيل الاستيراد الميت.
+from app import _ai_reviews, PRODUCTS
 from personas_engine import generate_persona
+
+
+def _dedupe_by_display_name(products):
+    """يُسقط المنتجات المتطابقة بالاسم المعروض (بعد تطبيع المسافات).
+
+    هذا السكربت يبني السلة يدوياً (شرائح من مجمعين) ولا يمرّ بـ
+    trending.smart_blend، فلا تشمله حماية الاسم المعروض المضافة هناك. والكتالوج
+    يحوي فعلاً أزواجاً لا تختلف إلا بمسافة مضاعفة يعرضها المتصفح متطابقة —
+    فيمكن أن تدخل نسختان من العطر نفسه سلة واحدة ويُولَّد لكلٍّ منهما تقييم
+    مستقل يُكتب في الأرشيف الحيّ.
+    """
+    seen, out = set(), []
+    for p in products:
+        key = re.sub(r'\s+', ' ', (p.get('name') or '')).strip()
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        out.append(p)
+    return out
 
 # 1. تحديد ماركات وعطور الترند العالمي (الأكثر بحثاً ومبيعاً)
 GLOBAL_TRENDS_KEYWORDS = [
@@ -113,8 +136,9 @@ def run_daily_campaign():
         random.shuffle(valid_trend)
         selected_trend = valid_trend[:remaining_slots]
         
-        # دمج السلة
-        final_basket = selected_cryptic + selected_trend
+        # دمج السلة — مع إسقاط ما يتطابق بالاسم المعروض (نسختان لعطر واحد
+        # في الكتالوج لا تختلفان إلا بمسافة) قبل توليد أي تقييم لهما.
+        final_basket = _dedupe_by_display_name(selected_cryptic + selected_trend)
         random.shuffle(final_basket) # خلط المنتجات في السلة
         
         print(f"🛒 سلة العميل {persona['name']}: {len(final_basket)} منتجات ({len(selected_cryptic)} كربتك، {len(selected_trend)} ترند).")
