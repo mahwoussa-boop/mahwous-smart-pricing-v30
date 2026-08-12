@@ -129,3 +129,26 @@ def test_burned_words_after_three_uses():
     for _ in range(3):
         register_text(f'تقييم فيه {w} وكلمات أخرى مختلفة')
     assert w in get_burned_words()
+
+
+def test_live_register_tracks_contexts_and_ideas():
+    """انحدار: تتبّع السياق والفكرة كان محبوساً في register_review_full.
+
+    المسار الحيّ (app/streamlit) لا يستدعي إلا register_text، فبقي
+    _context_usage فارغاً في الإنتاج وكانت get_available_contexts ترجع كل
+    السياقات دائماً — أي أن توجيه «سياقات متاحة» في البرومبت كان بلا معنى.
+    """
+    reset_session_texts()
+    register_text('كل ما ألبسه في المسجد سألني الجماعة عن العطر')
+    # السياق المستخدم لم يعد ضمن «المتاح»
+    assert 'مسجد' not in ar.get_available_contexts()
+    assert ar.is_context_burned('مسجد') is True
+    # والفكرة (بنية النمط) سُجّلت
+    assert ar.is_pattern_structure_burned('compliment_question') is True
+
+
+def test_unused_contexts_stay_available():
+    """السياق غير المستخدم يبقى متاحاً (لا حرق أعمى)."""
+    reset_session_texts()
+    register_text('العلبة وصلت مرتبة والتغليف ممتاز جدا')
+    assert 'مسجد' in ar.get_available_contexts()

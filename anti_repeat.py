@@ -206,8 +206,15 @@ def register_text(text, persona_name=None):
         _session_norm.popitem(last=False)
     _session_recent.append(text)
 
-    # Track opening (منع تكرار البدايات) — المسار الحيّ يستدعي register_text
-    track_opening(text)
+    # المسار الحيّ (app/streamlit) يستدعي register_text وحدها، فكل تتبّع يجب أن
+    # يعيش هنا. كان تتبّع السياق والفكرة داخل register_review_full التي لا
+    # يستدعيها إلا سكربت demo — فبقي _context_usage فارغاً في الإنتاج، وكانت
+    # get_available_contexts ترجع كل السياقات دائماً كأن شيئاً لم يُستخدم.
+    track_opening(text)          # البدايات
+    ctx = extract_context_from_review(text)
+    if ctx:
+        track_context(ctx)       # السياقات (مسجد/دوام/سيارة…)
+    track_pattern_structure(extract_pattern_structure(text))  # الأفكار
 
     # Track words for burnout
     _word_usage_history.append(text)
@@ -229,6 +236,8 @@ def reset_session_texts():
     _word_usage_history.clear()
     _persona_keywords.clear()
     _opening_usage.clear()
+    _context_usage.clear()
+    _pattern_structure_usage.clear()
 
 # ── عتبات حسب الطول ──────────────────────────────────────────────────────
 # التشابه النسبي بلا معنى على النص القصير: كلمة مشتركة واحدة من كلمتين =
@@ -429,18 +438,13 @@ def reset_openings():
 
 
 def register_review_full(review_text, persona_name=None):
-    """تسجيل كامل للتقييم: نص + سياق + نمط + بداية"""
+    """تسجيل كامل للتقييم: نص + بداية + سياق + فكرة.
+
+    صار مرادفاً لـregister_text بعد نقل كل التتبّع إليها: التتبّع كان محبوساً
+    هنا بينما المسار الحيّ لا يستدعي إلا register_text. تُركت للتوافق مع
+    demo_audience واختباراتها.
+    """
     register_text(review_text, persona_name)
-
-    # Track context
-    ctx = extract_context_from_review(review_text)
-    if ctx:
-        track_context(ctx)
-
-    # Track pattern structure
-    structure = extract_pattern_structure(review_text)
-    track_pattern_structure(structure)
-    # البداية تُسجَّل داخل register_text أعلاه (المسار الحيّ) — لا تكرّرها هنا
 
 def format_used_texts_block(limit=30, persona_name=None):
     used = get_used_texts(limit)
