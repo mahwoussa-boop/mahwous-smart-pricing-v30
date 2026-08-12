@@ -101,3 +101,21 @@ def test_get_dashboard_summary_with_str_cache(monkeypatch):
     assert summary['active_products'] == 1
     assert summary['daily_reviews_needed'] >= 1
     assert summary['plan']['products'][0]['name'] == 'عطر تجريبي'
+
+
+def test_stale_cache_does_not_trigger_network_on_dashboard_load(monkeypatch):
+    """الكاش القديم يعرض البيانات المتاحة؛ الشبكة محصورة في التحديث الصريح."""
+    from datetime import datetime, timedelta
+
+    cache = _fake_cache()
+    cache['last_updated'] = (datetime.now() - timedelta(days=2)).isoformat()
+    monkeypatch.setattr(mi, '_load_cache', lambda: cache)
+    monkeypatch.setattr(mi, '_save_cache', lambda c: None)
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError('تحميل اللوحة لا يجب أن يتصل بالشبكة')
+
+    monkeypatch.setattr(mi, '_algolia_query', _no_network)
+    summary = mi.get_dashboard_summary()
+    assert summary['total_products'] == 2
+    assert summary['cache_age_minutes'] > 60

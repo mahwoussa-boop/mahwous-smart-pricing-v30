@@ -112,12 +112,19 @@ def _algolia_query(query='', filters='', facet_filters=None, hits_per_page=100, 
         print(f'[Algolia Error] {e}')
         return None
 
-def get_our_products(use_cache=True):
-    """جلب كل منتجاتنا مع بيانات التقييم"""
-    if use_cache:
-        cache = _load_cache()
-        if cache.get('our_products') and not is_cache_stale():
-            return cache['our_products']
+def get_our_products(use_cache=True, allow_network=False):
+    """جلب منتجاتنا من الكاش أولاً.
+
+    لوحة Streamlit تستدعي هذه الدالة مع كل إعادة رسم؛ لذلك لا يجوز أن يؤدي
+    كاش قديم إلى عشرات طلبات الشبكة. التحديث الخارجي محصور في زر التحديث
+    الذي يمرر ``allow_network=True`` صراحة.
+    """
+    cache = _load_cache()
+    cached_products = cache.get('our_products', [])
+    if use_cache and cached_products:
+        return cached_products
+    if not allow_network:
+        return cached_products
     
     products, page, failed = [], 0, False
     while True:
@@ -153,7 +160,8 @@ def get_our_products(use_cache=True):
 
     return products
 
-def get_competitors(product_name, limit=5, use_cache=True, _cache=None, _stale=None):
+def get_competitors(product_name, limit=5, use_cache=True, _cache=None, _stale=None,
+                    allow_network=False):
     """جلب المنافسين لنفس المنتج.
 
     _cache / _stale: عند تمريرهما من حلقة (مثل get_priorities) نستخدم كاشاً
@@ -166,8 +174,10 @@ def get_competitors(product_name, limit=5, use_cache=True, _cache=None, _stale=N
 
     if use_cache:
         cached = cache.get('competitors', {}).get(cache_key)
-        if cached and not stale:
+        if cached and (not stale or not allow_network):
             return cached
+    if not allow_network:
+        return cache.get('competitors', {}).get(cache_key, [])
 
     result = _algolia_query(
         query=product_name,
@@ -186,13 +196,16 @@ def get_competitors(product_name, limit=5, use_cache=True, _cache=None, _stale=N
 
     return competitors
 
-def get_our_rank(search_query, use_cache=True):
+def get_our_rank(search_query, use_cache=True, allow_network=False):
     """ترتيبنا لكلمة بحث معينة"""
     if use_cache:
         cache = _load_cache()
         cached = cache.get('rankings', {}).get(search_query)
-        if cached and not is_cache_stale():
+        if cached and (not is_cache_stale() or not allow_network):
             return cached.get('rank'), cached.get('product')
+    if not allow_network:
+        cached = _load_cache().get('rankings', {}).get(search_query, {})
+        return cached.get('rank'), cached.get('product')
     
     result = _algolia_query(query=search_query, hits_per_page=50)
     if result is None:  # فشل: أعد آخر كاش متاح بدل الكتابة فوقه
@@ -286,13 +299,13 @@ def calculate_priority(product, competitors):
 # 40 منتج ≈ 45 ثانية على الكاش البارد (مرة كل 6 ساعات)، ثم ~2 ثانية من الكاش.
 MAX_PRIORITY_SCAN = 40
 
-def get_priorities(limit=20):
+def get_priorities(limit=20, allow_network=False):
     """جلب قائمة الأولويات مرتبة.
 
     لتفادي آلاف طلبات الشبكة، نقيّم فقط أهم MAX_PRIORITY_SCAN منتج
     (الأكثر تقييمات لدينا) لأنها الأجدر بالمتابعة التنافسية.
     """
-    products = [p for p in get_our_products() if p.get('name_ar')]
+    products = [p for p in get_our_products(allow_network=allow_network) if p.get('name_ar')]
 
     # رتّب حسب عدد تقييماتنا تنازلياً (الأهم أولاً) ثم خذ شريحة محدودة
     def _our_count(p):
@@ -302,11 +315,13 @@ def get_priorities(limit=20):
 
     # كاش مشترك: قراءة وحفظ مرة واحدة بدل مرة لكل منتج
     cache = _load_cache()
-    stale = is_cache_stale()
+    stale = is_cache_stale() if allow_network else False
     priorities = []
     for p in products:
         name = p['name_ar']
-        competitors = get_competitors(name, limit=3, _cache=cache, _stale=stale)
+        competitors = get_competitors(
+            name, limit=3, _cache=cache, _stale=stale, allow_network=allow_network
+        )
         pri = calculate_priority(p, competitors)
         pri['product'] = p
         pri['name'] = name
@@ -331,9 +346,9 @@ def daily_quota(product, target_weight, days=60, avg_rating=4.7):
     daily = math.ceil(needed / (days * avg_rating))
     return min(daily, 3)  # max 3/product/day
 
-def generate_daily_plan():
+def generate_daily_plan(allow_network=False):
     """توليد خطة اليوم"""
-    priorities = get_priorities(limit=10)
+    priorities = get_priorities(limit=10, allow_network=allow_network)
     plan = []
     total_reviews = 0
     
@@ -388,11 +403,11 @@ def get_safety_rules():
 # Ranking Tracker
 # ═══════════════════════════════════════════
 
-def track_rankings():
+def track_rankings(allow_network=True):
     """تتبع ترتيبنا لكل كلمات البحث الأهم"""
     results = []
     for query in TOP_SEARCHES:
-        rank, product = get_our_rank(query, use_cache=False)
+        rank, product = get_our_rank(query, use_cache=False, allow_network=allow_network)
         results.append({
             'query': query,
             'rank': rank,
@@ -435,10 +450,10 @@ def get_history():
 # Summary for Dashboard
 # ═══════════════════════════════════════════
 
-def get_dashboard_summary():
-    """ملخص لوحة التحكم"""
-    products = get_our_products()
-    plan = generate_daily_plan()
+def get_dashboard_summary(allow_network=False):
+    """ملخص لوحة التحكم من الكاش، من دون طلبات شبكة افتراضية."""
+    products = get_our_products(allow_network=allow_network)
+    plan = generate_daily_plan(allow_network=allow_network)
     
     active_products = len([p for p in products if _num((p.get('all_rating', {}) or {}).get('count', 0)) > 0])
     
@@ -453,13 +468,9 @@ def get_dashboard_summary():
 
 def refresh_all_data():
     """تحديث كل البيانات من Algolia"""
-    # Force refresh by clearing cache timestamps
-    cache = {'last_updated': None, 'our_products': [], 'competitors': {}, 'rankings': {}}
-    _save_cache(cache)
-    
-    # Re-fetch
-    products = get_our_products(use_cache=False)
-    rankings = track_rankings()
+    # لا نمسح الكاش قبل نجاح الشبكة، حتى تبقى اللوحة قابلة للاستخدام عند فشل التحديث.
+    products = get_our_products(use_cache=False, allow_network=True)
+    rankings = track_rankings(allow_network=True)
     
     return {
         'products_count': len(products),
