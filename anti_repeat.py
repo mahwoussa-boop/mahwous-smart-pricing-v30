@@ -74,46 +74,92 @@ class _ArchiveLock:
     O_CREAT|O_EXCL ذرّي في نظام الملفات على وندوز ولينكس كليهما.
 
     قفل عالق (عملية سابقة انهارت وهي تملكه) كان يعني الاستسلام الدائم:
-    السلوك القديم يمضي بلا حماية بعد استنفاد المهلة *بلا حذف الملف العالق*
+    السلوك الأقدم يمضي بلا حماية بعد استنفاد المهلة *بلا حذف الملف العالق*
     (__exit__ يحذفه فقط لو امتلكناه فعلاً) — فكل استدعاء لاحق، للأبد، ينتظر
-    المهلة كاملة ثم يمضي بلا قفل. أعدت إنتاج هذا: ملف .lock يدوي، عملية
-    تنتظر 8 ثوانٍ فتمضي بلا حماية، والملف لا يزال موجوداً بعدها. الإصلاح:
-    بعد استنفاد المهلة، نستعيد القفل بالقوة (حذف + محاولة أخيرة) بدل
-    الاستسلام الدائم — القفل يُصلح نفسه تلقائياً لا يُعطَّل نهائياً.
+    المهلة كاملة ثم يمضي بلا قفل.
+
+    لكن الاستعادة القسرية الفورية بعد المهلة كانت تُصلح ذلك بثمن أسوأ:
+    **تسرق قفلاً حيّاً**. مالك بطيء (عملية تعمل فعلاً وتحتاج أطول من المهلة)
+    كان يُحذَف قفله ويدخل الطرفان المقطع الحرج معاً — أعدت إنتاج ذلك مباشرة
+    (مالك يمسك القفل + منتظر واحد ⇒ held=True لكليهما)، وهو بالضبط سباق
+    الفحص-ثم-الكتابة الذي وُجد القفل لمنعه.
+
+    الحلّ: **لا نسرق إلا قفلاً مثبَت التقادم**. عمر ملف القفل (mtime) هو زمن
+    الاستحواذ؛ وأي عملية أرشيف مشروعة (قراءة JSON + كتابة ذرّية) تنتهي في
+    أجزاء من الثانية، فقفلٌ أقدم من _STALE_AFTER ثانية = مالكه مات يقيناً.
+    ودون ذلك ننتظر ولا نسرق. وإن خسرنا سباق الاستعادة نعود للانتظار لا
+    نمضي بلا حماية.
     """
-    def __init__(self, path, timeout=8.0, poll=0.05):
+    # عتبة التقادم: أطول بمراحل من أي عملية أرشيف مشروعة (أجزاء من الثانية)،
+    # وأقصر من أن تُعطّل المتجر طويلاً لو مات عامل Gunicorn فعلاً وهو يملك القفل.
+    _STALE_AFTER = 60.0
+
+    def __init__(self, path, timeout=8.0, poll=0.05, stale_after=None):
         self._path = f'{path}.lock'
         self._timeout = timeout
         self._poll = poll
+        self._stale_after = self._STALE_AFTER if stale_after is None else stale_after
         self._held = False
+
+    def _try_acquire(self):
+        """محاولة استحواذ ذرّية واحدة. True عند النجاح."""
+        try:
+            fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            # معرّف المالك للتشخيص فقط (لا يُعتمَد عليه منطقياً — قد تُقرأ
+            # الكتابة نصف مكتملة من عملية أخرى، والتقادم وحده هو المعيار).
+            try:
+                os.write(fd, f'{os.getpid()}:{threading.get_ident()}'.encode())
+            except OSError:
+                pass
+            os.close(fd)
+            self._held = True
+            return True
+        except FileExistsError:
+            return False
+        except PermissionError:
+            # وندوز: نافذة "حذف معلّق" قصيرة بعد os.remove لملف قفل سابق
+            # (لا تزال مؤشّرات النظام عليه حيّة لحظياً) — تُعامَل كمحاولة
+            # عادية فاشلة لا كخطأ قاتل؛ رُصدت فعلياً تحت ضغط اختباري كثيف.
+            return False
+
+    def _lock_age(self):
+        """عمر ملف القفل بالثواني، أو None إن اختفى/تعذّرت قراءته."""
+        try:
+            return max(0.0, time.time() - os.stat(self._path).st_mtime)
+        except OSError:
+            return None
 
     def __enter__(self):
         deadline = time.monotonic() + self._timeout
         while time.monotonic() < deadline:
-            try:
-                fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
-                self._held = True
+            if self._try_acquire():
                 return self
-            except FileExistsError:
-                time.sleep(self._poll)
-            except PermissionError:
-                # وندوز: نافذة "حذف معلّق" قصيرة بعد os.remove لملف قفل سابق
-                # (لا تزال مؤشّرات النظام عليه حيّة لحظياً) — تُعامَل كمحاولة
-                # عادية فاشلة لا كخطأ قاتل؛ رُصدت فعلياً تحت ضغط اختباري كثيف.
-                time.sleep(self._poll)
-        # انتهت المهلة: قفل عالق فعلاً (عملية سابقة انهارت ولم تُحرِّره).
-        # نستعيده بالقوة بدل الاستسلام الدائم — محاولة أخيرة واحدة فقط.
-        try:
-            os.remove(self._path)
-        except OSError:
-            pass
-        try:
-            fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-            self._held = True
-        except OSError:
-            pass  # خسرنا سباقاً نادراً جداً مع عملية أخرى استولت للتوّ — نمضي بلا حماية هذه المرة فقط
+            time.sleep(self._poll)
+
+        # انتهت المهلة العادية. لا نسرق إلا قفلاً مثبَت التقادم — ننتظر حتى
+        # يبلغ عمره العتبة (أو يُحرَّر طبيعياً)، بسقف زمني كلّي يمنع التعليق.
+        hard_deadline = time.monotonic() + self._stale_after
+        while time.monotonic() < hard_deadline:
+            if self._try_acquire():
+                return self
+            age = self._lock_age()
+            if age is not None and age >= self._stale_after:
+                # مالكه مات يقيناً (أطول بمراحل من أي عملية مشروعة) — نستعيده.
+                try:
+                    os.remove(self._path)
+                except OSError:
+                    pass
+                if self._try_acquire():
+                    return self
+                # خسرنا السباق: عملية أخرى استولت عليه بشكل مشروع للتوّ —
+                # نعود للانتظار العادي، لا نمضي بلا حماية.
+            time.sleep(self._poll)
+
+        # ملاذ أخير: قفل حيّ لم يُحرَّر طوال المهلة + عتبة التقادم كاملة.
+        # المضيّ بلا حماية أهون من تعليق توليد المتجر إلى الأبد، لكنه صار
+        # نادراً جداً (كان يقع بعد 8 ثوانٍ فقط) ويُعلَن بصوت عالٍ للتشخيص.
+        print(f'⚠️ تعذّر الحصول على قفل الأرشيف خلال {self._timeout + self._stale_after:.0f}ث '
+              f'— المتابعة بلا قفل هذه المرة فقط ({self._path})', flush=True)
         return self
 
     def __exit__(self, *exc):

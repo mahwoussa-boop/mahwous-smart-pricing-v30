@@ -234,22 +234,30 @@ def test_archive_batch_catches_duplicates_within_the_same_batch():
     assert len(matches) == 1, f'يفترض نسخة واحدة فقط محفوظة، وُجد {len(matches)}'
 
 
+def _make_stale_lock(archive_file, age_seconds):
+    """ينشئ ملف قفل بعمر محدّد — يحاكي عملية انهارت قبل age_seconds ثانية."""
+    lock_path = f'{archive_file}.lock'
+    open(lock_path, 'w').close()
+    old = time.time() - age_seconds
+    os.utime(lock_path, (old, old))
+    return lock_path
+
+
 def test_abandoned_lock_is_reclaimed_not_permanently_disabled(tmp_path):
     """بلاغ مراجعة كودية مُتحقَّق منه مباشرة: عملية سابقة انهارت وهي تملك
-    القفل تترك ملف .lock بلا حذف أبداً. كان السلوك القديم يستسلم بعد
+    القفل تترك ملف .lock بلا حذف أبداً. كان السلوك الأقدم يستسلم بعد
     استنفاد المهلة *بلا حذف الملف العالق* — فكل استدعاء لاحق، للأبد، ينتظر
-    المهلة ثم يمضي بلا حماية، معطّلاً إصلاح التزامن (Phase 4) نهائياً.
+    المهلة ثم يمضي بلا حماية، معطّلاً إصلاح التزامن نهائياً.
 
-    الإصلاح: بعد استنفاد المهلة نستعيد القفل بالقوة بدل الاستسلام الدائم.
-    مهلة قصيرة (0.3s) هنا فقط لسرعة الاختبار — المنطق مطابق للمهلة الحقيقية.
+    الاستعادة الآن مشروطة بإثبات التقادم (عمر الملف ≥ stale_after) لا بمجرد
+    انتهاء المهلة — لذا يُشيَّخ mtime هنا عمداً. القيم قصيرة لسرعة الاختبار.
     """
     archive_file = tmp_path / 'archive.json'
-    lock_path = f'{archive_file}.lock'
-    open(lock_path, 'w').close()  # يحاكي قفلاً عالقاً من عملية منهارة
+    lock_path = _make_stale_lock(archive_file, age_seconds=120)
 
-    with ar._ArchiveLock(archive_file, timeout=0.3, poll=0.02) as lock:
+    with ar._ArchiveLock(archive_file, timeout=0.1, poll=0.02, stale_after=0.5) as lock:
         assert lock._held is True, (
-            'القفل العالق لم يُستعَد — السلوك القديم كان يمضي بلا حماية للأبد')
+            'القفل المهجور (مثبَت التقادم) لم يُستعَد — يبقى النظام بلا حماية للأبد')
         assert os.path.exists(lock_path), 'يفترض امتلاك القفل الآن فعلياً'
 
     assert not os.path.exists(lock_path), (
@@ -257,12 +265,12 @@ def test_abandoned_lock_is_reclaimed_not_permanently_disabled(tmp_path):
 
 
 def test_lock_reclaim_actually_restores_protection_for_next_caller(tmp_path):
-    """بعد استعادة قفل عالق مرة، الاستدعاء التالي يُحمى بشكل طبيعي — لا يبقى
+    """بعد استعادة قفل مهجور مرة، الاستدعاء التالي يُحمى بشكل طبيعي — لا يبقى
     النظام «معطَّلاً بشكل متقطّع» بل يُصلح نفسه بالكامل."""
     archive_file = tmp_path / 'archive.json'
-    open(f'{archive_file}.lock', 'w').close()
+    _make_stale_lock(archive_file, age_seconds=120)
 
-    with ar._ArchiveLock(archive_file, timeout=0.3, poll=0.02):
+    with ar._ArchiveLock(archive_file, timeout=0.1, poll=0.02, stale_after=0.5):
         pass  # يستعيد وتُحذَف عند الخروج
 
     # استدعاء ثانٍ فوري: لا قفل عالق بعد الآن، يُمتلَك فوراً بلا انتظار
@@ -271,3 +279,58 @@ def test_lock_reclaim_actually_restores_protection_for_next_caller(tmp_path):
         elapsed = time.monotonic() - t0
         assert lock2._held is True
     assert elapsed < 0.2, f'يفترض امتلاكاً فورياً بلا قفل عالق متبقٍّ، استغرق {elapsed:.2f}s'
+
+
+def test_live_lock_is_never_stolen_from_its_owner(tmp_path):
+    """انحدار (بلاغ المرحلة السابعة/الثامنة): الاستعادة القسرية الفورية بعد
+    المهلة كانت **تسرق قفلاً حيّاً** — مالك بطيء (أطول من المهلة) يُحذَف قفله
+    فيدخل الطرفان المقطع الحرج معاً، وهو بالضبط سباق الفحص-ثم-الكتابة الذي
+    وُجد القفل لمنعه. أعيد إنتاجه مباشرة: held=True لكليهما.
+
+    الآن: القفل الحيّ (عمره أقل من stale_after) لا يُسرق أبداً — المنتظر
+    ينتظر تحريره الطبيعي.
+    """
+    archive_file = tmp_path / 'archive.json'
+    owner = ar._ArchiveLock(archive_file, timeout=0.1, poll=0.02, stale_after=10.0)
+    owner.__enter__()
+    assert owner._held is True
+
+    overlapped = {'seen': False}
+
+    def _waiter():
+        other = ar._ArchiveLock(archive_file, timeout=0.1, poll=0.02, stale_after=10.0)
+        other.__enter__()
+        if owner._held:            # المالك لا يزال داخل المقطع الحرج
+            overlapped['seen'] = True
+        other.__exit__()
+
+    th = threading.Thread(target=_waiter)
+    th.start()
+    time.sleep(0.4)                # المالك يعمل أطول من المهلة بكثير
+    owner._held = False            # يخرج طبيعياً الآن
+    try:
+        os.remove(f'{archive_file}.lock')
+    except OSError:
+        pass
+    th.join(timeout=15)
+
+    assert overlapped['seen'] is False, (
+        'سُرِق قفل حيّ: دخل الطرفان المقطع الحرج معاً — عاد سباق الفحص-ثم-الكتابة')
+
+
+def test_fresh_lock_is_not_reclaimed_before_the_stale_threshold(tmp_path):
+    """ضابط دقيق: ملف قفل حديث (لم يبلغ عتبة التقادم) لا يُستعاد لمجرد انتهاء
+    المهلة — تمييز التقادم هو ما يفصل «مهجور» عن «مشغول»."""
+    archive_file = tmp_path / 'archive.json'
+    lock_path = _make_stale_lock(archive_file, age_seconds=0)  # حديث تماماً
+
+    lock = ar._ArchiveLock(archive_file, timeout=0.1, poll=0.02, stale_after=0.6)
+    t0 = time.monotonic()
+    lock.__enter__()
+    elapsed = time.monotonic() - t0
+    lock.__exit__()
+
+    # لم يُستعَد فوراً بعد المهلة (0.1s) — انتظر بلوغ عتبة التقادم (0.6s)
+    assert elapsed >= 0.5, (
+        f'استُعيد قفل حديث بعد {elapsed:.2f}s فقط — يجب إثبات التقادم أولاً')
+    os.path.exists(lock_path)  # لا تأكيد: قد يكون استُعيد بعد بلوغ العتبة بحق
