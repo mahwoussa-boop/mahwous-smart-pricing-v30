@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """نظام مكافحة التكرار المتقدم"""
-import sys, os, json, time, re
+import sys, os, json, time, re, threading
 from pathlib import Path
 from collections import OrderedDict, deque
 
@@ -62,6 +62,50 @@ def _empty_archive():
     return {'reviews': [], 'store_reviews': [], 'personas': []}
 
 
+class _ArchiveLock:
+    """قفل حصري بين العمليات حول ملف الأرشيف — بلا اعتماديات خارجية.
+
+    الإنتاج الفعلي يعمل بعاملَي Gunicorn (Procfile/render.yaml: --workers 2)،
+    كلٌّ منهما عملية منفصلة بذاكرة session منفصلة. archive_review/archive_batch
+    كانا يقرآن الملف، يعدّلانه في الذاكرة، ثم يكتبانه كاملاً — بلا قفل ولا
+    كتابة ذرّية. محاكاة معزولة أثبتت: عمليتان تكتبان بالتزامن ⇒ الأرشيف
+    النهائي يحتوي تقييماً واحداً بدل اثنين (كتابة مفقودة).
+
+    O_CREAT|O_EXCL ذرّي في نظام الملفات على وندوز ولينكس كليهما. عند تعذّر
+    القفل خلال المهلة (قفل معلّق من عملية منهارة) نمضي بلا حماية بدل التعليق
+    للأبد — فقدان نادر أفضل من توقّف التطبيق كاملاً.
+    """
+    def __init__(self, path, timeout=8.0, poll=0.05):
+        self._path = f'{path}.lock'
+        self._timeout = timeout
+        self._poll = poll
+        self._held = False
+
+    def __enter__(self):
+        deadline = time.monotonic() + self._timeout
+        while time.monotonic() < deadline:
+            try:
+                fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                self._held = True
+                return self
+            except FileExistsError:
+                time.sleep(self._poll)
+            except PermissionError:
+                # وندوز: نافذة "حذف معلّق" قصيرة بعد os.remove لملف قفل سابق
+                # (لا تزال مؤشّرات النظام عليه حيّة لحظياً) — تُعامَل كمحاولة
+                # عادية فاشلة لا كخطأ قاتل؛ رُصدت فعلياً تحت ضغط اختباري كثيف.
+                time.sleep(self._poll)
+        return self  # تعذّر القفل خلال المهلة — نمضي بلا حماية بدل التعليق
+
+    def __exit__(self, *exc):
+        if self._held:
+            try:
+                os.remove(self._path)
+            except OSError:
+                pass
+
+
 # ذاكرة قراءة الأرشيف — is_duplicate يُستدعى حتى 5 مرات لكل منتج، وكل استدعاء
 # كان يعيد تحليل ملف JSON كامل (~115KB). المفتاح (mtime, size) فيبطل تلقائياً
 # عند أي كتابة، ويُبطَل صراحةً في _save_archive.
@@ -98,10 +142,28 @@ def _load_archive():
 
 
 def _save_archive(archive):
+    """كتابة ذرّية: ملف مؤقت ثم استبدال (os.replace) — لا ملف نصف مكتوب أبداً
+    حتى لو انهارت العملية أثناء الكتابة. لا تُستدعى إلا داخل _ArchiveLock.
+
+    اسم الملف المؤقت يضمّ معرّف الخيط (threading.get_ident) لا PID وحده —
+    عدّة خيوط بنفس العملية (كاختبارات التزامن) تتشارك PID، فكان يمكن أن
+    يتصادم اسم الملف المؤقت بينها لو حدث تراكب توقيت.
+    """
     if len(archive.get('reviews', [])) > MAX_ARCHIVE:
         archive['reviews'] = archive['reviews'][-MAX_ARCHIVE:]
-    with open(ARCHIVE_FILE, 'w', encoding='utf-8') as f:
+    tmp_path = f'{ARCHIVE_FILE}.tmp.{os.getpid()}.{threading.get_ident()}'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(archive, f, ensure_ascii=False, indent=1)
+    # وندوز: os.replace قد يفشل بـPermissionError عابرة (فحص مضاد فيروسات/
+    # فهرسة على الملف الوجهة) — إعادة محاولة قصيرة تمتص الحالة العابرة.
+    for _attempt in range(5):
+        try:
+            os.replace(tmp_path, ARCHIVE_FILE)
+            break
+        except PermissionError:
+            if _attempt == 4:
+                raise
+            time.sleep(0.05)
     _archive_cache['key'] = _archive_key()
     _archive_cache['data'] = archive
 
@@ -111,30 +173,35 @@ def get_used_texts(limit=40):
     return texts[-limit:] if len(texts) > limit else texts
 
 def archive_review(review_text, product_name, persona_name):
-    arc = _load_archive()
-    arc['reviews'].append({
+    entry = {
         'text': review_text,
         'product': product_name,
         'persona': persona_name,
         'ts': int(time.time())
-    })
-    _save_archive(arc)
+    }
+    with _ArchiveLock(ARCHIVE_FILE):
+        arc = _load_archive()
+        arc['reviews'].append(entry)
+        _save_archive(arc)
     register_text(review_text, persona_name)
 
 def archive_batch(reviews, persona_name):
-    arc = _load_archive()
+    entries = [{
+        'text': rv.get('text', ''),
+        'product': rv.get('product', ''),
+        'persona': persona_name,
+        'ts': int(time.time())
+    } for rv in reviews]
+    with _ArchiveLock(ARCHIVE_FILE):
+        arc = _load_archive()
+        arc['reviews'].extend(entries)
+        _save_archive(arc)
     for rv in reviews:
-        arc['reviews'].append({
-            'text': rv.get('text',''),
-            'product': rv.get('product',''),
-            'persona': persona_name,
-            'ts': int(time.time())
-        })
         register_text(rv.get('text', ''), persona_name)
-    _save_archive(arc)
 
 def clear_archive():
-    _save_archive({'reviews':[], 'store_reviews':[], 'personas':[]})
+    with _ArchiveLock(ARCHIVE_FILE):
+        _save_archive({'reviews':[], 'store_reviews':[], 'personas':[]})
 
 def get_archive_stats():
     arc = _load_archive()
