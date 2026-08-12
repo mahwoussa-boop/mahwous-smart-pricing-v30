@@ -199,11 +199,24 @@ with open(BASE_DIR / 'names.json', 'r', encoding='utf-8') as f:
 ARCHIVE_FILE = DATA_DIR / 'archive.json'
 
 def _load_archive():
+    """قارئ أرشيف محلي — مسار احتياطي **غير قابل للوصول عملياً**: لا يُستخدم
+    إلا حين USE_ANTI_REPEAT=False، وفي تلك الحالة يرفع _is_dup استثناء
+    AIUnavailable قبل أن يصل أي توليد إلى الأرشفة أصلاً (راجع _is_dup).
+
+    أُبقي كما هو عمداً (حذفه إزالة ميزة تحتاج قرار المالك)، مع إصلاحين:
+    - `except:` العارية كانت تبتلع حتى KeyboardInterrupt/SystemExit/MemoryError.
+    - الفساد كان يُعامَل مطابقاً للملف الغائب بصمت، فتمحو الكتابة التالية
+      التاريخ كاملاً — نفس الخلل المُصلَح في anti_repeat._load_archive، وهنا
+      بلا نسخة احتياطية ولا إنقاذ. يُعلَن الآن على الأقل.
+    ⚠️ للمالك: هذه النسخة تحدّ الأرشيف بـ200 مدخلة بينما anti_repeat.MAX_ARCHIVE=500.
+    """
     if ARCHIVE_FILE.exists():
         try:
             with open(ARCHIVE_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except:
+        except (OSError, ValueError) as e:
+            print(f'⚠️ تعذّرت قراءة {ARCHIVE_FILE} ({e}) — المتابعة بأرشيف فارغ '
+                  f'(المسار الاحتياطي بلا عزل ولا إنقاذ)', flush=True)
             return {'reviews':[], 'store_reviews':[], 'personas':[]}
     return {'reviews':[], 'store_reviews':[], 'personas':[]}
 
@@ -489,12 +502,19 @@ def _is_dup(text):
 
 
 def _register(text):
-    """تسجيل نص مقبول في طبقة الجلسة لمنع تكراره لاحقاً."""
+    """تسجيل نص مقبول في طبقة الجلسة لمنع تكراره لاحقاً.
+
+    الفشل هنا لا يوقف التوليد (النص صالح وقد كُتب فعلاً)، لكنه **لا يُبتلَع
+    صامتاً** كما كان: تعذّر التسجيل يعني أن الكلمات/البدايات لن تُحرَق فيتكرر
+    الأسلوب لاحقاً بلا أي أثر يكشف السبب — نفس فئة الخلل التي عولجت في
+    مسارات الأرشفة (قانون 4: أعلِن الفشل ولا تُخفِه).
+    """
     if USE_ANTI_REPEAT and text:
         try:
             ar_register_text(text)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f'⚠️ فشل تسجيل النص في ذاكرة الجلسة (تتبّع الحرق معطّل لهذا النص): {e}',
+                  flush=True)
 
 
 def _ai_unique_json(prompt, max_tokens, finalize, attempts=4, temp_step=0.06):
@@ -804,14 +824,23 @@ def _ai_store_review(persona):
 
     _register(text)
     if USE_ANTI_REPEAT:
-        try:
-            saved = ar_archive_review(text, 'متجر مهووس', persona.get('name', ''))
-        except Exception as e:
-            # كان يُهمَل صمتاً بالكامل — لا أثر في السجلّ حتى للتشخيص. فشل
-            # الأرشفة يعني عدم وصول النص لـarchive.json المشترك، فلا يراه
-            # عامل Gunicorn آخر ولا يمنعه من توليد نفس النص لاحقاً.
-            saved = None
-            print(f'⚠️ فشل أرشفة تقييم المتجر: {e}', flush=True)
+        # فشل الأرشفة يعني عدم وصول النص لـarchive.json المشترك، فلا يراه عامل
+        # Gunicorn آخر ولا يمنعه من توليد النص نفسه لاحقاً. كان يُهمَل صمتاً
+        # (بلا أثر حتى للتشخيص)، ثم صار يُسجَّل — لكن بلا إعادة محاولة إطلاقاً.
+        # أغلب حالات الفشل هنا عابرة (تزاحم قفل/قفل ملف على وندوز)، فمحاولة
+        # ثانية واحدة تنقذ الأرشفة بلا إعادة توليد النص (النص صالح ومقبول).
+        saved = None
+        for _attempt in range(2):
+            try:
+                saved = ar_archive_review(text, 'متجر مهووس', persona.get('name', ''))
+                break
+            except Exception as e:
+                if _attempt == 0:
+                    print(f'⚠️ فشل أرشفة تقييم المتجر (محاولة ثانية): {e}', flush=True)
+                    time.sleep(0.1)
+                    continue
+                print(f'⚠️ تعذّرت أرشفة تقييم المتجر نهائياً — قد يُولَّد النص نفسه '
+                      f'في عامل آخر: {e}', flush=True)
         if saved is False:
             # رُفض كمكرر فعلياً في الفحص الأخير تحت القفل (تصادم نادر مع
             # عملية أخرى) — محاولة أخيرة بدل تسليم مكرر بصمت للمستخدم.
