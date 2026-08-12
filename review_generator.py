@@ -16,6 +16,22 @@ import random
 import re
 from collections import deque, Counter
 
+# تطبيع عربي موحّد لكشف التكرار — نفس الدالة المستخدمة في anti_repeat.py
+# (مصدر واحد بدل نسختين قد تتباعدان؛ راجع anti_repeat._normalize لتوثيق
+# القرار: توحيد أ/إ/آ↔ا، ة↔ه، ى/ئ↔ي، ؤ↔و، وإسقاط التشكيل والتطويل وغير العربي).
+import anti_repeat as _ar
+
+# طيّ تمطيط الحرف (راااائع) إلى نسخة واحدة — خاص بهذه الوحدة: maybe_elongate
+# (realism_calibrator.py) يستبدل حرفاً بنسخته المكرّرة (ر→ررر) كنسيج بشري
+# متعمّد، وanti_repeat._normalize لا يطويه (يزيل التطويل ـ الحرف الموحّد
+# فقط، لا تكرار حرف عادي). بلا هذا الطيّ: «كنت أدور» و«كنت أدوررر» نصّان
+# مختلفان عند الفحص رغم كونهما نفس النص فعلياً — مثال رصدته المراجعة.
+_ELONGATION_RE = re.compile(r'([ء-ي])\1{1,}')
+
+
+def _fold_elongation(text):
+    return _ELONGATION_RE.sub(r'\1', text)
+
 # ضمان ترميز UTF-8 للطباعة
 try:
     sys.stdout.reconfigure(encoding='utf-8')
@@ -878,7 +894,16 @@ class ReviewGenerator:
         return False
 
     def _is_duplicate(self, text):
-        normalized = re.sub(r'\s+', '', text)[:50]
+        """تطبيع عربي حقيقي قبل المقارنة — كان يزيل المسافات فقط ويقارن أول
+        50 حرفاً حرفياً، فلا يكتشف نصّين متطابقين معنى يختلفان فقط بإيموجي
+        أو تمطيط أو صور حرف (ة/ه، أ/ا) — رغم أن _post_process يضيف هذه
+        الزخارف *قبل* هذا الفحص مباشرة (تمطيط + إيموجي ثم فحص التكرار).
+        مثال حقيقي رُصد في generated_audience_1000.json: «لبسته في عزيمة
+        عشاء يعطيك حضور» و«...حضور🙌» عُدّا نصّين مختلفين.
+        """
+        normalized = _fold_elongation(_ar._normalize(text))[:50]
+        if not normalized:
+            return True
         if normalized in self._recent_hashes:
             return True
         self._recent_hashes.append(normalized)
@@ -1173,14 +1198,28 @@ class ReviewGenerator:
                 add_typos=add_typos,
             )
 
-            # فحص التكرار — القصير يُسمح بتكراره بسقف واقعي (المنافس يكرّره)
+            # فحص التكرار — القصير يُسمح بتكراره بسقف واقعي (المنافس يكرّره)،
+            # لكن ليس بلا حدود: كان max(4, count*5%) = 50 لدفعة 1000، بينما
+            # الفحص الفعلي على generated_audience_1000.json أظهر تكراراً
+            # أقصى 9 مرات فقط لكلمة واحدة («أسطوري») — أي أن السقف القديم لم
+            # يكن هو الكابح؛ العائق الحقيقي تنوّع بنك العبارات القصيرة نفسه.
+            # سقف أضيق (2-5 بدل حتى 50) يجبر إعادة التوليد على استكشاف بنك
+            # العبارات كاملاً بدل التقارب على قلّة شائعة، دون منع التكرار
+            # الواقعي كلياً (لا يزال يسمح بـ2-5 تكرارات — هدف هذه الأداة
+            # الإحصائي مطابقة توزيع منافس حقيقي لا صفر تكرار؛ realism_calibrator
+            # يقيس توزيع الطول لا معدّل التكرار، فلا تعارض مع تضييق السقف هنا).
+            # المفتاح مُطبَّع أيضاً — كان بالنص الخام فتفلت الزخارف (إيموجي/
+            # تمطيط) المضافة في _post_process من عدّاد نفس السقف.
             text = review['text']
             if not text:
                 continue
             if len(text.split()) <= 4:
-                cap = max(4, round(count * 0.05))
-                if self._short_freq[text] < cap:
-                    self._short_freq[text] += 1
+                normalized = _fold_elongation(_ar._normalize(text))
+                if not normalized:
+                    continue
+                cap = max(2, min(5, round(count * 0.01)))
+                if self._short_freq[normalized] < cap:
+                    self._short_freq[normalized] += 1
                     reviews.append(review)
                     used_personas.append(review['persona_type'])
             elif not self._is_duplicate(text) and len(text) > 3:
