@@ -1373,15 +1373,25 @@ def api_generate_stream():
 
                 # (ب) الكتابة — استدعاء AI فعلي الآن وعرض الناتج مباشرة
                 rv = _write_review(persona, pf, prompt, params)
+                # الأرشفة **قبل** البثّ لا بعده: كانت الدفعة كلها تُؤرشَف بعد
+                # إرسال كل النصوص للعميل (_archive_batch في نهاية الحلقة)،
+                # فرفضُ عنصر كمكرر تحت القفل لا يمنع وصوله — لا يمكن سحب ما
+                # بُثّ أصلاً. الآن يُحسم الحفظ أولاً، وعند الرفض تُعاد المحاولة
+                # فلا يُبَثّ إلا نص مقبول فعلاً في الأرشيف المشترك.
+                person_name = persona.get('name', '')
+                if _archive_review(rv.get('text', ''), pf['name'], person_name) is False:
+                    prompt2, params2 = _plan_review(persona, pf, perfumes, used_block)
+                    retry_rv = _write_review(persona, pf, prompt2, params2)
+                    if _archive_review(retry_rv.get('text', ''), pf['name'],
+                                       person_name) is not False:
+                        rv, pattern = retry_rv, params2.get('pattern', pattern)
+                    # فشلت المحاولة البديلة أيضاً: نُبقي أفضل جهد (لا فبركة، لا حظر).
                 reviews.append(rv)
                 yield _sse({'step': 'review', 'index': i, 'icon': '✍️',
                             'product': pf['name'],
                             'msg': f"كتب تقييم «{pf['name']}»",
                             'text': rv.get('text', ''), 'rating': rv.get('rating', 5),
                             'pattern': rv.get('pattern', pattern)})
-
-            # حفظ الدفعة في الأرشيف (مرة واحدة بعد اكتمالها)
-            _archive_batch(reviews, persona.get('name', ''))
 
             # ── 4) تقييم المتجر (متغيّر وغير مكرر) ──
             yield _sse({'step': 'store', 'icon': '🏪', 'msg': 'يكتب تقييماً عاماً للمتجر...'})
@@ -1447,7 +1457,15 @@ def api_generate_thread():
         # تُسجَّل بـ_register فقط (ذاكرة العملية)، وبعاملَي Gunicorn منفصلَي
         # الذاكرة (Procfile: --workers 2) لا يرى العامل الآخر ردّاً سبق توليده
         # في عامل مختلف، فيمكن أن يُعاد النص نفسه لاحقاً.
-        _archive_review(text, product_name, reply_name)
+        # ورفض الأرشفة (تصادم فعلي تحت القفل) كان يُهمَل هنا فيصل الرد المكرر
+        # للمستخدم بصمت — نعيد المحاولة مرة كما في مسار التقييم المفرد.
+        if _archive_review(text, product_name, reply_name) is False:
+            retry_text = _ai_unique_text(reply_info['prompt'], max_tokens=150,
+                                         finalize=_humanize, attempts=2,
+                                         parser=parse_ai_reply)
+            if retry_text and _archive_review(retry_text, product_name,
+                                              reply_name) is not False:
+                text = retry_text
         thread_replies.append({
             'name': reply_name,
             'city': reply_info['persona'].get('city', ''),
