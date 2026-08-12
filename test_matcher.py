@@ -120,6 +120,31 @@ def test_review_directive_skips_non_perfume():
     assert dm.review_directive(MODERN_F, makeup) == ''
 
 
+def test_review_directive_varies_within_a_batch():
+    """انحدار: نفس فئة المنتج كانت تُنتج جملة توجيه ثابتة حرفياً في كل مرة.
+
+    هذا المتجر يبيع سلاسل عطور متشابهة (مثل «كربتك إكستري أودي» بعدة أسماء)،
+    فدفعة منتجات شخصية واحدة غالباً تحوي عدة منتجات من نفس الفئة. جملة توجيه
+    ثابتة تصل النموذج حرفياً لكل منها فيتقارب لنفس الفكرة والمفردات عبر
+    منتجات مختلفة (رُصد فعلياً: عبارة «ترتيب المكتب الصباح» تكررت 3 مرات
+    عبر 3 منتجات مختلفة لشخصية واحدة). التنويع العشوائي هو الإصلاح.
+    """
+    outputs = {dm.review_directive(SENIOR_M, OUD_HEAVY) for _ in range(60)}
+    assert len(outputs) > 1, 'جملة التوجيه ثابتة رغم تعدد المحاولات — لا تنويع'
+    assert len(outputs) == len(dm._DIRECTIVE_VARIANTS['oud_heavy'])
+
+
+def test_all_directive_variants_stay_semantically_consistent():
+    """كل صياغات فئة واحدة يجب أن تحمل نفس القيد الدلالي (لا سخافة «للدوام» لعود ثقيل)."""
+    for variant in dm._DIRECTIVE_VARIANTS['oud_heavy']:
+        assert 'مجالس' in variant or 'عزايم' in variant
+        assert 'للدوام' not in variant
+    for variant in dm._DIRECTIVE_VARIANTS['fresh_light']:
+        assert 'منعش' in variant or 'انتعاش' in variant
+    for variant in dm._DIRECTIVE_VARIANTS['sweet_youthful']:
+        assert 'حلو' in variant or 'شبابي' in variant
+
+
 def test_audience_summary_readable():
     s = dm.audience_summary(OUD_HEAVY)
     assert 'ثقيل' in s and 'جمهوره' in s
