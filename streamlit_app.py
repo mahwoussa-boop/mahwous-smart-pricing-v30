@@ -477,7 +477,10 @@ def gen_reviews(persona, perfumes):
             # مسار النص النهائي — نفس ما سيُخزَّن بالضبط، فتفحصه بوابة التفرّد
             # على حقيقته لا على المخرج الخام (القصّ كان يُوحّد مخرجات مختلفة).
             _finalize = _make_review_finalizer(persona, _allow)
-            rv, txt = ai_write_unique(prompt, max_tokens=mx, finalize=_finalize)
+            # attempts=8 لا 5 (الافتراضي): النصوص القصيرة (len_target 1-2،
+            # نحو 43% من التوليدات) أكثر عرضة للتصادم، والتكلفة زهيدة
+            # (max_tokens صغير) مقابل تقليل حقيقي لاحتمال قبول نص مكرر.
+            rv, txt = ai_write_unique(prompt, max_tokens=mx, finalize=_finalize, attempts=8)
             if not txt.strip():
                 # قانون 4: لا نص وهمي — نتوقف ونُظهر خطأ بدل الفبركة.
                 st.error('تعذّر الاتصال بالذكاء الاصطناعي أو نفد الرصيد — لم تتم كتابة أي تقييم.')
@@ -591,7 +594,8 @@ def gen_store_review(persona):
                 words = strip_broken_tail(words)
         return ' '.join(words)
 
-    rv, txt = ai_write_unique(prompt, max_tokens=200, finalize=_finalize, is_store=True)
+    rv, txt = ai_write_unique(prompt, max_tokens=200, finalize=_finalize,
+                              is_store=True, attempts=8)
 
     # (3) حارس موحّد: موضوع مشبع / تجاوز الطول → إعادة توليد موجَّهة
     # (استعارة الفخامة صارت مضمونة الغياب حتمياً داخل _finalize — لا حاجة لطلب إعادة كتابة لأجلها)

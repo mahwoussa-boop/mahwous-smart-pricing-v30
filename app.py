@@ -609,8 +609,11 @@ def _write_review(persona, pf, prompt, params):
     # مسار النص النهائي — نفس ما سيُخزَّن، فتفحصه بوابة التفرّد على حقيقته.
     # (القصّ عند _allow كان يُوحّد مخرجات مختلفة بعد اجتيازها الفحص الخام.)
     _finalize = _make_review_finalizer(persona, _allow)
+    # attempts=8 لا 5: النصوص القصيرة (len_target 1-2، نحو 43% من التوليدات)
+    # أكثر عرضة للتصادم، والتكلفة زهيدة (max_tokens صغير) مقابل تقليل حقيقي
+    # لاحتمال قبول نص مكرر كأفضل جهد بعد استنفاد كل المحاولات.
     rv, _text = _ai_write_json(prompt, max_tokens=max_tokens,
-                               finalize=_finalize, attempts=5)  # يرفع AIUnavailable عند الفشل
+                               finalize=_finalize, attempts=8)  # يرفع AIUnavailable عند الفشل
     # ══ الحارس الدلالي: نزيف/بتر/تجاوز طول → إعادة توليد بدل القصّ الصامت ══
     if USE_SEMANTIC_GUARD:
         for _k in range(2):
@@ -729,7 +732,7 @@ def _ai_store_review(persona):
         return ' '.join(words)
 
     rv, text = _ai_write_json(prompt, max_tokens=200, finalize=_finalize,
-                              attempts=5)  # يرفع AIUnavailable عند الفشل
+                              attempts=8)  # يرفع AIUnavailable عند الفشل
 
     # (3) حارس موحّد: موضوع مشبع / تجاوز الطول → إعادة توليد موجَّهة
     # (استعارة الفخامة صارت مضمونة الغياب حتمياً داخل _finalize — لا حاجة لطلب إعادة كتابة لأجلها)

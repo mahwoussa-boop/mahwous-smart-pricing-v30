@@ -8,6 +8,8 @@
 
 هذه الاختبارات تفشل على السلوك القديم وتنجح على الجديد.
 """
+import re
+
 import anti_repeat as ar
 from anti_repeat import is_duplicate, register_text, reset_session_texts
 from review_text import finalize_review_text, humanize, write_unique
@@ -159,3 +161,57 @@ def test_finalize_is_pure_and_matches_stored_shape():
     # idempotent: إعادة التمرير لا تغيّر شيئاً
     assert finalize_review_text(out, allow_words=3) == out
     assert humanize('نص… مع—رموز!') == 'نص مع رموز'
+
+
+def test_live_generation_paths_use_eight_attempts_not_five():
+    """حارس بنيوي: مسارا التوليد الحيّان (تقييم/متجر × Flask/Streamlit) يطلبان
+    8 محاولات لا 5 — التصادم أكثر احتمالاً في النصوص القصيرة (43% من len_target)،
+    والتكلفة زهيدة (لا تُستنفد المحاولات الإضافية إلا عند تصادم فعلي)."""
+    for path in ('app.py', 'streamlit_app.py'):
+        src = open(path, encoding='utf-8').read()
+        # عدّ الاستدعاءات الفعلية فقط (لا التعليقات التي تذكر الرقم شرحاً)
+        calls = len(re.findall(r'[,(]\s*attempts=8\b', src))
+        assert calls == 2, (
+            f'{path}: توقّعت استدعاءين بـattempts=8 (تقييم + متجر)، وُجد {calls}')
+
+
+def test_retry_hint_escalates_after_repeated_failure():
+    """بلاغ مراجعة: «غيّر الزاوية» وحدها لا تكفي حين يتكرر الفشل عدّة مرات.
+
+    من المحاولة 3 (index>=3) يضيف التلميح قائمة زوايا بديلة ملموسة — تحقّق
+    أن التصعيد فعلاً مشروط بعدد المحاولات لا ثابتاً من البداية.
+    """
+    from review_text import _retry_hint, _ESCALATION_ANGLES
+
+    early = _retry_hint(1, ['نص مرفوض'])
+    late = _retry_hint(3, ['نص مرفوض'])
+    assert not any(angle in early for angle in _ESCALATION_ANGLES), \
+        'التصعيد ظهر مبكراً جداً (محاولة 1)'
+    assert any(angle in late for angle in _ESCALATION_ANGLES), \
+        'التصعيد لم يظهر رغم استمرار الفشل (محاولة 3)'
+
+
+def test_write_unique_reaches_escalated_hint_when_ai_keeps_repeating():
+    """تكامل: النموذج المموَّه يتلقّى فعلاً التلميح المصعَّد بعد عدّة رفض متتالية."""
+    import anti_repeat as ar
+    ar.reset_session_texts()
+    ar.register_text('ريحته حلوة وثابتة')
+
+    seen_prompts = []
+
+    def _stuck_call(prompt, max_tokens, temperature):
+        seen_prompts.append(prompt)
+        return 'ريحته حلوة وثابتة'  # يكرر نفس النص دائماً — يجبر التصعيد
+
+    rv, final = write_unique(
+        call=_stuck_call,
+        parse=lambda raw: {'text': raw} if raw else None,
+        finalize=lambda t: finalize_review_text(t, allow_words=3),
+        is_dup=ar.is_duplicate,
+        prompt='p', max_tokens=50, attempts=8,
+    )
+    # وصلنا لمحاولات متأخرة كافية لظهور التصعيد في أحد البرومبتات المرسَلة
+    from review_text import _ESCALATION_ANGLES
+    assert any(any(angle in p for angle in _ESCALATION_ANGLES) for p in seen_prompts[3:]), \
+        'التصعيد لم يصل فعلياً لاستدعاء الذكاء الاصطناعي رغم تكرار الرفض'
+    assert len(seen_prompts) == 8, 'يفترض استنفاد كل المحاولات الثمانية مع نموذج عالق'
