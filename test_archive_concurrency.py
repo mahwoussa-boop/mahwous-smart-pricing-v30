@@ -206,3 +206,27 @@ def test_check_then_write_race_cannot_insert_two_duplicates():
     # بالضبط أحد الطلبين قُبل والآخر رُفض عند الكتابة الفعلية
     saved_flags = [outcomes.get('saved_1'), outcomes.get('saved_2')]
     assert sorted(saved_flags) == [False, True], f'outcomes={outcomes}'
+
+
+def test_archive_batch_catches_duplicates_within_the_same_batch():
+    """بلاغ مراجعة كودية مُتحقَّق منه مباشرة: نص متطابق حرفياً يظهر مرتين
+    في نفس الدفعة كان يُقبَل مرتين معاً — أوضح ما يظهر على أرشيف غير موجود
+    بعد (لا مفتاح كاش لإبطاله، فكل قراءة داخل الحلقة تُرجع قاموساً فارغاً
+    جديداً، غير مطّلعة على ما أُضيف للتوّ في نفس الحلقة).
+
+    الإصلاح: الفحص صار مقابل نصوص الدفعة المتراكمة محلياً (بعد الدمج مع
+    ما كان محفوظاً مسبقاً) لا مقابل قراءة ملف ثابتة طوال الحلقة.
+    """
+    ar.reset_session_texts()
+    text = 'نص متطابق حرفياً يظهر مرتين في الدفعة نفسها بلا أي فارق'
+    assert not ar.ARCHIVE_FILE.exists(), 'الاختبار يفترض أرشيفاً غير موجود بعد (tmp_path نظيف)'
+
+    results = ar.archive_batch(
+        [{'text': text, 'product': 'م'}, {'text': text, 'product': 'م'}],
+        'شخص1',
+    )
+    assert results == [True, False], f'يفترض قبول الأول ورفض الثاني كمكرر داخل الدفعة نفسها، وُجد {results}'
+
+    arc = json.loads(ar.ARCHIVE_FILE.read_text(encoding='utf-8'))
+    matches = [r for r in arc['reviews'] if r['text'] == text]
+    assert len(matches) == 1, f'يفترض نسخة واحدة فقط محفوظة، وُجد {len(matches)}'

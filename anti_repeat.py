@@ -207,15 +207,27 @@ def archive_review(review_text, product_name, persona_name, threshold=0.35, is_s
 
 def archive_batch(reviews, persona_name, threshold=0.35):
     """يحفظ دفعة تقييمات — نفس ضمان archive_review الذرّي، بقفل واحد للدفعة
-    كاملة لا قفل لكل عنصر. يرجع قائمة bool بترتيب reviews (True = حُفظ)."""
+    كاملة لا قفل لكل عنصر. يرجع قائمة bool بترتيب reviews (True = حُفظ).
+
+    الفحص يقع مقابل نصوص الأرشيف *بعد* دمج ما أُضيف للتوّ من هذه الدفعة
+    نفسها — لا مقابل قراءة ملف ثابتة طوال الحلقة. كان is_duplicate(...,
+    against_archive_only=True) يستدعي get_used_texts (قراءة ملف) في كل
+    تكرار، والملف لا يُكتب إلا بعد انتهاء الحلقة كاملة (_save_archive
+    مؤجَّلة)، فعنصر لاحق في نفس الدفعة لا يرى عنصراً سابقاً أُضيف للتوّ.
+    الأثر الأوضح: أول دفعة على أرشيف غير موجود (لا مفتاح كاش لإبطاله)،
+    حيث كل قراءة تُرجع قاموساً فارغاً جديداً — نص مكرر حرفياً مرتين في
+    الدفعة نفسها كان يُقبَل مرتين معاً.
+    """
     results = []
     saved_texts = []
     with _ArchiveLock(ARCHIVE_FILE):
         arc = _load_archive()
+        prior_texts = [r.get('text', '') for r in arc['reviews'][-MAX_ARCHIVE:]]
         changed = False
         for rv in reviews:
             text = rv.get('text', '')
-            if is_duplicate(text, threshold=threshold, against_archive_only=True):
+            norm = _normalize(text)
+            if not norm or _matches_any_normalized(norm, prior_texts, threshold):
                 results.append(False)
                 continue
             arc['reviews'].append({
@@ -224,6 +236,7 @@ def archive_batch(reviews, persona_name, threshold=0.35):
                 'persona': persona_name,
                 'ts': int(time.time())
             })
+            prior_texts.append(text)  # يراه فحص العنصر التالي في الدفعة نفسها
             changed = True
             saved_texts.append(text)
             results.append(True)
@@ -372,6 +385,31 @@ def _thresholds_for(n_words, base_threshold):
     return base_threshold, 3
 
 
+def _matches_any_normalized(norm, prior_texts, threshold=0.35):
+    """يقارن نصاً مُطبَّعاً مقابل قائمة نصوص خام صريحة — جوهر is_duplicate
+    بلا أي اعتماد على مصدر القائمة (ملف/جلسة/غير ذلك). مستخرَجة كي تستطيع
+    archive_batch فحص دفعتها الداخلية (عناصر أُضيفت للتوّ في نفس الحلقة
+    ولم تُكتب للملف بعد) بنفس منطق المطابقة تماماً، لا نسخة مبسّطة تتباعد.
+    """
+    if not norm:
+        return True
+    n_words = len(norm.split())
+    if n_words <= SHORT_MAX_WORDS:
+        return any(_normalize(old) == norm for old in prior_texts)
+    thr, min_bigrams = _thresholds_for(n_words, threshold)
+    for old in prior_texts:
+        on = _normalize(old)
+        if not on:
+            continue
+        if on == norm:
+            return True
+        if _jaccard_similarity(norm, on) > thr:
+            return True
+        if _bigram_overlap(norm, on) >= min_bigrams:
+            return True
+    return False
+
+
 def is_duplicate(new_text, threshold=0.35, is_store_review=False, against_archive_only=False):
     """هل النص مكرر مقابل الأرشيف + الجلسة؟
 
@@ -402,26 +440,7 @@ def is_duplicate(new_text, threshold=0.35, is_store_review=False, against_archiv
     prior = list(get_used_texts(limit=MAX_ARCHIVE))
     if not against_archive_only:
         prior += list(_session_recent)
-    n_words = len(norm.split())
-
-    # النص القصير: التطابق بعد التطبيع هو المعيار الصالح الوحيد.
-    # («ريحته حلوة» و«ريحته تفتح النفس» يتشاركان كلمة — ليسا تكراراً.)
-    if n_words <= SHORT_MAX_WORDS:
-        return any(_normalize(old) == norm for old in prior)
-
-    thr, min_bigrams = _thresholds_for(n_words, threshold)
-    for old in prior:
-        on = _normalize(old)
-        if not on:
-            continue
-        if on == norm:
-            return True
-        if _jaccard_similarity(norm, on) > thr:
-            return True
-        if _bigram_overlap(norm, on) >= min_bigrams:
-            return True
-
-    return False
+    return _matches_any_normalized(norm, prior, threshold)
 
 def get_burned_words():
     """الكلمات المحروقة التي لا يجب استخدامها الآن"""
