@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-import sys, os, json, re, random, requests as http_req, time
+import sys, os, json, re, random, hmac, requests as http_req, time
 from requests.adapters import HTTPAdapter
+from dotenv import load_dotenv
 try:
     from urllib3.util.retry import Retry
 except ImportError:  # توافق مع إصدارات urllib3 الأقدم
@@ -14,6 +15,7 @@ except Exception:
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
+from empathy_engine import mark_synthetic_output
 
 app = Flask(__name__)
 # CORS مقيّد على نطاقات متجرك — اضبط ALLOWED_ORIGINS في البيئة (مفصولة بفواصل).
@@ -253,13 +255,9 @@ print(f'\U0001f4e6 Archive: {len(_load_archive().get("reviews",[]))} reviews')
 # ═══════════════════════════════════════════════════════════
 # OpenRouter AI — نصوص فريدة لكل شخصية وعطر
 # ═══════════════════════════════════════════════════════════
-# حمّل .env يدوياً (os مستورد في الأعلى)
+# حمّل .env المحلي من دون أن يستبدل متغيرات الاستضافة الأعلى أولوية.
 _env_path = BASE_DIR / '.env'
-if _env_path.exists():
-    for line in _env_path.read_text(encoding='utf-8').strip().split('\n'):
-        if '=' in line and not line.startswith('#'):
-            k, v = line.split('=', 1)
-            os.environ[k.strip()] = v.strip()
+load_dotenv(_env_path, override=False)
 
 # ── مفتاح الـ AI ──
 # يقبل عدة أسماء شائعة صراحةً، ثم — إن لم يجد — يمسح البيئة عن أي متغيّر يحمل
@@ -288,16 +286,32 @@ if not AI_KEY:
 
 AI_URL = os.environ.get('AI_URL', 'https://openrouter.ai/api/v1/chat/completions').strip()
 AI_MODEL = os.environ.get('AI_MODEL', 'google/gemini-2.5-flash').strip()  # قابل للتبديل عبر البيئة
-AI_TIMEOUT = int(os.environ.get('AI_TIMEOUT', '45'))   # مهلة أطول: نقبل البطء مقابل تقييم صحيح
+AI_TIMEOUT = _safe_int(os.environ.get('AI_TIMEOUT', '45'), 45, 5, 180)
 AI_TEMPERATURE = 0.9     # درجة إبداع عالية لضمان تنوع النصوص
 
 # سجل حالة المفتاح وقت الإقلاع — يظهر في لوج Railway حتى تحت gunicorn
 # (الطباعة القديمة كانت داخل if __name__=='__main__' ولا تعمل مع gunicorn).
-print(('🔑 AI_KEY: loaded from %s (***%s)' % (AI_KEY_SOURCE, AI_KEY[-6:]))
+print('🔑 AI_KEY: configured'
       if AI_KEY else
       '🔑 AI_KEY: MISSING — لم يُعثر على أي مفتاح OpenRouter في متغيّرات البيئة',
       flush=True)
 print('🤖 AI_MODEL: %s' % AI_MODEL, flush=True)
+
+# لا تُفعّل واجهات التشخيص الإدارية إلا عند ضبط رمز مستقل في بيئة الخادم.
+ADMIN_TOKEN = _clean_key(os.environ.get('ADMIN_TOKEN'))
+
+
+def _is_admin_request():
+    """تحقق ثابت الزمن من رمز الإدارة من دون تسجيل قيمته."""
+    provided = request.headers.get('X-Admin-Token', '')
+    return bool(ADMIN_TOKEN) and hmac.compare_digest(provided, ADMIN_TOKEN)
+
+
+def _admin_guard():
+    """أخفِ مسارات الإدارة عند غياب رمز صحيح لتقليل سطح الاستكشاف."""
+    if not _is_admin_request():
+        return jsonify({'error': 'not_found'}), 404
+    return None
 
 # آخر خطأ فعلي من الـ AI — يُعرض في /api/ai-check وفي رسائل الفشل بدل الرسالة العامة
 _LAST_AI_ERROR = {'when': None, 'status': None, 'message': None}
@@ -442,15 +456,9 @@ _EMOJI_RE = re.compile(
     '\U00002190-\U000021FF\U00002B00-\U00002BFF️‍•]+')
 
 
-def _humanize(text):
-    """يزيل كل علامات الترقيم والرموز والإيموجي ويترك تدفّقاً عربياً طبيعياً."""
-    if not text:
-        return ''
-    t = text.replace('\n', ' ').replace('\r', ' ')
-    t = _EMOJI_RE.sub(' ', t)
-    t = _PUNCT_RE.sub(' ', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t
+# مسار النص النهائي وبوابة التفرّد — مصدر واحد مشترك مع streamlit_app (review_text)
+from review_text import (humanize as _humanize, finalize_review_text,
+                         write_unique as rt_write_unique)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -471,58 +479,51 @@ def _register(text):
             pass
 
 
-def _ai_unique_json(prompt, max_tokens, attempts=4, temp_step=0.06):
-    """يستدعي AI متعدّد المحاولات حتى يحصل على JSON بنص فريد.
+def _ai_unique_json(prompt, max_tokens, finalize, attempts=4, temp_step=0.06):
+    """يستدعي AI متعدّد المحاولات حتى يحصل على JSON بنص **نهائي** فريد.
 
-    يصعّد الحرارة والتلميح في كل محاولة. يرجع آخر dict صالح (قد يكون مكرراً
-    لو فشلت كل المحاولات — المستدعي يلجأ لشبكة أمان فريدة).
+    يرجع (rv_dict، النص النهائي). عند فشل كل المحاولات يرجع أفضل جهد (قد يكون
+    مكرراً) — لكن بعد فحص حقيقي على النص المخزَّن لا على المخرج الخام.
+
+    finalize إلزامي: الفحص على نص والتخزين لنص آخر هو الخلل الأصلي بعينه.
     """
-    best = None
-    for k in range(attempts):
-        hint = '' if k == 0 else (
-            f'\n\n⚠️ المحاولة {k+1}: النص السابق مكرر أو قريب جداً من تقييم موجود. '
-            'غيّر البداية والكلمات والفكرة كلياً واكتب صياغة جديدة تماماً.')
-        out = _ai_call(prompt + hint, max_tokens=max_tokens,
-                       temperature=min(1.0, AI_TEMPERATURE + k * temp_step))
-        rv = extract_json(out)
-        if not rv or not rv.get('text'):
-            continue
-        best = rv
-        if not _is_dup(rv['text']):
-            return rv
-    return best
+    return rt_write_unique(
+        call=lambda p, mt, temp: _ai_call(p, max_tokens=mt, temperature=temp),
+        parse=extract_json,
+        finalize=finalize,
+        is_dup=_is_dup,
+        prompt=prompt, max_tokens=max_tokens, attempts=attempts,
+        base_temp=AI_TEMPERATURE, temp_step=temp_step, max_temp=1.0,
+    )
 
 
-def _ai_unique_text(prompt, max_tokens, attempts=4, parser=None, temp_step=0.06):
+def _ai_unique_text(prompt, max_tokens, finalize, attempts=4, parser=None, temp_step=0.06):
     """مثل _ai_unique_json لكن يرجع نصاً مفرداً (يدعم parser مخصص مثل parse_ai_reply)."""
     parser = parser or (lambda out: ((extract_json(out) or {}).get('text', '') if out else ''))
-    best = ''
-    for k in range(attempts):
-        hint = '' if k == 0 else (
-            f'\n\n⚠️ المحاولة {k+1}: الرد السابق مكرر — غيّر الصياغة والبداية والكلمات كلياً.')
-        out = _ai_call(prompt + hint, max_tokens=max_tokens,
-                       temperature=min(1.0, AI_TEMPERATURE + k * temp_step))
-        text = (parser(out) or '').strip()
-        if not text:
-            continue
-        best = text
-        if not _is_dup(text):
-            return text
-    return best
+    _, text = rt_write_unique(
+        call=lambda p, mt, temp: _ai_call(p, max_tokens=mt, temperature=temp),
+        parse=lambda out: ({'text': parser(out)} if (parser(out) or '').strip() else None),
+        finalize=finalize,
+        is_dup=_is_dup,
+        prompt=prompt, max_tokens=max_tokens, attempts=attempts,
+        base_temp=AI_TEMPERATURE, temp_step=temp_step, max_temp=1.0,
+    )
+    return text
 
 
-def _ai_write_json(prompt, max_tokens, attempts=5):
-    """يكتب عبر AI فقط (لا قوالب). يرجع dict أو يرفع AIUnavailable عند تعذّر الـ AI.
+def _ai_write_json(prompt, max_tokens, finalize, attempts=5):
+    """يكتب عبر AI فقط (لا قوالب). يرجع (dict، نص نهائي) أو يرفع AIUnavailable.
 
     إن عاد الـ AI بنص (حتى لو قريب من سابق) نقبله كأفضل جهد للتفرّد.
     None تعني انقطاع الربط أو نفاد الرصيد → نتوقف ولا نكتب.
     """
-    rv = _ai_unique_json(prompt, max_tokens=max_tokens, attempts=attempts)
-    if not rv or not rv.get('text'):
+    rv, text = _ai_unique_json(prompt, max_tokens=max_tokens, finalize=finalize,
+                               attempts=attempts)
+    if not rv or not text:
         # قانون 4: عند تعذّر الـ AI (انقطاع/نفاد رصيد) نتوقّف ولا نفبرك تقييمًا.
         # المستدعون ومعالجات except AIUnavailable يترجمونه إلى 503 عبر _ai_unavailable_response().
         raise AIUnavailable('AI returned no usable review — stopping (no fabricated fallback, Law 4)')
-    return rv
+    return rv, text
 
 
 def _used_texts_block(limit=30, persona_name=None):
@@ -575,6 +576,24 @@ def _plan_review(persona, pf, perfumes, used_block):
     return _make_master_prompt(persona, pf['name'], used_block, extra_block=cross)
 
 
+def _make_review_finalizer(persona, allow_words):
+    """يبني دالة النص النهائي لهذه الشخصية — نفس بناء streamlit_app حرفيًّا.
+
+    أخطاء الشخصية الإملائية (has_typo) جزء من صوتها وتُطبَّق **داخل** المسار
+    النهائي؛ تطبيقها بعد الفحص كان يغيّر المخزَّن عمّا فُحص. ليست أداة تفرّد.
+    """
+    typo_fn = None
+    if USE_DIALECTS and persona.get('has_typo', False):
+        typo_fn = lambda t: apply_typos(t, probability=1.0)
+    return lambda t: finalize_review_text(
+        t,
+        allow_words=allow_words,
+        humanizer=(lambda x: hz_humanize_output(x, kind='review')) if USE_HUMANIZER else None,
+        strip_tail=strip_broken_tail if USE_SEMANTIC_GUARD else None,
+        typo_fn=typo_fn,
+    )
+
+
 def _write_review(persona, pf, prompt, params):
     """مرحلة (الكتابة): الـ AI فقط يكتب — لا قوالب احتياطية.
 
@@ -586,44 +605,35 @@ def _write_review(persona, pf, prompt, params):
     mx = params.get('len_target') or 4
     _allow = mx + (1 if mx <= 4 else max(2, mx // 5))  # سماحية تجاوز صغيرة
     max_tokens = 80 + mx * 8
-    rv = _ai_write_json(prompt, max_tokens=max_tokens, attempts=5)  # يرفع AIUnavailable عند الفشل
+    # مسار النص النهائي — نفس ما سيُخزَّن، فتفحصه بوابة التفرّد على حقيقته.
+    # (القصّ عند _allow كان يُوحّد مخرجات مختلفة بعد اجتيازها الفحص الخام.)
+    _finalize = _make_review_finalizer(persona, _allow)
+    rv, _text = _ai_write_json(prompt, max_tokens=max_tokens,
+                               finalize=_finalize, attempts=5)  # يرفع AIUnavailable عند الفشل
     # ══ الحارس الدلالي: نزيف/بتر/تجاوز طول → إعادة توليد بدل القصّ الصامت ══
     if USE_SEMANTIC_GUARD:
         for _k in range(2):
-            _t = _humanize(rv.get('text', ''))
-            _viol = guard_violations(_t, max_words=_allow)
+            _viol = guard_violations(_text, max_words=_allow)
             # طبقة الأنسنة: نبرة إعلانية/آلية أو خاتمة عامة → تُعامَل كمخالفة تُعاد
             if USE_HUMANIZER:
-                _viol = _viol + hz_content_tells(_t)
+                _viol = _viol + hz_content_tells(_text)
             if not _viol:
                 break
-            _hint = (f'\n\n⚠️ رُفض النص السابق «{_t}» ({"، ".join(_viol)}). '
+            _hint = (f'\n\n⚠️ رُفض النص السابق «{_text}» ({"، ".join(_viol)}). '
                      f'اكتب تقييماً جديداً عن العطر نفسه فقط، جملة مكتملة المعنى، {mx} كلمات كحد أقصى.')
-            _nxt = _ai_unique_json(prompt + _hint, max_tokens=max_tokens, attempts=2)
-            if _nxt and _nxt.get('text'):
-                rv['text'] = _nxt['text']
+            _nxt, _nxt_text = _ai_unique_json(prompt + _hint, max_tokens=max_tokens,
+                                              finalize=_finalize, attempts=2)
+            if _nxt and _nxt_text:
+                rv, _text = _nxt, _nxt_text
             else:
                 break
+    rv['text'] = _text
     rv['price'] = pf['price']
     rv['brand'] = pf['brand']
     rv['pg'] = pf['g']
     rv['product'] = pf['name']
     rv['pattern'] = params.get('pattern', '')
-    # أخطاء إملائية طبيعية (تزيد التفرّد ولا تنقصه)
-    if USE_DIALECTS and persona.get('has_typo', False):
-        rv['text'] = apply_typos(rv['text'], probability=1.0)
-    # تنظيف نهائي: أنسنة (إزالة إطار المساعد/الماركداون/الشرطات) ثم نص متدفّق بلا ترقيم
-    _txt = rv.get('text', '')
-    if USE_HUMANIZER:
-        _txt = hz_humanize_output(_txt, kind='review')
-    rv['text'] = _humanize(_txt)
-    # ══ قص أخير عند الحد المعاين + إنقاذ الذيل المبتور (لا شظايا) ══
-    _words = rv['text'].split()
-    if len(_words) > _allow:
-        _words = _words[:_allow]
-    if USE_SEMANTIC_GUARD:
-        _words = strip_broken_tail(_words)
-    rv['text'] = ' '.join(_words)
+    rv = mark_synthetic_output(rv)
 
     if USE_AR_TRACK:
         ar_track_pattern(params.get('pattern', 'default'))
@@ -688,16 +698,23 @@ def _ai_store_review(persona):
     avoid_line = (f"\n- ممنوع الحديث عن: {'، '.join(sorted(blocked))} (تكرّرت كثيرًا)" if blocked else '')
 
     prompt = build_store_prompt(persona, band, aspects, opener, used_block, avoid_line)
-    rv = _ai_write_json(prompt, max_tokens=200, attempts=5)  # يرفع AIUnavailable عند الفشل
 
     def _finalize(text):
+        """النص النهائي لتقييم المتجر — يشمل سقف الطول كي تفحص البوابة المخزَّن فعلاً."""
         if USE_HUMANIZER:
             text = hz_humanize_output(text, kind='store')  # إزالة إطار المساعد/الماركداون
         text = _humanize(text)  # بلا ترقيم أو رموز
         text = re.sub(r'\s+', ' ', re.sub(r'[0-9٠-٩]+', ' ', text)).strip()  # صفر أرقام (مسار المتجر)
-        return strip_store_vocatives(text, persona.get('name'), _STORE_NAMES)  # منع النداء حتميًّا
+        text = strip_store_vocatives(text, persona.get('name'), _STORE_NAMES)  # منع النداء حتميًّا
+        words = text.split()
+        if len(words) > hi:
+            words = words[:hi]
+            if USE_SEMANTIC_GUARD:
+                words = strip_broken_tail(words)
+        return ' '.join(words)
 
-    text = _finalize(rv.get('text', ''))
+    rv, text = _ai_write_json(prompt, max_tokens=200, finalize=_finalize,
+                              attempts=5)  # يرفع AIUnavailable عند الفشل
 
     # (3) حارس موحّد: استعارة فخامة / موضوع مشبع / تجاوز الطول → إعادة توليد موجَّهة
     for _k in range(3):
@@ -717,20 +734,16 @@ def _ai_store_review(persona):
         if not problems:
             break
         hint = "\n\n⚠️ أعد الكتابة: " + " · ".join(problems)
-        nxt = _ai_unique_json(prompt + hint, max_tokens=200, attempts=2)
-        if not (nxt and nxt.get('text')):
+        nxt, nxt_text = _ai_unique_json(prompt + hint, max_tokens=200,
+                                        finalize=_finalize, attempts=2)
+        if not (nxt and nxt_text):
             break
-        text = _finalize(nxt['text'])
+        rv, text = nxt, nxt_text
 
-    # (4) ضمانات حتمية: صفر استعارة فخامة + احترام سقف نطاق الطول (كما يقصّ مسار المنتج)
+    # (4) ضمان حتمي أخير: صفر استعارة فخامة (سقف الطول مطبَّق داخل _finalize)
     text = scrub_luxury_metaphor(text)
-    words = text.split()
-    if len(words) > hi:
-        words = words[:hi]
-        if USE_SEMANTIC_GUARD:
-            words = strip_broken_tail(words)
-    text = ' '.join(words)
     rv['text'] = text
+    rv = mark_synthetic_output(rv)
 
     # (5) تسجيل الموضوع النهائي في عدّاد الجلسة (بعد التثبيت)
     _store_topics.record(text)
@@ -1006,66 +1019,27 @@ def health():
         },
         'products': len(PRODUCTS),
         'archive': len(_load_archive().get('reviews', [])),
-        'data_dir': str(DATA_DIR),
         'ai_key_loaded': bool(AI_KEY),
-        'ai_key_source': AI_KEY_SOURCE or None,
         'ai_model': AI_MODEL,
     })
 
 
 @app.route('/api/ai-check')
 def ai_check():
-    """تشخيص حيّ لحالة مفتاح OpenRouter — يجيب: هل المفتاح محمّل؟ وما ردّ الـ AI فعلاً؟
+    """تشخيص إداري محلي لا ينفذ طلباً خارجياً ولا يعرض أي جزء من المفتاح."""
+    if not _is_admin_request():
+        return jsonify({'error': 'not_found'}), 404
 
-    افتح هذا الرابط في المتصفّح لمعرفة السبب الحقيقي عند فشل التوليد بدل
-    الرسالة العامة «تعذّر الاتصال». يعرض حالة HTTP الفعلية من OpenRouter
-    (401 = مفتاح خاطئ · 402 = نفاد رصيد · 404 = نموذج غير موجود).
-    """
     info = {
         'key_loaded': bool(AI_KEY),
-        'key_source': AI_KEY_SOURCE or None,
-        'key_masked': ('***' + AI_KEY[-6:]) if AI_KEY else None,
         'model': AI_MODEL,
-        'url': AI_URL,
         'last_error': _LAST_AI_ERROR,
     }
     if not AI_KEY:
         info['ok'] = False
-        info['reason'] = ('لا يوجد مفتاح — لم يُعثر على أي متغيّر بيئة يحمل مفتاح '
-                          'OpenRouter. أضِف AI_KEY (أو OPENROUTER_API_KEY) في '
-                          'Railway → Variables ثم أعد النشر (Redeploy).')
+        info['reason'] = 'لا يوجد مفتاح AI مضبوط في بيئة الخادم.'
         return jsonify(info), 200
-    # ping حقيقي بأقل عدد توكنز لكشف السبب الفعلي
-    try:
-        r = _ai_session.post(AI_URL, json={
-            'model': AI_MODEL,
-            'messages': [{'role': 'user', 'content': 'قل: تم'}],
-            'max_tokens': 5,
-        }, timeout=AI_TIMEOUT)
-        info['http_status'] = r.status_code
-        info['ok'] = (r.status_code == 200)
-        if r.status_code == 200:
-            try:
-                info['sample'] = r.json()['choices'][0]['message']['content'][:80]
-            except Exception:
-                info['sample'] = ''
-        else:
-            try:
-                info['error'] = r.json().get('error', {})
-            except Exception:
-                info['error'] = r.text[:300]
-            if r.status_code == 401:
-                info['reason'] = 'المفتاح مرفوض (401) — القيمة غير صحيحة أو منتهية. انسخ مفتاحاً جديداً من openrouter.ai/keys.'
-            elif r.status_code == 402:
-                info['reason'] = 'نفاد الرصيد (402) — أضِف رصيداً في حساب OpenRouter.'
-            elif r.status_code == 404:
-                info['reason'] = f'النموذج «{AI_MODEL}» غير متاح (404) — بدّله عبر متغيّر البيئة AI_MODEL.'
-            elif r.status_code == 429:
-                info['reason'] = 'تجاوز الحد (429) — انتظر قليلاً أو ارفع حد حسابك في OpenRouter.'
-    except Exception as e:
-        info['ok'] = False
-        info['error'] = str(e)[:300]
-        info['reason'] = 'تعذّر الوصول إلى OpenRouter (شبكة/مهلة).'
+    info['ok'] = True
     return jsonify(info), 200
 
 
@@ -1075,17 +1049,17 @@ def _ai_unavailable_response():
     reason = _LAST_AI_ERROR.get('message')
     if not AI_KEY or status == 'no_key':
         msg = ('مفتاح OpenRouter غير محمّل. اضبط AI_KEY أو OPENROUTER_API_KEY في '
-               'Railway ثم أعد النشر. افتح /api/ai-check للتشخيص.')
+               'بيئة الخادم ثم أعد النشر.')
     elif status == 401:
-        msg = 'المفتاح مرفوض من OpenRouter (401) — القيمة غير صحيحة أو منتهية. جدّد المفتاح. افحص /api/ai-check.'
+        msg = 'المفتاح مرفوض من OpenRouter (401) — القيمة غير صحيحة أو منتهية. جدّد المفتاح.'
     elif status == 402:
-        msg = 'نفد رصيد OpenRouter (402) — أضِف رصيداً للحساب. افحص /api/ai-check.'
+        msg = 'نفد رصيد OpenRouter (402) — أضِف رصيداً للحساب.'
     elif status == 404:
-        msg = f'النموذج «{AI_MODEL}» غير متاح (404) — بدّله عبر متغيّر AI_MODEL. افحص /api/ai-check.'
+        msg = f'النموذج «{AI_MODEL}» غير متاح (404) — بدّله عبر متغيّر AI_MODEL.'
     elif reason:
-        msg = f'تعذّر التوليد — سبب الـ AI: {reason}. افحص /api/ai-check للتفاصيل.'
+        msg = f'تعذّر التوليد — سبب الـ AI: {reason}.'
     else:
-        msg = 'تعذّر الاتصال بالذكاء الاصطناعي أو نفد الرصيد — لم تتم كتابة أي تقييم. افحص /api/ai-check.'
+        msg = 'تعذّر الاتصال بالذكاء الاصطناعي أو نفد الرصيد — لم تتم كتابة أي تقييم.'
     return jsonify({
         'error': 'ai_unavailable',
         'message': msg,
@@ -1152,7 +1126,12 @@ def new_phone():
 
 @app.route('/api/git-push', methods=['POST'])
 def git_push():
-    """رفع التعديلات إلى Railway عبر git push"""
+    """رفع يدوي محكوم؛ معطّل افتراضياً ولا يعمل بلا رمز إدارة."""
+    denied = _admin_guard()
+    if denied:
+        return denied
+    if os.environ.get('ENABLE_GIT_PUSH', '').strip().lower() not in {'1', 'true', 'yes'}:
+        return jsonify({'ok': False, 'error': 'git_push_disabled'}), 403
     import subprocess
     try:
         cwd = os.environ.get('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
@@ -1187,6 +1166,9 @@ def archive_stats_detail():
 
 @app.route('/api/archive/clear', methods=['POST'])
 def archive_clear():
+    denied = _admin_guard()
+    if denied:
+        return denied
     if USE_ANTI_REPEAT:
         ar_clear_archive()
     else:
@@ -1248,6 +1230,9 @@ def api_intel_dashboard():
 @app.route('/api/intel/refresh', methods=['POST'])
 def api_intel_refresh():
     """تحديث البيانات من Algolia"""
+    denied = _admin_guard()
+    if denied:
+        return denied
     if not USE_INTEL:
         return jsonify({'error': 'mahalli_intel not available'}), 503
     result = intel_refresh()
@@ -1379,11 +1364,9 @@ def api_generate_thread():
     # استدعاء الـ AI لكل رد — فريد لا يتكرر. عند تعذّر الـ AI نتوقف ولا نكتب قوالب.
     thread_replies = []
     for reply_info in thread_data['replies']:
+        # التنظيف داخل بوابة التفرّد لا بعدها (نفس قاعدة مسار التقييم)
         text = _ai_unique_text(reply_info['prompt'], max_tokens=150,
-                               attempts=4, parser=parse_ai_reply)
-        if not text:
-            return _ai_unavailable_response()
-        text = _humanize(text)  # بلا ترقيم أو رموز
+                               finalize=_humanize, attempts=4, parser=parse_ai_reply)
         if not text:
             return _ai_unavailable_response()
         _register(text)
@@ -1416,7 +1399,7 @@ if __name__ == '__main__':
     if USE_PATTERNS:
         print(f'   Patterns: {len(REVIEW_PATTERNS)} in {len(PATTERN_CATEGORIES)} categories')
     print(f'   AI: {AI_MODEL}')
-    print(f'   AI_KEY: {"***" + AI_KEY[-6:] if AI_KEY else "MISSING!"}')
+    print(f'   AI_KEY: {"configured" if AI_KEY else "MISSING!"}')
     print('='*50)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

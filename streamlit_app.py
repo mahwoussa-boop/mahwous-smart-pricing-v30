@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 🌸 مساعدي في شراء العطور — واجهة Streamlit الرئيسية
-تطبيق ذكي لتوليد شخصيات وتقييمات عطور بالذكاء الاصطناعي
+تطبيق ذكي لمحاكاة شخصيات بحثية وتحليل تجربة شراء العطور بالذكاء الاصطناعي
 مع لوحة استخبارات محلي وتصدير CSV
 """
 import streamlit as st
 import sys, json, random, time, os, csv, io, re
 import requests as http_req
+from dotenv import load_dotenv
 from pathlib import Path
 from datetime import datetime
+from empathy_engine import SYNTHETIC_DISCLOSURE_AR, mark_synthetic_output
 
 # ضمان ترميز UTF-8 للطباعة (يمنع تعطّل الإيموجي على كونسول Windows cp1256)
 try:
@@ -27,6 +29,7 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).parent
+load_dotenv(BASE_DIR / '.env', override=False)
 # مسار ثابت للبيانات — Railway يضبطه على /data ليبقى بين عمليات النشر
 DATA_DIR = Path(os.environ.get('DATA_DIR', str(BASE_DIR)))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -145,20 +148,8 @@ AI_KEY = (os.environ.get('AI_KEY')
           or os.environ.get('OPENROUTER_KEY')
           or os.environ.get('OPENROUTER_API')
           or '').strip()
-if not AI_KEY:
-    _env = BASE_DIR / '.env'
-    if _env.exists():
-        try:
-            for line in _env.read_text(encoding='utf-8').strip().split('\n'):
-                if '=' in line and not line.startswith('#'):
-                    k, v = line.split('=', 1)
-                    if k.strip() in ('AI_KEY', 'OPENROUTER_API_KEY', 'OPENROUTER_KEY'):
-                        AI_KEY = v.strip()
-        except Exception:
-            pass
-
-AI_URL = 'https://openrouter.ai/api/v1/chat/completions'
-AI_MODEL = 'google/gemini-2.5-flash'
+AI_URL = os.environ.get('AI_URL', 'https://openrouter.ai/api/v1/chat/completions').strip()
+AI_MODEL = os.environ.get('AI_MODEL', 'google/gemini-2.5-flash').strip()
 
 # ═══════════════════════════════════════════════════════════
 #  دوال AI
@@ -166,6 +157,8 @@ AI_MODEL = 'google/gemini-2.5-flash'
 
 def ai_call(prompt, max_tokens=1200, temperature=1.0):
     """استدعاء API الذكاء الاصطناعي عبر OpenRouter"""
+    if not AI_KEY:
+        return None
     try:
         r = http_req.post(AI_URL, headers={
             'Authorization': f'Bearer {AI_KEY}',
@@ -205,47 +198,27 @@ def _extract_json(result):
         return None
 
 
-# تنظيف بشري — يزيل كل ترقيم/رموز/إيموجي (منقول من app.py)
-_PUNCT_RE = re.compile(r'[،,؛;:.…·•\-–—_\"“”\'‘’`«»()\[\]{}<>/\\|*#^~=+%&@!؟?]+')
-_EMOJI_RE = re.compile(
-    '[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF'
-    '\U00002190-\U000021FF\U00002B00-\U00002BFF️‍•]+')
+# تنظيف بشري + مسار النص النهائي — مصدر واحد مشترك مع app.py (review_text)
+from review_text import humanize as _humanize, finalize_review_text, write_unique
 
 
-def _humanize(text):
-    """يزيل كل علامات الترقيم والرموز والإيموجي ويترك تدفّقاً عربياً طبيعياً."""
-    if not text:
-        return ''
-    t = text.replace('\n', ' ').replace('\r', ' ')
-    t = _EMOJI_RE.sub(' ', t)
-    t = _PUNCT_RE.sub(' ', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t
+def ai_write_unique(prompt, max_tokens, finalize, attempts=5, is_store=False,
+                    base_temp=0.9, temp_step=0.06):
+    """يكتب عبر AI مع بوابة تفرّد تفحص **النص النهائي** (بعد الأنسنة والقصّ).
 
+    يرجع (rv_dict, final_text)؛ (None, '') عند تعذّر الـAI كلياً.
 
-# شبكة أمان نهائية (تُستخدم فقط لو رجع الـ AI فارغاً تماماً) — نصوص طبيعية لا «ممتاز»
-def ai_write_unique(prompt, max_tokens, attempts=5, is_store=False, base_temp=0.9, temp_step=0.06):
-    """يكتب عبر AI مع منع التكرار: يصعّد الحرارة والتلميح حتى نص فريد.
-
-    يرجع dict صالح (أفضل-جهد حتى لو مكرر) أو None عند تعذّر الـ AI كلياً.
+    finalize إلزامي عمداً: تمريره اختيارياً كان يعيد الخلل الأصلي صامتاً —
+    فحص نص وتخزين نص آخر.
     """
-    best = None
-    for k in range(attempts):
-        hint = '' if k == 0 else (
-            f'\n\n⚠️ المحاولة {k+1}: النص السابق مكرر أو قريب جداً من تقييم موجود. '
-            'غيّر البداية والكلمات والفكرة كلياً واكتب صياغة جديدة تماماً.')
-        out = ai_call(prompt + hint, max_tokens=max_tokens,
-                      temperature=min(1.2, base_temp + k * temp_step))
-        rv = _extract_json(out)
-        if not isinstance(rv, dict):
-            continue
-        txt = (rv.get('text') or '').strip()
-        if not txt:
-            continue
-        best = rv
-        if not (USE_ANTI_REPEAT and ar_is_duplicate(txt, is_store_review=is_store)):
-            return rv
-    return best
+    return write_unique(
+        call=lambda p, mt, temp: ai_call(p, max_tokens=mt, temperature=temp),
+        parse=_extract_json,
+        finalize=finalize,
+        is_dup=(lambda t: bool(USE_ANTI_REPEAT and ar_is_duplicate(t, is_store_review=is_store))),
+        prompt=prompt, max_tokens=max_tokens, attempts=attempts,
+        base_temp=base_temp, temp_step=temp_step,
+    )
 
 # ═══════════════════════════════════════════════════════════
 #  أرشيف التقييمات
@@ -445,6 +418,25 @@ def gen_persona_full():
 #  توليد التقييمات بالذكاء الاصطناعي
 # ═══════════════════════════════════════════════════════════
 
+def _make_review_finalizer(persona, allow_words):
+    """يبني دالة النص النهائي لهذه الشخصية — تُستخدم داخل بوابة التفرّد وخارجها.
+
+    أخطاء الشخصية الإملائية جزء من صوتها (has_typo) وتُطبَّق **داخل** المسار
+    النهائي لا بعده؛ تطبيقها بعد الفحص كان يغيّر النص المخزَّن عمّا فُحص.
+    ليست أداة تفرّد ولا تُفتعَل لكسر التكرار.
+    """
+    typo_fn = None
+    if USE_DIALECTS and persona.get('has_typo'):
+        typo_fn = lambda t: apply_typos(t, 1.0)
+    return lambda t: finalize_review_text(
+        t,
+        allow_words=allow_words,
+        humanizer=(lambda x: hz_humanize_output(x, kind='review')) if USE_HUMANIZER else None,
+        strip_tail=strip_broken_tail if USE_SEMANTIC_GUARD else None,
+        typo_fn=typo_fn,
+    )
+
+
 def gen_reviews(persona, perfumes):
     """توليد تقييمات المنتجات — مُحصّن: تنظيف + منع تكرار + إطار هدية + بلا «ممتاز» وهمية."""
     pname = persona.get('name')
@@ -475,22 +467,15 @@ def gen_reviews(persona, perfumes):
             _tgt = review_params.get('len_target') or 4
             _allow = _tgt + (1 if _tgt <= 4 else max(2, _tgt // 5))
             mx = 80 + _tgt * 8
-            rv = ai_write_unique(prompt, max_tokens=mx)
-            txt = (rv.get('text') if isinstance(rv, dict) else '') or ''
-            # أخطاء إملائية طبيعية ثم تنظيف بشري
-            if txt.strip() and USE_DIALECTS and persona.get('has_typo'):
-                try:
-                    txt = apply_typos(txt, 1.0)
-                except Exception:
-                    pass
-            if USE_HUMANIZER:
-                txt = hz_humanize_output(txt, kind='review')  # أنسنة قبل التنظيف
-            txt = _humanize(txt)
+            # مسار النص النهائي — نفس ما سيُخزَّن بالضبط، فتفحصه بوابة التفرّد
+            # على حقيقته لا على المخرج الخام (القصّ كان يُوحّد مخرجات مختلفة).
+            _finalize = _make_review_finalizer(persona, _allow)
+            rv, txt = ai_write_unique(prompt, max_tokens=mx, finalize=_finalize)
             if not txt.strip():
                 # قانون 4: لا نص وهمي — نتوقف ونُظهر خطأ بدل الفبركة.
                 st.error('تعذّر الاتصال بالذكاء الاصطناعي أو نفد الرصيد — لم تتم كتابة أي تقييم.')
                 st.stop()
-            # ══ الحارس الدلالي: نزيف/بتر/تجاوز → إعادة توليد ثم قص وإنقاذ الذيل ══
+            # ══ الحارس الدلالي: نزيف/بتر/تجاوز → إعادة توليد (النتيجة تمرّ بنفس البوابة) ══
             if USE_SEMANTIC_GUARD:
                 _viol = guard_violations(txt, max_words=_allow)
                 if USE_HUMANIZER:
@@ -498,22 +483,17 @@ def gen_reviews(persona, perfumes):
                 if _viol:
                     _hint = (f'\n\n⚠️ رُفض النص السابق «{txt}» ({"، ".join(_viol)}). '
                              f'اكتب تقييماً جديداً عن العطر نفسه فقط، جملة مكتملة المعنى، {_tgt} كلمات كحد أقصى.')
-                    _rv2 = ai_write_unique(prompt + _hint, max_tokens=mx, attempts=2)
-                    _t2 = (_rv2.get('text') if isinstance(_rv2, dict) else '') or ''
+                    _rv2, _t2 = ai_write_unique(prompt + _hint, max_tokens=mx,
+                                                finalize=_finalize, attempts=2)
                     if _t2.strip():
-                        if USE_HUMANIZER:
-                            _t2 = hz_humanize_output(_t2, kind='review')
-                        txt = _humanize(_t2)
-                _w = txt.split()
-                if len(_w) > _allow:
-                    _w = _w[:_allow]
-                txt = ' '.join(strip_broken_tail(_w))
+                        rv, txt = (_rv2 if isinstance(_rv2, dict) else rv), _t2
             entry = rv if isinstance(rv, dict) else {}
             entry.update({
                 'product': pf['name'], 'brand': pf['brand'], 'price': pf['price'],
                 'rating': entry.get('rating', 5), 'text': txt,
                 'pattern': review_params.get('pattern', ''),
             })
+            entry = mark_synthetic_output(entry)
             if USE_ANTI_REPEAT:
                 ar_register_text(txt, pname)
             all_reviews.append(entry)
@@ -577,14 +557,20 @@ def gen_store_review(persona):
     prompt = build_store_prompt(persona, band, aspects, opener, ub, avoid_line)
 
     def _finalize(text):
+        """النص النهائي لتقييم المتجر — يشمل سقف الطول كي تفحص البوابة المخزَّن فعلاً."""
         if USE_HUMANIZER:
             text = hz_humanize_output(text or '', kind='store')  # إزالة إطار المساعد/الماركداون
         text = _humanize(text or '')  # بلا ترقيم أو رموز
         text = re.sub(r'\s+', ' ', re.sub(r'[0-9٠-٩]+', ' ', text)).strip()  # صفر أرقام
-        return strip_store_vocatives(text, pname, _STORE_NAMES)  # منع النداء حتميًّا
+        text = strip_store_vocatives(text, pname, _STORE_NAMES)  # منع النداء حتميًّا
+        words = text.split()
+        if len(words) > hi:
+            words = words[:hi]
+            if USE_SEMANTIC_GUARD:
+                words = strip_broken_tail(words)
+        return ' '.join(words)
 
-    rv = ai_write_unique(prompt, max_tokens=200, is_store=True)
-    txt = _finalize(rv.get('text') if isinstance(rv, dict) else '')
+    rv, txt = ai_write_unique(prompt, max_tokens=200, finalize=_finalize, is_store=True)
 
     # (3) حارس موحّد: استعارة فخامة / موضوع مشبع / تجاوز الطول → إعادة توليد موجَّهة
     for _k in range(3):
@@ -604,19 +590,14 @@ def gen_store_review(persona):
         if not problems:
             break
         hint = "\n\n⚠️ أعد الكتابة: " + " · ".join(problems)
-        nxt = ai_write_unique(prompt + hint, max_tokens=200, is_store=True)
-        if not (isinstance(nxt, dict) and nxt.get('text')):
+        nxt, nxt_txt = ai_write_unique(prompt + hint, max_tokens=200,
+                                       finalize=_finalize, is_store=True)
+        if not nxt_txt.strip():
             break
-        txt = _finalize(nxt['text'])
+        rv, txt = (nxt if isinstance(nxt, dict) else rv), nxt_txt
 
-    # (4) ضمانات حتمية: صفر استعارة فخامة + احترام سقف نطاق الطول
+    # (4) ضمان حتمي أخير: صفر استعارة فخامة (سقف الطول مطبَّق داخل _finalize)
     txt = scrub_luxury_metaphor(txt)
-    words = txt.split()
-    if len(words) > hi:
-        words = words[:hi]
-        if USE_SEMANTIC_GUARD:
-            words = strip_broken_tail(words)
-    txt = ' '.join(words)
 
     if not txt.strip():
         # قانون 4: لا نص وهمي — نتوقف ونُظهر خطأ بدل الفبركة.
@@ -631,7 +612,10 @@ def gen_store_review(persona):
             archive_review(txt, 'متجر مهووس', pname or '')
         except Exception:
             pass
-    return {'rating': rv.get('rating', 5) if isinstance(rv, dict) else 5, 'text': txt}
+    return mark_synthetic_output({
+        'rating': rv.get('rating', 5) if isinstance(rv, dict) else 5,
+        'text': txt,
+    })
 
 
 # ═══════════════════════════════════════════════════════════
@@ -844,6 +828,7 @@ st.markdown(
     f"• لهجات سعودية • أرشيف ذكي ({arc_count} تقييم)</p>",
     unsafe_allow_html=True,
 )
+st.warning(SYNTHETIC_DISCLOSURE_AR, icon=":material/science:")
 
 # ═══════════════════════════════════════════════════════════
 #  التبويبات الثلاثة
@@ -873,7 +858,7 @@ with tab1:
 
     count = st.selectbox("عدد الشخصيات:", [1, 3, 5, 10], index=0, key="persona_count")
 
-    if st.button("✨ ولّد شخصيات جديدة", type="primary", use_container_width=True):
+    if st.button("✨ ولّد شخصيات جديدة", type="primary", width="stretch"):
         results = []
         progress = st.progress(0, text="جاري التوليد بالذكاء الاصطناعي...")
         for i in range(count):
@@ -891,7 +876,7 @@ with tab1:
         st.session_state['results'] = results
 
     # زر: ولّد + انسخ الكل (يبني جدولاً جاهزاً للصق في Excel/Sheets)
-    if st.button("📋 ولّد + انسخ الكل", use_container_width=True, key="gen_copy_all"):
+    if st.button("📋 ولّد + انسخ الكل", width="stretch", key="gen_copy_all"):
         results = []
         progress = st.progress(0, text="جاري التوليد...")
         for i in range(count):
@@ -904,7 +889,7 @@ with tab1:
         progress.progress(1.0, text=f"✅ {count} شخصية جاهزة!")
         st.session_state['results'] = results
         # بناء نص مجمّع: صف لكل تقييم (مفصول بـ Tab)
-        rows = ["الاسم\tالجوال\tالعنوان\tالمنتج\tالنجوم\tالتقييم"]
+        rows = ["نوع المحتوى\tقابل للنشر\tالاسم\tالجوال\tالعنوان\tالمنتج\tالنجوم\tالمحاكاة"]
         for r in results:
             p = r['persona']
             for rv in r['reviews']:
@@ -912,6 +897,7 @@ with tab1:
                 if not text:
                     continue  # لا تسمح بنسخ تقييم فارغ
                 rows.append("\t".join([
+                    "اصطناعي للبحث الداخلي", "لا",
                     str(p.get('name', '')), str(p.get('phone', '')),
                     str(p.get('address', '')), str(rv.get('product', '')),
                     str(rv.get('rating', 5)), text,
@@ -1033,7 +1019,7 @@ with tab2:
 
         # --- زر التحديث ---
         st.markdown("")
-        if st.button("🔄 تحديث الآن", use_container_width=True, key="refresh_intel"):
+        if st.button("🔄 تحديث الآن", width="stretch", key="refresh_intel"):
             with st.spinner("جاري تحديث البيانات من Algolia..."):
                 try:
                     result = refresh_all_data()
@@ -1216,6 +1202,7 @@ with tab3:
         writer = csv.writer(output, quoting=csv.QUOTE_ALL)
         # رأس الجدول
         writer.writerow([
+            'نوع المحتوى', 'قابل للنشر',
             'اسم الشخصية', 'المدينة', 'الهاتف', 'العنوان', 'العمر',
             'النوع', 'النمط', 'المزاج', 'الخبرة', 'أسلوب الكتابة',
             'اللهجة', 'ذكر المنتج', 'إيموجي', 'أخطاء',
@@ -1227,6 +1214,7 @@ with tab3:
             store = r.get('store', {})
             for rv in r['reviews']:
                 writer.writerow([
+                    'اصطناعي للبحث الداخلي', 'لا',
                     p.get('name', ''), p.get('city', ''), p.get('phone', ''),
                     p.get('address', ''), p.get('age', ''),
                     'ذكر' if p.get('gender') == 'male' else 'أنثى',
@@ -1246,7 +1234,7 @@ with tab3:
             data=csv_data.encode('utf-8-sig'),
             file_name=f"personas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
         st.markdown(
             f"<p style='color:#9a9080;font-size:13px'>"
