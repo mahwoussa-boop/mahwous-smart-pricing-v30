@@ -1384,9 +1384,15 @@ def api_generate_thread():
                                finalize=_humanize, attempts=4, parser=parse_ai_reply)
         if not text:
             return _ai_unavailable_response()
+        reply_name = reply_info['persona'].get('name', 'عميل')
         _register(text)
+        # يُخزَّن في archive.json المشترك لا ذاكرة الجلسة وحدها — كانت الردود
+        # تُسجَّل بـ_register فقط (ذاكرة العملية)، وبعاملَي Gunicorn منفصلَي
+        # الذاكرة (Procfile: --workers 2) لا يرى العامل الآخر ردّاً سبق توليده
+        # في عامل مختلف، فيمكن أن يُعاد النص نفسه لاحقاً.
+        _archive_review(text, product_name, reply_name)
         thread_replies.append({
-            'name': reply_info['persona'].get('name', 'عميل'),
+            'name': reply_name,
             'city': reply_info['persona'].get('city', ''),
             'text': text,
             'type': reply_info['type'],
