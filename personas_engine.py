@@ -7,9 +7,12 @@ V3: SOCIO_PROFILES + GENERAL_HUMAN_CONTEXTS + pick_human_context + city_bias + o
 """
 import random
 import json
+import re
 import string
 import datetime as _dt
 from pathlib import Path
+
+from empathy_engine import build_empathy_profile
 
 BASE_DIR = Path(__file__).parent
 
@@ -1204,7 +1207,7 @@ def generate_persona(archetype=None):
     socio_class = socio.get('income_bracket', 'mid')
     occupation = socio.get('occupation_ar', archetype['label'])
 
-    return {
+    persona = {
         # بيانات أساسية
         'name': name,
         'age': age,
@@ -1231,6 +1234,10 @@ def generate_persona(archetype=None):
         'socio_class': socio_class,
         'occupation': occupation,
     }
+    persona['synthetic'] = True
+    persona['publishable'] = False
+    persona['empathy_profile'] = build_empathy_profile(persona)
+    return persona
 
 
 def generate_review_params(persona):
@@ -1308,10 +1315,20 @@ _FALLBACK_EXAMPLE_LINES = """- ممتاز
 - بطلب مره ثانيه
 - ريحة فخمة"""
 
-MASTER_PROMPT = """اكتب تقييم عطر بلهجة سعودية عامية. {length_rule}.
+MASTER_PROMPT = """اكتب محاكاة داخلية قصيرة لتقييم عطر بلهجة سعودية عامية. {length_rule}.
+
+تنبيه إلزامي: هذه شخصية افتراضية لأبحاث تجربة العميل وليست عميلاً حقيقياً.
+لا تدّعِ شراءً موثقاً ولا تقدّم المحاكاة كشهادة قابلة للنشر.
 
 المنتج: {product_name}
+{product_block}
 التقييم: {rating} نجوم
+
+## من يكتب (التزم بصوته لا بصوتك):
+{persona_block}
+
+## زاوية هذا التقييم:
+{pattern_block}
 
 ## أمثلة ({examples_note}):
 {examples_block}
@@ -1324,12 +1341,124 @@ MASTER_PROMPT = """اكتب تقييم عطر بلهجة سعودية عامية
   الجملة بكلمة إضافية لمجرد الوصول لعدد الكلمات المطلوب
 - لهجة سعودية عامية مو فصحى
 - بدون أي ترقيم أو إيموجي
-- لا تذكر اسم المنتج
+- {mention_rule}
 - {typo_rule}
+- اكتب عن هذا العطر تحديداً بما يميّزه (عائلته العطرية أو مكوّنه البارز)،
+  لا وصفاً عاماً يصلح لأي عطر
 - كلمات مختلفة تماماً عن كل ما سبق:
 {used_texts_block}
 
-أرجع JSON فقط: {{"rating": {rating}, "text": "...", "is_verified_purchase": true}}"""
+أرجع JSON فقط: {{"rating": {rating}, "text": "...", "synthetic": true, "publishable": false}}"""
+
+
+def build_persona_block(persona):
+    """هوية الكاتب كما تصل للنموذج فعلاً.
+
+    كانت كل بيانات الشخصية (عمر/مدينة/لهجة/مزاج/أسلوب/مهنة/خبرة) تُولَّد ثم
+    **لا تصل البرومبت إطلاقاً** — MASTER_PROMPT لم يكن يحمل أي حقل شخصية. فكان
+    كل الشخصيات تكتب بصوت واحد عام، وهذا مولّد التكرار المحتوائي: بلا صوت مميّز
+    لا يملك النموذج ما يقوله غير «ريحته حلوة وثابتة».
+    """
+    if not isinstance(persona, dict):
+        return '- عميل سعودي'
+    bits = []
+    gender_word = 'رجل' if persona.get('gender') == 'male' else 'امرأة'
+    age = persona.get('age')
+    bits.append(f'- {gender_word}' + (f' عمره {age}' if age else ''))
+    if persona.get('city'):
+        bits.append(f'- من {persona["city"]}')
+    if persona.get('dialect_name'):
+        bits.append(f'- يكتب بلهجة {persona["dialect_name"]} — التزم بمفرداتها')
+    if persona.get('occupation'):
+        bits.append(f'- {persona["occupation"]}')
+    if persona.get('label'):
+        bits.append(f'- الفئة: {persona["label"]}')
+    if persona.get('mood'):
+        bits.append(f'- مزاجه الآن: {persona["mood"]}')
+    if persona.get('writing_style'):
+        bits.append(f'- أسلوب كتابته: {persona["writing_style"]}')
+    exp = persona.get('expertise')
+    if exp:
+        bits.append(f'- خبرته بالعطور: {exp}' +
+                    (' — يستخدم مصطلحات دقيقة' if exp == 'خبير' else ' — يصف بإحساس عام لا بمصطلحات'))
+    # ذاكرة الرائحة: زاوية شخصية تمنع الوصف العام (فرضية بحثية لا حقيقة)
+    mem = (persona.get('empathy_profile') or {}).get('scent_memory_hypothesis') or {}
+    if mem.get('scene'):
+        bits.append(f'- ترتبط عنده الروائح بـ«{mem["scene"]}» — لمّح لها فقط إن ناسبت بعفوية')
+    return '\n'.join(bits)
+
+
+def build_product_block(product):
+    """بيانات المنتج الحقيقية من الكتالوج.
+
+    كان يصل اسم المنتج فقط، بينما الكتالوج يحمل العائلة العطرية (100%
+    تغطية) والمكوّنات (99%) والماركة والسعر — فلم يكن لدى النموذج ما يقوله
+    عن هذا العطر تحديداً، فيهرب للوصف العام المكرَّر.
+    """
+    if not isinstance(product, dict) or not product:
+        return ''
+    lines = []
+    if product.get('brand'):
+        lines.append(f'الماركة: {product["brand"]}')
+    fam = product.get('scent_family')
+    if fam:
+        lines.append(f'العائلة العطرية: {SCENT_FAMILY_AR.get(fam, fam)}')
+    if product.get('ingredients'):
+        # المكوّنات البارزة فقط — القائمة الكاملة تُغرق تقييماً من بضع كلمات
+        notes = [n.strip() for n in str(product['ingredients']).split('،') if n.strip()]
+        if notes:
+            lines.append('أبرز مكوّناته: ' + '، '.join(notes[:4]))
+    if product.get('product_type') and product['product_type'] != 'عطر':
+        lines.append(f'نوع المنتج: {product["product_type"]}')
+    if product.get('price'):
+        lines.append(f'سعره: {product["price"]} ريال')
+    if not lines:
+        return ''
+    return ('بيانات المنتج (لتكتب عنه هو تحديداً — لا تسردها ولا تذكر السعر '
+            'كرقم):\n- ' + '\n- '.join(lines))
+
+
+# أسماء العائلات العطرية بالعربية — الكتالوج يخزّنها بالإنجليزية
+SCENT_FAMILY_AR = {
+    'oriental': 'شرقية', 'woody': 'خشبية', 'floral': 'زهرية',
+    'fresh': 'منعشة', 'citrus': 'حمضية', 'aquatic': 'مائية',
+    'gourmand': 'حلوة/غورماند', 'musky': 'مسكية', 'spicy': 'حارّة',
+    'fruity': 'فاكهية', 'green': 'خضراء', 'leather': 'جلدية',
+}
+
+
+def _strip_word_counts(desc):
+    """يحذف عدد الكلمات من وصف النمط فقط — ويُبقي الموضوع كاملاً.
+
+    وصف النمط يحمل أحياناً عدّاً خاصاً به («عن الثبات بكلمتين لأربع») يناقض
+    length_rule المعاير (شوهد نمط «2-4 كلمة» مع len_target=1). الطول يحكمه
+    length_rule وحده؛ النمط يعطي الزاوية لا الطول. الحذف مقصور على الصيغ
+    العدّية كي لا يبتر أوصافاً مثل «5 نجوم مع شكوى تافهة».
+    """
+    if not desc:
+        return ''
+    d = re.sub(r'\(\s*\d+\s*[-–]\s*\d+\s*كلمة\s*\)', ' ', desc)
+    d = re.sub(r'\d+\s*كلمات?', ' ', d)
+    d = re.sub(r'\bب?كلم(?:ة|تين|ات)\b', ' ', d)
+    d = re.sub(r'\b(?:إلى|الى|لأربع|لاربع|لثلاث)\b', ' ', d)
+    return re.sub(r'\s+', ' ', d).strip()
+
+
+def build_pattern_block(review_params, len_target):
+    """زاوية التقييم (النمط) — كانت تُولَّد وتُخزَّن ولا تُقال للنموذج أبداً.
+
+    نُسقط عدد الكلمات المذكور داخل pattern_desc لأنه يناقض length_rule
+    (مثال حقيقي: نمط «عن الثبات بكلمتين لأربع» مع len_target=1).
+    """
+    desc = _strip_word_counts((review_params or {}).get('pattern_desc') or '')
+    if not desc:
+        # وصف النمط كان عدداً صرفاً (مثل «كلمة إلى 3 كلمات») — الطول محكوم
+        # بـlength_rule وحده، فلا زاوية موضوعية هنا.
+        desc = 'انطباع صادق واحد بلا موضوع محدّد'
+    line = f'- {desc}'
+    if len_target and len_target <= 3:
+        line += '\n- المساحة ضيقة جداً: اختر فكرة واحدة فقط وقُلها، ولا تجمع فكرتين'
+    return line
 
 
 # تنويع البدايات — كل تقييم يبدأ بأسلوب إنساني مختلف
@@ -1393,10 +1522,15 @@ def build_context_hints(persona, product):
     return "## تنبيهات سياقية (التزم بها بحذافيرها):\n- " + "\n- ".join(hints)
 
 
-def build_master_prompt(persona, product_name, review_params, used_texts_block='', extra_block=''):
+def build_master_prompt(persona, product_name, review_params, used_texts_block='',
+                        extra_block='', product=None):
     """بناء البرومبت — الطول من len_target المعاين من بيانات المنافسين.
 
     عند غياب المعاير (len_target) نتدرّج للسلوك القديم: 4 كلمات بحد أقصى.
+
+    product: قاموس المنتج من الكتالوج (ماركة/عائلة عطرية/مكوّنات/سعر). اختياري
+    للتوافق مع المستدعين القدامى، لكن تمريره هو ما يجعل التقييم عن هذا العطر
+    تحديداً بدل وصف عام يصلح لأي عطر.
     """
     len_target = review_params.get('len_target')
     if len_target:
@@ -1416,6 +1550,18 @@ def build_master_prompt(persona, product_name, review_params, used_texts_block='
 
     typo_rule = 'أضف خطأ إملائي طبيعي واحد' if persona.get('has_typo') else 'بدون أخطاء إملائية'
 
+    # تعارض محلول: القاعدة كانت «لا تذكر اسم المنتج» دائماً، بينما الشخصية تحمل
+    # mention_product و MENTION_STYLES معرَّفة لذلك — وكانت ميتة تماماً. صارت
+    # القاعدة تتبع الشخصية فعلاً. والمساحة الضيقة تمنع الذكر مهما كان الإعداد.
+    if persona.get('mention_product') and (not len_target or len_target >= 8):
+        mention_rule = random.choice(MENTION_STYLES)
+    else:
+        mention_rule = 'لا تذكر اسم المنتج'
+
+    persona_block = build_persona_block(persona)
+    product_block = build_product_block(product)
+    pattern_block = build_pattern_block(review_params, len_target)
+
     # أمثلة أسلوبية من نصوص المنافسين الحقيقية قرب الطول المستهدف — مرجعية
     # المفردات الفعلية لا مفردات الذكاء. تدرّج آمن للقائمة الثابتة عند غياب الكشط.
     _exemplars = _rc_exemplars(target_len=len_target, n=8)
@@ -1424,10 +1570,14 @@ def build_master_prompt(persona, product_name, review_params, used_texts_block='
 
     prompt = MASTER_PROMPT.format(
         product_name=product_name,
+        product_block=product_block,
+        persona_block=persona_block,
+        pattern_block=pattern_block,
         rating=review_params['rating'],
         length_rule=length_rule,
         examples_note=examples_note,
         examples_block=examples_block,
+        mention_rule=mention_rule,
         typo_rule=typo_rule,
         used_texts_block=used_texts_block if used_texts_block else '(لا يوجد سابق)',
     )

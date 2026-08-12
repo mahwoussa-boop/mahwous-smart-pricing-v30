@@ -426,7 +426,7 @@ def _build_cross_sell(current_name, perfumes):
             'وصف النتيجة باختصار كأنها سر مميز.')
 
 
-def _make_master_prompt(persona, product_name, used_block, extra_block=''):
+def _make_master_prompt(persona, product_name, used_block, extra_block='', product=None):
     """بناء البرومبت المتقدم إجبارياً. يرجع (prompt, params).
 
     review_patterns اختياري (له بدائل افتراضية داخل personas_engine)، لكن
@@ -434,7 +434,8 @@ def _make_master_prompt(persona, product_name, used_block, extra_block=''):
     """
     if USE_NEW_PERSONAS:
         params = generate_review_params(persona)
-        result = build_master_prompt(persona, product_name, params, used_block, extra_block)
+        result = build_master_prompt(persona, product_name, params, used_block,
+                                     extra_block, product=product)
         # build_master_prompt returns (prompt, params) tuple
         if isinstance(result, tuple):
             return result
@@ -573,7 +574,7 @@ def _plan_review(persona, pf, perfumes, used_block):
     if context_hints:
         cross += "\n\n## تنبيهات سياقية (التزم بها بحذافيرها):\n- " + "\n- ".join(context_hints)
 
-    return _make_master_prompt(persona, pf['name'], used_block, extra_block=cross)
+    return _make_master_prompt(persona, pf['name'], used_block, extra_block=cross, product=pf)
 
 
 def _make_review_finalizer(persona, allow_words):
@@ -655,7 +656,7 @@ def _ai_reviews(persona, perfumes):
 def _ai_single_review(persona, product):
     """توليد تقييم واحد بالـ AI فقط — يرفع AIUnavailable عند تعذّر الـ AI."""
     used_block = _used_texts_block(limit=15, persona_name=persona.get('name'))
-    prompt, params = _make_master_prompt(persona, product['name'], used_block)
+    prompt, params = _make_master_prompt(persona, product['name'], used_block, product=product)
     rv = _write_review(persona, product, prompt, params)
     _archive_review(rv.get('text', ''), product['name'], persona.get('name', ''))
     return rv

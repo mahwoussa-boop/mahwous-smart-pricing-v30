@@ -462,6 +462,7 @@ def gen_reviews(persona, perfumes):
                 review_params=review_params,
                 used_texts_block=ub,
                 extra_block=extra,
+                product=pf,   # بيانات الكتالوج الحقيقية (ماركة/عائلة/مكوّنات)
             )
             # سقف توكنز وحدّ كلمات من الطول المعاين من بيانات المنافسين (مطابق Flask)
             _tgt = review_params.get('len_target') or 4
