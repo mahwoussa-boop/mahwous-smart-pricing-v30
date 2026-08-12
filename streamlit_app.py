@@ -66,9 +66,10 @@ except ImportError:
     pass
 
 try:
-    from anti_repeat import (get_used_texts as ar_get_used_texts, archive_review, MAX_ARCHIVE,
-                             is_duplicate as ar_is_duplicate, register_text as ar_register_text,
-                             format_used_texts_block as ar_format_used)
+    from anti_repeat import (get_used_texts as ar_get_used_texts, archive_review,
+                             archive_batch as ar_archive_batch, clear_archive as ar_clear_archive,
+                             MAX_ARCHIVE, is_duplicate as ar_is_duplicate,
+                             register_text as ar_register_text, format_used_texts_block as ar_format_used)
     USE_ANTI_REPEAT = True
 except ImportError:
     # بدائل بنفس تواقيع الأصل بالضبط. القديمة كانت تنقص المعاملات التي
@@ -81,6 +82,8 @@ except ImportError:
     def ar_format_used(limit=30, persona_name=None): return ''
     def ar_get_used_texts(limit=40): return []
     def archive_review(review_text, product_name, persona_name): pass
+    def ar_archive_batch(reviews, persona_name): return [False] * len(reviews)
+    def ar_clear_archive(): pass
 
 try:
     from trending import get_trending_brands, get_weight_for_product, blend_selection
@@ -257,14 +260,22 @@ def get_used_texts(limit=40):
     return texts[-limit:]
 
 def archive_batch(reviews, persona_name):
-    """أرشفة دفعة من التقييمات"""
+    """أرشفة دفعة من التقييمات — عبر anti_repeat.archive_batch (فحص التكرار
+    والحفظ الذرّي المحمي بقفل) لا كتابة محلية مباشرة.
+
+    كانت هذه الدالة تقرأ archive.json وتكتبه مباشرة بلا قفل ولا كتابة
+    ذرّية — كتابتان متزامنتان (محاكاة معزولة) كانتا تفقدان إحداهما. الحقل
+    rating لم يعد يُخزَّن (لم يقرأه أي كود فعلياً — تحقّق: بحث شامل بلا نتائج).
+    """
+    if USE_ANTI_REPEAT:
+        ar_archive_batch(reviews, persona_name)
+        return
     arc = load_archive()
     for rv in reviews:
         entry = {
             'text': rv.get('text', ''),
             'product': rv.get('product', ''),
             'persona': persona_name,
-            'rating': rv.get('rating', 5),
             'ts': int(time.time()),
         }
         arc['reviews'].append(entry)
@@ -1203,9 +1214,12 @@ with tab3:
         st.progress(min(arc_len / MAX_ARCHIVE, 1.0),
                     text=f"{arc_len}/{MAX_ARCHIVE} تقييم")
 
-    # مسح الأرشيف
+    # مسح الأرشيف — عبر anti_repeat.clear_archive (كتابة ذرّية محمية بقفل)
     if st.button("🗑️ مسح الأرشيف", key="clear_archive"):
-        save_archive({'reviews': []})
+        if USE_ANTI_REPEAT:
+            ar_clear_archive()
+        else:
+            save_archive({'reviews': []})
         st.success("✅ تم مسح الأرشيف بنجاح")
         st.rerun()
 

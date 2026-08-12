@@ -122,6 +122,55 @@ def test_archive_lock_serializes_the_critical_section():
             f'{fn.__name__}: القفل يجب أن يسبق القراءة والكتابة كلتيهما (دورة كاملة محمية)')
 
 
+def test_streamlit_archive_batch_delegates_to_locked_implementation():
+    """بلاغ مراجعة كودية مُتحقَّق منه: streamlit_app كانت تملك archive_batch
+    محلية مستقلة (تقرأ archive.json وتكتبه مباشرة، بلا قفل ولا كتابة ذرّية)
+    تتجاوز anti_repeat.archive_batch وقفلها كلياً. محاكاة معزولة أثبتت:
+    كتابتان متزامنتان عبرها تفقدان إحداهما (مدخل واحد بدل اثنين).
+
+    الإصلاح: صارت تفوّض إلى anti_repeat.archive_batch (مستوردة كـ
+    ar_archive_batch) بدل الكتابة المحلية المباشرة."""
+    import streamlit_app as st_app
+    import inspect
+    src = inspect.getsource(st_app.archive_batch)
+    assert 'ar_archive_batch' in src, (
+        'streamlit_app.archive_batch لا تزال لا تفوّض لتطبيق anti_repeat المحمي بقفل')
+
+
+def test_streamlit_archive_batch_loses_nothing_under_concurrency():
+    """نفس ضمان test_concurrent_archive_batch_writes_lose_nothing لكن عبر
+    الدالة التي يستدعيها مسار Streamlit الحيّ فعلياً (gen_reviews)، لا
+    anti_repeat.archive_batch مباشرة — يثبت أن الطبقة الوسيطة لا تُعيد فتح
+    الثغرة."""
+    import streamlit_app as st_app
+    ar.reset_session_texts()
+    n = 6
+    errors = []
+    batches = [[_distinct_text(idx * 3 + j) for j in range(3)] for idx in range(n)]
+
+    def worker(idx):
+        try:
+            st_app.archive_batch(
+                [{'text': t, 'product': 'م'} for t in batches[idx]],
+                f'شخص{idx}',
+            )
+        except Exception as e:
+            errors.append((idx, e))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, f'أخطاء أثناء الكتابة المتزامنة: {errors}'
+    arc = json.loads(ar.ARCHIVE_FILE.read_text(encoding='utf-8'))
+    saved = {r['text'] for r in arc['reviews']}
+    expected = {t for batch in batches for t in batch}
+    missing = expected - saved
+    assert not missing, f'كتابات مفقودة تحت التزامن عبر مسار Streamlit: {missing}'
+
+
 def test_check_then_write_race_cannot_insert_two_duplicates():
     """بلاغ مراجعة كودية مُتحقَّق منه: القفل كان يحمي الكتابة فقط، بينما
     is_duplicate يقع قبله وخارجه تماماً. عاملان يفحصان النص نفسه معاً
