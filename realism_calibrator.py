@@ -26,6 +26,11 @@ import re
 import json
 import random
 
+# تطبيع عربي موحّد لإزالة التكرار — نفس المصدر المستخدم في anti_repeat.py
+# (راجع anti_repeat._normalize لتوثيق القرار: توحيد صور الحروف وإسقاط
+# التشكيل/غير العربي). مصدر واحد بدل نسخة محلية قد تتباعد.
+import anti_repeat as _ar
+
 # ═══════════════════════════════════════════════════════════
 #  التوزيع المرصود المُضمَّن — احتياطي إن غاب ملف المنافسين
 #  المصدر: competitor_reviews_full.json، 452 نصًّا، أطوال بالكلمات
@@ -176,8 +181,14 @@ _EXEMPLAR_POOL = None  # كاش الوحدة — يُحمَّل مرة واحد�
 def load_exemplar_pool(path=None):
     """يُرجع [(عدد_كلمات, نص)] من نصوص المنافسين الحقيقية النظيفة.
 
-    يصفّي: نص غير فارغ، يحوي حروفاً عربية، ويزيل التكرار مع الحفاظ على الترتيب.
+    يصفّي: نص غير فارغ، يحوي حروفاً عربية، ويزيل التكرار (بعد التطبيع
+    العربي — لا التطابق الحرفي فقط) مع الحفاظ على الترتيب.
     من competitor_reviews_full.json (الكشط الشامل) أولاً ثم القديم، وإلا [].
+
+    التطبيع ضروري هنا لا رفاهية: «اصلي 100%» و«اصلى 100‎%‎» أو
+    «جميل جدا/جميل جداً/جميل جدًا» نصوص متطابقة معنى تختلف شكلاً فقط —
+    التطابق الحرفي القديم كان يُبقيهما «فريدين»، فيمكن أن يصل كلاهما لنفس
+    البرومبت الواحد كمثالين مختلفين (رُصد فعلياً عبر عيّنات عشوائية متعددة).
     """
     for p in ([path] if path else _SOURCE_CHAIN):
         try:
@@ -188,9 +199,12 @@ def load_exemplar_pool(path=None):
             for r in reviews:
                 txt = (r.get('text') if isinstance(r, dict) else str(r)) or ''
                 txt = txt.strip()
-                if not txt or not _ARABIC_RE.search(txt) or txt in seen:
+                if not txt or not _ARABIC_RE.search(txt):
                     continue
-                seen.add(txt)
+                key = _ar._normalize(txt)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
                 pool.append((len(txt.split()), txt))
             if len(pool) >= 30:  # عيّنة معقولة
                 return pool

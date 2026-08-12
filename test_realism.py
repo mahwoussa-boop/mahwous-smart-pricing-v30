@@ -6,6 +6,7 @@
 """
 import random
 
+import anti_repeat as ar
 import realism_calibrator as rc
 from personas_engine import generate_persona, generate_review_params, build_master_prompt
 
@@ -86,6 +87,32 @@ def test_exemplar_pool_loads_real_texts():
     texts = [t for _, t in pool]
     assert len(texts) == len(set(texts))        # لا تكرار
     assert all(re.search('[؀-ۿ]', t) for _, t in pool[:50])  # عربي فعلي
+
+
+def test_exemplar_pool_dedupes_after_normalization_not_just_literal():
+    """انحدار حرج: بلاغ مراجعة كودية — التطابق الحرفي وحده كان يُبقي
+    «اصلي 100%»/«اصلى 100‎%‎» و«جميل جدا»/«جميل جداً»/«جميل جدًا» كأمثلة
+    «فريدة» منفصلة، فيصل بعضها معاً لنفس البرومبت كمثالين مختلفين شكلاً
+    فقط لا معنى (رُصد فعلياً عبر بذور عشوائية عدّة)."""
+    pool = rc.load_exemplar_pool()
+    texts = [t for _, t in pool]
+    normalized = [ar._normalize(t) for t in texts]
+    dup_groups = {}
+    for t, n in zip(texts, normalized):
+        dup_groups.setdefault(n, []).append(t)
+    dups = {n: v for n, v in dup_groups.items() if len(v) > 1}
+    assert not dups, f'بقيت مجموعات مكرّرة بعد التطبيع: {list(dups.items())[:3]}'
+
+
+def test_sampled_exemplars_never_collide_after_normalization():
+    """أوسع من الاختبار أعلاه: حتى داخل نداء sample_exemplars واحد، لا
+    نصّين مطابقين بعد التطبيع (لا فقط مصدر البركة)."""
+    for seed in range(50):
+        random.seed(seed)
+        ex = rc.sample_exemplars(target_len=2, n=8)
+        norms = [ar._normalize(t) for t in ex]
+        assert len(set(norms)) == len(norms), (
+            f'seed={seed}: أمثلة مكررة بعد التطبيع وصلت لنفس البرومبت: {ex}')
 
 
 def test_sample_exemplars_biased_to_length():
