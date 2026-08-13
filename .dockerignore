@@ -1,5 +1,41 @@
+# الأسرار والبيئة المحلية
 .env
 .venv
+venv
+.streamlit/secrets.toml
+
+# مخلّفات بايثون والاختبارات
 __pycache__
+*.py[cod]
+.pytest_cache
+
+# git وسجلّات التشغيل
 .git
+.gitignore
 *.log
+
+# واجهة Next.js — مستودع مستقل لا علاقة له بصورة بايثون.
+# كانت وحدها 861 MB من سياق بناء بلغ 1.35 GB (node_modules) — تُنقل لكل بناء بلا فائدة.
+sites_app/
+node_modules
+
+# مخلّفات نقل/نسخ احتياطية — ليست جزءاً من التشغيل
+_transfer.bundle
+_transfer.patch
+apply_archive_bootstrap.ps1
+catalog_backup.json
+archive.json.bak-*
+archive.json.corrupt-*
+
+# أرشيف المالك الحيّ: مُتجاهَل في .gitignore أصلاً، فاستبعاده هنا يجعل البناء
+# المحلي مطابقاً لبناء Northflank من git. المسار المقصود على الحجم الدائم هو
+# _seed_archive_if_missing() الذي يستعيد من archive_seed.json عند غيابه.
+archive.json
+
+# أدوات محلية
+.claude/
+skill_staging/
+playwright-report/
+test-results/
+.DS_Store
+Thumbs.db

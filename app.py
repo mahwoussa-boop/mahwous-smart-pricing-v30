@@ -1511,6 +1511,36 @@ def api_generate_thread():
     })
 
 
+# Restore a validated bundled archive only when the persistent volume is fresh.
+# Existing persistent data is never overwritten; replacement imports are handled separately.
+def _seed_archive_if_missing():
+    target = DATA_DIR / "archive.json"
+    seed = BASE_DIR / "archive_seed.json"
+    if target.exists() or not seed.is_file():
+        return
+
+    staged = target.with_name(".{}.seed-{}.tmp".format(target.name, os.getpid()))
+    try:
+        with open(seed, "r", encoding="utf-8") as source_file:
+            payload = json.load(source_file)
+        if not isinstance(payload, dict) or not isinstance(payload.get("reviews"), list):
+            print("Archive seed rejected: expected a reviews list", flush=True)
+            return
+        with open(staged, "w", encoding="utf-8") as staged_file:
+            json.dump(payload, staged_file, ensure_ascii=False, indent=2)
+            staged_file.flush()
+            os.fsync(staged_file.fileno())
+        os.replace(staged, target)
+        print("Archive seed restored: {} reviews".format(len(payload["reviews"])), flush=True)
+    except Exception as error:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+        print("Archive seed not restored: {}".format(error), flush=True)
+
+_seed_archive_if_missing()
+
 if __name__ == '__main__':
     arc = _load_archive()
     print('='*50)
